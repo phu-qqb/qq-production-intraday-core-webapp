@@ -5,19 +5,16 @@ namespace TradingDaemon.Services;
 public class SchedulerService : IHostedService
 {
     private readonly ISchedulerFactory _schedulerFactory;
-    private readonly IServiceProvider _provider;
     private IScheduler? _scheduler;
 
-    public SchedulerService(ISchedulerFactory schedulerFactory, IServiceProvider provider)
+    public SchedulerService(ISchedulerFactory schedulerFactory)
     {
         _schedulerFactory = schedulerFactory;
-        _provider = provider;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
         _scheduler = await _schedulerFactory.GetScheduler(cancellationToken);
-        _scheduler.JobFactory = new MicrosoftDependencyInjectionJobFactory(_provider);
 
         var job = JobBuilder.Create<TradingJob>().WithIdentity("TradingJob").Build();
         var cron = "0 0/30 7-19 ? * *";
