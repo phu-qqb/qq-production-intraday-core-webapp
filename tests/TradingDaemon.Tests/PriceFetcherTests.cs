@@ -1,3 +1,4 @@
+using Xunit;
 using Moq;
 using Moq.Protected;
 using System.Net;

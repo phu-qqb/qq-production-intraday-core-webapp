@@ -1,3 +1,4 @@
+using Xunit;
 using TradingDaemon.Services;
 
 public class ProcessRunnerTests
