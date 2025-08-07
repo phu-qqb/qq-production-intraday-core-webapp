@@ -20,6 +20,11 @@ jobs:
           dotnet-version: '8.0.x'
           package-type: 'sdk'
 
+
+      - name: Verify .NET SDKs
+        run: dotnet --list-sdks
+
+
       - name: Restore dependencies
         run: dotnet restore src/TradingDaemon/TradingDaemon.csproj
 
