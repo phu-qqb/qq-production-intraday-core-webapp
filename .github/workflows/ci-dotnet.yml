@@ -1,0 +1,29 @@
+name: CI .NET
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Setup .NET 8 SDK
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: '8.0.x'
+          package-type: 'sdk'
+
+      - name: Restore dependencies
+        run: dotnet restore src/TradingDaemon/TradingDaemon.csproj
+
+      - name: Build
+        run: dotnet build src/TradingDaemon/TradingDaemon.csproj --no-restore --configuration Release
+
+      - name: Run unit tests
+        run: dotnet test tests/TradingDaemon.Tests/TradingDaemon.Tests.csproj --no-build --configuration Release --verbosity normal
