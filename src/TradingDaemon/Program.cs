@@ -1,4 +1,3 @@
-using Quartz;
 using Serilog;
 using TradingDaemon.Controllers;
 using TradingDaemon.Data;
@@ -27,9 +26,6 @@ builder.Services.AddTransient<PriceFetcher>();
 builder.Services.AddTransient<WeightCalculator>();
 builder.Services.AddTransient<OrderSender>();
 
-builder.Services.AddQuartz(q => q.UseMicrosoftDependencyInjectionJobFactory());
-
-builder.Services.AddHostedService<SchedulerService>();
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
@@ -46,5 +42,6 @@ if (app.Environment.IsDevelopment())
 }
 
 app.MapFillEndpoints();
+app.MapTradingEndpoints();
 
 app.Run();
