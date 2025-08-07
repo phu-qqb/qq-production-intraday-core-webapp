@@ -1,3 +1,4 @@
+using Xunit;
 using Moq;
 using Quartz;
 using TradingDaemon.Services;
