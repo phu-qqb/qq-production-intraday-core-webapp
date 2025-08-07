@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.OpenApi;
 using TradingDaemon.Services;
 
 namespace TradingDaemon.Controllers;
