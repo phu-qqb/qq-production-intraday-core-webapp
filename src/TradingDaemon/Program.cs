@@ -30,8 +30,16 @@ builder.Services.AddTransient<OrderSender>();
 builder.Services.AddQuartz(q => q.UseMicrosoftDependencyInjectionJobFactory());
 
 builder.Services.AddHostedService<SchedulerService>();
+builder.Services.AddEndpointsApiExplorer();
+builder.Services.AddSwaggerGen();
 
 var app = builder.Build();
+
+if (app.Environment.IsDevelopment())
+{
+    app.UseSwagger();
+    app.UseSwaggerUI();
+}
 
 app.MapFillEndpoints();
 
