@@ -150,7 +150,8 @@ def read_price_bars(
     lo = start.hour * 60 + start.minute
     hi = end.hour * 60 + end.minute
     mask = minutes.between(lo, hi)
-    df = df[mask]
+    df = df[mask].copy()
+    df["timestamp"] = ts[mask]
     return df
 
 # ---------- CLI ----------
