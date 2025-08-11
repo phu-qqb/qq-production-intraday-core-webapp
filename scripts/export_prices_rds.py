@@ -55,7 +55,7 @@ def get_conn_from_secret(
 
     driver = quote_plus(data.get("driver", default_driver))
     return (
-        f"mssql+pyodbc://{user}:{password}@{host}:{port}/{db}?driver={driver}"
+        f"mssql+pyodbc://{user}:{password}@{host}:{port}/{db}?driver={driver}&Encrypt=no"
     )
 
 def parse_range(value: str) -> tuple[int, int]:
@@ -164,7 +164,7 @@ cli.add_argument(
 )
 cli.add_argument(
     "--driver",
-    default="ODBC Driver 18 for SQL Server",
+    default="ODBC Driver 17 for SQL Server",
     help="ODBC driver name to use when connecting via pyodbc",
 )
 cli.add_argument("--offset", type=int, default=0)
