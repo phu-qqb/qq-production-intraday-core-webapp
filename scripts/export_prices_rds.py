@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Export A-I files for a set of securities using data from SQL Server.
+"""Export pricing files for a set of securities using data from SQL Server.
 
 This is adapted from the S3-based export script but pulls intraday bars
 from an MS SQL database instead of parquet files in S3.
@@ -8,7 +8,6 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
-import random
 import sys
 from typing import List
 
@@ -58,22 +57,6 @@ def get_conn_from_secret(
         f"mssql+pyodbc://{user}:{password}@{host}:{port}/{db}?driver={driver}&Encrypt=no"
     )
 
-def parse_range(value: str) -> tuple[int, int]:
-    """Return a ``(min, max)`` tuple from ``value``.
-
-    ``value`` may be a single integer or a ``MIN-MAX``/``MIN,MAX`` range.
-    """
-    if "," in value:
-        lo, hi = value.split(",", 1)
-    elif "-" in value:
-        lo, hi = value.split("-", 1)
-    else:
-        n = int(value)
-        return n, n
-    a, b = int(lo), int(hi)
-    if a > b:
-        a, b = b, a
-    return a, b
 
 def check_long_gaps(ts: pd.Series, limit_days: int = 5) -> None:
     days = (
@@ -119,7 +102,6 @@ def read_price_bars(
     engine: sa.engine.Engine,
     security_id: int,
     start: str | None,
-    end: str | None,
     session: str,
     timeframe: int = 30,
 ) -> pd.DataFrame:
@@ -132,9 +114,6 @@ def read_price_bars(
     if start:
         sql += " AND BarTimeUtc >= :start"
         params["start"] = start
-    if end:
-        sql += " AND BarTimeUtc <= :end"
-        params["end"] = end
     sql += " ORDER BY BarTimeUtc"
     df = pd.read_sql(sa.text(sql), engine, params=params)
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
@@ -167,23 +146,8 @@ cli.add_argument(
     default="ODBC Driver 17 for SQL Server",
     help="ODBC driver name to use when connecting via pyodbc",
 )
-cli.add_argument("--offset", type=int, default=0)
-cli.add_argument("--limit", type=int, default=50)
-cli.add_argument("--symbols-file")
+cli.add_argument("--symbols-file", required=True)
 cli.add_argument("--start")
-cli.add_argument("--end")
-cli.add_argument("--seed", type=int, default=42)
-cli.add_argument("--subN", type=int, default=150)
-cli.add_argument(
-    "--count",
-    type=str,
-    help=(
-        "Securities per subscriber in F.txt. Provide a single integer for a "
-        "fixed size or MIN-MAX to randomise each sub-universe. If omitted, a "
-        "random size between min(10, n-2) and n - min(10, n-2) is used "
-        "where n is the universe size."
-    ),
-)
 args = cli.parse_args()
 
 conn_str = args.conn or get_conn_from_secret(args.secret_name, args.region, args.driver)
@@ -192,33 +156,21 @@ engine = sa.create_engine(conn_str)
 universe_name, universe_ids = get_universe_info(engine, args.universe)
 output_dir = pathlib.Path("src/TradingDaemon/Data/Universes") / universe_name
 output_dir.mkdir(parents=True, exist_ok=True)
-OUT = {k: output_dir / f"{k}.txt" for k in "ABCDEFGHI"}
+OUT = {k: output_dir / f"{k}.txt" for k in "ABCDGHI"}
 for path in OUT.values():
     if path.exists():
         path.unlink()
 
 def load_security_ids(universe_ids: List[int]) -> List[int]:
-    if args.symbols_file:
-        with open(args.symbols_file) as fh:
-            wanted = {int(ln.strip()) for ln in fh if ln.strip()}
-        subset = [sid for sid in universe_ids if sid in wanted]
-        print(f"Loaded {len(subset)} securities from {args.symbols_file}")
-    else:
-        subset = universe_ids[args.offset : args.offset + args.limit]
+    with open(args.symbols_file) as fh:
+        wanted = {int(ln.strip()) for ln in fh if ln.strip()}
+    subset = [sid for sid in universe_ids if sid in wanted]
+    print(f"Loaded {len(subset)} securities from {args.symbols_file}")
     return subset
 
 subset = load_security_ids(universe_ids)
 if not subset:
     sys.exit("No securities selected")
-
-min_sub_size = max(1, min(10, len(subset) - 2))
-count_range = None
-if args.count is not None:
-    count_range = parse_range(args.count)
-    if count_range[0] < min_sub_size:
-        cli.error(f"--count must be >= {min_sub_size}")
-
-rng = random.Random(args.seed)
 sec_ids: List[int] = []
 all_ts: set[pd.Timestamp] = set()
 first_G = True
@@ -230,7 +182,7 @@ for real_sid in subset:
     sec_ids.append(sid)
     print("→", real_sid)
 
-    df_raw = read_price_bars(engine, real_sid, args.start, args.end, args.session)
+    df_raw = read_price_bars(engine, real_sid, args.start, args.session)
     check_long_gaps(df_raw["timestamp"], 5)
     if df_raw.empty:
         continue
@@ -249,7 +201,7 @@ for real_sid in subset:
         frame(sid, raw).to_csv(OUT["G"], header=False, index=False)
         first_G = False
 
-# Auxiliary B C D E F
+# Auxiliary B C D
 pd.Series(sec_ids).to_csv(OUT["B"], header=False, index=False)
 
 ts_sorted = sorted(all_ts)
@@ -259,22 +211,4 @@ with OUT["C"].open("w") as fhc:
         for sid in sec_ids:
             fhc.write(f"{sid},{t}\n")
 
-subs = list(range(21000, 21000 + args.subN))
-pd.Series(subs).to_csv(OUT["E"], header=False, index=False)
-with OUT["F"].open("w") as fhf:
-    for su in subs:
-        if count_range is not None:
-            lo, hi = count_range
-            hi = min(hi, len(sec_ids))
-            lo = min(lo, hi)
-            k = rng.randint(lo, hi)
-            chosen = sec_ids if k >= len(sec_ids) else rng.sample(sec_ids, k)
-        else:
-            k = rng.randint(
-                min_sub_size, max(min_sub_size, len(sec_ids) - min_sub_size)
-            )
-            chosen = rng.sample(sec_ids, k)
-        for sid in chosen:
-            fhf.write(f"{su},{sid}\n")
-
-print("✅  A–I.txt générés")
+print("✅  Export complete")
