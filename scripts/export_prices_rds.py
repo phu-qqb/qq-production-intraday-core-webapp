@@ -242,17 +242,13 @@ sub_ids, sub_members = get_subuniverse_data(engine, universe_id)
 pd.Series(sub_ids).to_csv(OUT["E"], header=False, index=False)
 sub_members.to_csv(OUT["F"], header=False, index=False)
 
-sec_ids: List[int] = []
 all_ts: set[pd.Timestamp] = set()
 first_G = True
 sid_next = 100000
-membership_by_sid: dict[int, List[tuple[pd.Timestamp, pd.Timestamp]]] = {}
 
 for real_sid in universe_ids:
     sid = sid_next
     sid_next += 1
-    sec_ids.append(sid)
-    membership_by_sid[sid] = membership_by_real_sid.get(real_sid, [])
     print("→", real_sid)
 
     df_raw = read_price_bars(
@@ -283,17 +279,17 @@ for real_sid in universe_ids:
         first_G = False
 
 # Auxiliary B C D
-pd.Series(sec_ids).to_csv(OUT["B"], header=False, index=False)
+pd.Series(universe_ids).to_csv(OUT["B"], header=False, index=False)
 
 ts_sorted = sorted(all_ts)
 ts_fmt = pd.to_datetime(ts_sorted).strftime(FMT)
 pd.Series(ts_fmt).to_csv(OUT["D"], header=False, index=False)
 with OUT["C"].open("w") as fhc:
     for t, t_str in zip(ts_sorted, ts_fmt):
-        for sid, intervals in membership_by_sid.items():
+        for real_sid, intervals in membership_by_real_sid.items():
             for start, end in intervals:
                 if start <= t <= end:
-                    fhc.write(f"{sid},{t_str}\n")
+                    fhc.write(f"{real_sid},{t_str}\n")
                     break
 
 print("✅  Export complete")
