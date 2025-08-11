@@ -147,6 +147,12 @@ cli.add_argument(
     help="ODBC driver name to use when connecting via pyodbc",
 )
 cli.add_argument("--start")
+cli.add_argument(
+    "--timeframe",
+    type=int,
+    default=60,
+    help="Bar timeframe in minutes (TimeframeMinute)",
+)
 args = cli.parse_args()
 
 conn_str = args.conn or get_conn_from_secret(args.secret_name, args.region, args.driver)
@@ -173,13 +179,13 @@ for real_sid in universe_ids:
     sec_ids.append(sid)
     print("→", real_sid)
 
-    df_raw = read_price_bars(engine, real_sid, args.start, args.session)
+    df_raw = read_price_bars(engine, real_sid, args.start, args.session, args.timeframe)
     check_long_gaps(df_raw["timestamp"], 5)
     if df_raw.empty:
         continue
 
     raw = df_raw.set_index("timestamp")["close"]
-    flat = raw.resample("30T").ffill()
+    flat = raw.resample(f"{args.timeframe}T").ffill()
     all_ts.update(raw.index)
 
     frame(sid, flat).to_csv(OUT["A"], mode="a", header=False, index=False)
