@@ -29,7 +29,9 @@ SESSION_HOURS_UTC = {
 }
 
 
-def get_conn_from_secret(secret_name: str, region_name: str) -> str:
+def get_conn_from_secret(
+    secret_name: str, region_name: str, default_driver: str
+) -> str:
     """Return an SQLAlchemy connection string from AWS Secrets Manager."""
     session = boto3.session.Session()
     client = session.client(service_name="secretsmanager", region_name=region_name)
@@ -50,7 +52,8 @@ def get_conn_from_secret(secret_name: str, region_name: str) -> str:
     host = data.get("host")
     port = data.get("port", 1433)
     db = quote_plus(data.get("dbname") or data.get("database") or "")
-    driver = quote_plus(data.get("driver", "ODBC Driver 18 for SQL Server"))
+
+    driver = quote_plus(data.get("driver", default_driver))
     return (
         f"mssql+pyodbc://{user}:{password}@{host}:{port}/{db}?driver={driver}"
     )
@@ -159,6 +162,11 @@ cli.add_argument(
     default="eu-west-2",
     help="AWS region where the secret is stored",
 )
+cli.add_argument(
+    "--driver",
+    default="ODBC Driver 18 for SQL Server",
+    help="ODBC driver name to use when connecting via pyodbc",
+)
 cli.add_argument("--offset", type=int, default=0)
 cli.add_argument("--limit", type=int, default=50)
 cli.add_argument("--symbols-file")
@@ -178,7 +186,7 @@ cli.add_argument(
 )
 args = cli.parse_args()
 
-conn_str = args.conn or get_conn_from_secret(args.secret_name, args.region)
+conn_str = args.conn or get_conn_from_secret(args.secret_name, args.region, args.driver)
 engine = sa.create_engine(conn_str)
 
 universe_name, universe_ids = get_universe_info(engine, args.universe)
