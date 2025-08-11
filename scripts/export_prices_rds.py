@@ -244,11 +244,9 @@ sub_members.to_csv(OUT["F"], header=False, index=False)
 
 all_ts: set[pd.Timestamp] = set()
 first_G = True
-sid_next = 100000
 
 for real_sid in universe_ids:
-    sid = sid_next
-    sid_next += 1
+    sid = real_sid
     print("→", real_sid)
 
     df_raw = read_price_bars(
