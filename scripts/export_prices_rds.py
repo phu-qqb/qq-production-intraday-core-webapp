@@ -154,6 +154,36 @@ def read_price_bars(
     df["timestamp"] = ts[mask]
     return df
 
+
+def read_flat_bars(
+    engine: sa.engine.Engine,
+    security_id: int,
+    start: str | None,
+    session: str,
+    timeframe: int = 60,
+) -> pd.DataFrame:
+    params = {"sid": security_id, "tf": timeframe}
+    sql = (
+        "SELECT BarTimeUtc AS timestamp, [Close] AS [close] "
+        "FROM Intraday.mkt.FlatBar "
+        "WHERE SecurityId = :sid AND TimeframeMinute = :tf"
+    )
+    if start:
+        sql += " AND BarTimeUtc >= :start"
+        params["start"] = start
+    sql += " ORDER BY BarTimeUtc"
+    df = pd.read_sql(sa.text(sql), engine, params=params)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    start_t, end_t = SESSION_HOURS_NY[session]
+    ts = df["timestamp"].dt.tz_convert("America/New_York")
+    minutes = ts.dt.hour * 60 + ts.dt.minute
+    lo = start_t.hour * 60 + start_t.minute
+    hi = end_t.hour * 60 + end_t.minute
+    mask = minutes.between(lo, hi)
+    df = df[mask].copy()
+    df["timestamp"] = ts[mask]
+    return df
+
 # ---------- CLI ----------
 cli = argparse.ArgumentParser()
 cli.add_argument("--session", choices=["US", "EU", "EUUS", "ALL"], default="EUUS")
@@ -215,13 +245,21 @@ for real_sid in universe_ids:
     sec_ids.append(sid)
     print("→", real_sid)
 
-    df_raw = read_price_bars(engine, real_sid, args.start, args.session, args.timeframe)
+    df_raw = read_price_bars(
+        engine, real_sid, args.start, args.session, args.timeframe
+    )
     check_long_gaps(df_raw["timestamp"], 5)
     if df_raw.empty:
         continue
 
+    df_flat = read_flat_bars(
+        engine, real_sid, args.start, args.session, args.timeframe
+    )
+    if df_flat.empty:
+        continue
+
     raw = df_raw.set_index("timestamp")["close"]
-    flat = raw.resample(f"{args.timeframe}T").ffill()
+    flat = df_flat.set_index("timestamp")["close"]
     all_ts.update(raw.index)
 
     frame(sid, flat).to_csv(OUT["A"], mode="a", header=False, index=False)
@@ -231,7 +269,7 @@ for real_sid in universe_ids:
     fraw.to_csv(OUT["I"], mode="a", header=False, index=False)
 
     if first_G:
-        frame(sid, raw).to_csv(OUT["G"], header=False, index=False)
+        fraw.to_csv(OUT["G"], header=False, index=False)
         first_G = False
 
 # Auxiliary B C D
