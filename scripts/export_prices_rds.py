@@ -89,7 +89,7 @@ def get_universe_info(
         SELECT u.Name, um.SecurityId
         FROM Intraday.univ.Universe u
         JOIN Intraday.univ.UniverseMember um ON u.UniverseId = um.UniverseId
-        WHERE u.Description = :desc
+        WHERE u.Name = :desc
         """
     )
     df = pd.read_sql(query, engine, params={"desc": description})
@@ -107,7 +107,7 @@ def read_price_bars(
 ) -> pd.DataFrame:
     params = {"sid": security_id, "tf": timeframe}
     sql = (
-        "SELECT BarTimeUtc AS timestamp, Close AS close "
+        "SELECT BarTimeUtc AS timestamp, [Close[] AS [close] "
         "FROM Intraday.mkt.PriceBar "
         "WHERE SecurityId = :sid AND TimeframeMinute = :tf"
     )
