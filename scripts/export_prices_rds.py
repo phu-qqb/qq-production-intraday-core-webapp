@@ -103,7 +103,7 @@ def read_price_bars(
     security_id: int,
     start: str | None,
     session: str,
-    timeframe: int = 30,
+    timeframe: int = 60,
 ) -> pd.DataFrame:
     params = {"sid": security_id, "tf": timeframe}
     sql = (
