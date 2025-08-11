@@ -146,7 +146,6 @@ cli.add_argument(
     default="ODBC Driver 17 for SQL Server",
     help="ODBC driver name to use when connecting via pyodbc",
 )
-cli.add_argument("--symbols-file", required=True)
 cli.add_argument("--start")
 args = cli.parse_args()
 
@@ -161,22 +160,14 @@ for path in OUT.values():
     if path.exists():
         path.unlink()
 
-def load_security_ids(universe_ids: List[int]) -> List[int]:
-    with open(args.symbols_file) as fh:
-        wanted = {int(ln.strip()) for ln in fh if ln.strip()}
-    subset = [sid for sid in universe_ids if sid in wanted]
-    print(f"Loaded {len(subset)} securities from {args.symbols_file}")
-    return subset
-
-subset = load_security_ids(universe_ids)
-if not subset:
+if not universe_ids:
     sys.exit("No securities selected")
 sec_ids: List[int] = []
 all_ts: set[pd.Timestamp] = set()
 first_G = True
 sid_next = 100000
 
-for real_sid in subset:
+for real_sid in universe_ids:
     sid = sid_next
     sid_next += 1
     sec_ids.append(sid)
