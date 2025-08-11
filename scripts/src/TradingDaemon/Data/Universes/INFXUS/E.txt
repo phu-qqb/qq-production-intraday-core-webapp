@@ -1,2 +1,0 @@
-# TODO: Populate with SubUniverseId values for universe INFXUS.
-# Run SQL: SELECT SubUniverseId FROM Intraday.univ.SubUniverse WHERE UniverseId = <UniverseId>;
