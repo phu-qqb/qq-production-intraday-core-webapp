@@ -8,13 +8,14 @@ from __future__ import annotations
 import argparse
 import pathlib
 import random
+import sys
 from typing import List
 
 import pandas as pd
 import sqlalchemy as sa
 
 FMT = "%Y-%m-%d %H:%M"
-OUT = {k: pathlib.Path(f"{k}.txt") for k in "ABCDEFGHI"}
+OUT: dict[str, pathlib.Path]
 
 SESSION_HOURS_UTC = {
     "US": (13, 21),  # 13:00-21:00 UTC ~ 9:00-17:00 ET
@@ -63,17 +64,22 @@ def frame(sec_id: int, ser: pd.Series) -> pd.DataFrame:
     df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.strftime(FMT)
     return df
 
-def get_universe_members(engine: sa.engine.Engine, description: str) -> List[int]:
+def get_universe_info(
+    engine: sa.engine.Engine, description: str
+) -> tuple[str, List[int]]:
     query = sa.text(
         """
-        SELECT um.SecurityId
+        SELECT u.Name, um.SecurityId
         FROM Intraday.univ.Universe u
         JOIN Intraday.univ.UniverseMember um ON u.UniverseId = um.UniverseId
         WHERE u.Description = :desc
         """
     )
     df = pd.read_sql(query, engine, params={"desc": description})
-    return df["SecurityId"].tolist()
+    if df.empty:
+        return description, []
+    name = df["Name"].iloc[0]
+    return name, df["SecurityId"].tolist()
 
 def read_price_bars(
     engine: sa.engine.Engine,
@@ -130,8 +136,15 @@ args = cli.parse_args()
 
 engine = sa.create_engine(args.conn)
 
-def load_security_ids() -> List[int]:
-    universe_ids = get_universe_members(engine, args.universe)
+universe_name, universe_ids = get_universe_info(engine, args.universe)
+output_dir = pathlib.Path("src/TradingDaemon/Data/Universes") / universe_name
+output_dir.mkdir(parents=True, exist_ok=True)
+OUT = {k: output_dir / f"{k}.txt" for k in "ABCDEFGHI"}
+for path in OUT.values():
+    if path.exists():
+        path.unlink()
+
+def load_security_ids(universe_ids: List[int]) -> List[int]:
     if args.symbols_file:
         with open(args.symbols_file) as fh:
             wanted = {int(ln.strip()) for ln in fh if ln.strip()}
@@ -141,7 +154,7 @@ def load_security_ids() -> List[int]:
         subset = universe_ids[args.offset : args.offset + args.limit]
     return subset
 
-subset = load_security_ids()
+subset = load_security_ids(universe_ids)
 if not subset:
     sys.exit("No securities selected")
 
