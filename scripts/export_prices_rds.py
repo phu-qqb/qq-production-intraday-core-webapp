@@ -6,11 +6,14 @@ from an MS SQL database instead of parquet files in S3.
 """
 from __future__ import annotations
 import argparse
+import json
 import pathlib
 import random
 import sys
 from typing import List
 
+import boto3
+from botocore.exceptions import ClientError
 import pandas as pd
 import sqlalchemy as sa
 
@@ -23,6 +26,33 @@ SESSION_HOURS_UTC = {
     "EUUS": (7, 21),
     "ALL": (0, 24),
 }
+
+
+def get_conn_from_secret(secret_name: str, region_name: str) -> str:
+    """Return an SQLAlchemy connection string from AWS Secrets Manager."""
+    session = boto3.session.Session()
+    client = session.client(service_name="secretsmanager", region_name=region_name)
+    try:
+        resp = client.get_secret_value(SecretId=secret_name)
+    except ClientError as exc:
+        raise RuntimeError(f"Failed to retrieve secret {secret_name}") from exc
+
+    secret_str = resp.get("SecretString", "")
+    data = json.loads(secret_str)
+
+    # Allow the secret to contain a full connection string or components.
+    if "conn" in data:
+        return data["conn"]
+
+    user = data.get("username")
+    password = data.get("password")
+    host = data.get("host")
+    port = data.get("port", 1433)
+    db = data.get("dbname") or data.get("database") or ""
+    driver = data.get("driver", "ODBC Driver 18 for SQL Server")
+    return (
+        f"mssql+pyodbc://{user}:{password}@{host}:{port}/{db}?driver={driver}"
+    )
 
 def parse_range(value: str) -> tuple[int, int]:
     """Return a ``(min, max)`` tuple from ``value``.
@@ -114,7 +144,20 @@ def read_price_bars(
 cli = argparse.ArgumentParser()
 cli.add_argument("--session", choices=["US", "EU", "EUUS", "ALL"], default="EUUS")
 cli.add_argument("--universe", required=True, help="Universe description")
-cli.add_argument("--conn", required=True, help="SQLAlchemy connection string")
+cli.add_argument(
+    "--conn",
+    help="SQLAlchemy connection string (overrides AWS secret if provided)",
+)
+cli.add_argument(
+    "--secret-name",
+    default="qq-intraday-credentials",
+    help="AWS Secrets Manager name containing DB credentials",
+)
+cli.add_argument(
+    "--region",
+    default="eu-west-2",
+    help="AWS region where the secret is stored",
+)
 cli.add_argument("--offset", type=int, default=0)
 cli.add_argument("--limit", type=int, default=50)
 cli.add_argument("--symbols-file")
@@ -134,7 +177,8 @@ cli.add_argument(
 )
 args = cli.parse_args()
 
-engine = sa.create_engine(args.conn)
+conn_str = args.conn or get_conn_from_secret(args.secret_name, args.region)
+engine = sa.create_engine(conn_str)
 
 universe_name, universe_ids = get_universe_info(engine, args.universe)
 output_dir = pathlib.Path("src/TradingDaemon/Data/Universes") / universe_name
