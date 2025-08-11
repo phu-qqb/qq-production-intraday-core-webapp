@@ -16,6 +16,7 @@ import boto3
 from botocore.exceptions import ClientError
 import pandas as pd
 import sqlalchemy as sa
+from urllib.parse import quote_plus
 
 FMT = "%Y-%m-%d %H:%M"
 OUT: dict[str, pathlib.Path]
@@ -44,12 +45,12 @@ def get_conn_from_secret(secret_name: str, region_name: str) -> str:
     if "conn" in data:
         return data["conn"]
 
-    user = data.get("username")
-    password = data.get("password")
+    user = quote_plus(data.get("username", ""))
+    password = quote_plus(data.get("password", ""))
     host = data.get("host")
     port = data.get("port", 1433)
-    db = data.get("dbname") or data.get("database") or ""
-    driver = data.get("driver", "ODBC Driver 18 for SQL Server")
+    db = quote_plus(data.get("dbname") or data.get("database") or "")
+    driver = quote_plus(data.get("driver", "ODBC Driver 18 for SQL Server"))
     return (
         f"mssql+pyodbc://{user}:{password}@{host}:{port}/{db}?driver={driver}"
     )
