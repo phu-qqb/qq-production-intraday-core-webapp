@@ -9,6 +9,7 @@ import argparse
 import json
 import pathlib
 import sys
+from datetime import time
 from typing import List
 
 import boto3
@@ -20,11 +21,12 @@ from urllib.parse import quote_plus
 FMT = "%Y-%m-%d %H:%M"
 OUT: dict[str, pathlib.Path]
 
-SESSION_HOURS_UTC = {
-    "US": (13, 21),  # 13:00-21:00 UTC ~ 9:00-17:00 ET
-    "EU": (7, 16),   # 07:00-16:00 UTC
-    "EUUS": (7, 21),
-    "ALL": (0, 24),
+# Session boundaries defined in New York time (handles daylight saving)
+SESSION_HOURS_NY = {
+    "US": (time(9, 30), time(15, 59)),
+    "EU": (time(2, 0), time(8, 59)),
+    "EUUS": (time(2, 0), time(11, 59)),
+    "ALL": (time(2, 0), time(15, 59)),
 }
 
 
@@ -142,10 +144,13 @@ def read_price_bars(
     sql += " ORDER BY BarTimeUtc"
     df = pd.read_sql(sa.text(sql), engine, params=params)
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-    if session != "ALL":
-        lo, hi = SESSION_HOURS_UTC[session]
-        mask = df["timestamp"].dt.hour.between(lo, hi - 1)
-        df = df[mask]
+    start, end = SESSION_HOURS_NY[session]
+    ts = df["timestamp"].dt.tz_convert("America/New_York")
+    minutes = ts.dt.hour * 60 + ts.dt.minute
+    lo = start.hour * 60 + start.minute
+    hi = end.hour * 60 + end.minute
+    mask = minutes.between(lo, hi)
+    df = df[mask]
     return df
 
 # ---------- CLI ----------
