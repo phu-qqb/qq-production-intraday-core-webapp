@@ -1,0 +1,3 @@
+# TODO: Populate with SubUniverseId,SecurityId pairs for each subuniverse in universe INFXUS.
+# Run SQL: SELECT SubUniverseId, SecurityId FROM Intraday.univ.SubUniverseMember WHERE SubUniverseId IN (<SubUniverseIds>);
+# Format: SubUniverseId,SecurityId
