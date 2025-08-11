@@ -83,10 +83,10 @@ def frame(sec_id: int, ser: pd.Series) -> pd.DataFrame:
 
 def get_universe_info(
     engine: sa.engine.Engine, description: str
-) -> tuple[str, List[int]]:
+) -> tuple[int, str, List[int]]:
     query = sa.text(
         """
-        SELECT u.Name, um.SecurityId
+        SELECT u.UniverseId, u.Name, um.SecurityId
         FROM Intraday.univ.Universe u
         JOIN Intraday.univ.UniverseMember um ON u.UniverseId = um.UniverseId
         WHERE u.Name = :desc
@@ -94,9 +94,34 @@ def get_universe_info(
     )
     df = pd.read_sql(query, engine, params={"desc": description})
     if df.empty:
-        return description, []
+        return 0, description, []
+    uid = int(df["UniverseId"].iloc[0])
     name = df["Name"].iloc[0]
-    return name, df["SecurityId"].tolist()
+    return uid, name, df["SecurityId"].tolist()
+
+
+def get_subuniverse_data(
+    engine: sa.engine.Engine, universe_id: int
+) -> tuple[List[int], pd.DataFrame]:
+    sub_df = pd.read_sql(
+        sa.text(
+            "SELECT SubUniverseId FROM Intraday.univ.SubUniverse WHERE UniverseId = :uid"
+        ),
+        engine,
+        params={"uid": universe_id},
+    )
+    sub_ids = sub_df["SubUniverseId"].tolist()
+    if not sub_ids:
+        return [], pd.DataFrame(columns=["SubUniverseId", "SecurityId"])
+    ids_str = ",".join(str(i) for i in sub_ids)
+    members_df = pd.read_sql(
+        sa.text(
+            "SELECT SubUniverseId, SecurityId FROM Intraday.univ.SubUniverseMember "
+            f"WHERE SubUniverseId IN ({ids_str})"
+        ),
+        engine,
+    )
+    return sub_ids, members_df
 
 def read_price_bars(
     engine: sa.engine.Engine,
@@ -158,16 +183,21 @@ args = cli.parse_args()
 conn_str = args.conn or get_conn_from_secret(args.secret_name, args.region, args.driver)
 engine = sa.create_engine(conn_str)
 
-universe_name, universe_ids = get_universe_info(engine, args.universe)
+universe_id, universe_name, universe_ids = get_universe_info(engine, args.universe)
 output_dir = pathlib.Path("src/TradingDaemon/Data/Universes") / universe_name
 output_dir.mkdir(parents=True, exist_ok=True)
-OUT = {k: output_dir / f"{k}.txt" for k in "ABCDGHI"}
+OUT = {k: output_dir / f"{k}.txt" for k in "ABCDEFGHI"}
 for path in OUT.values():
     if path.exists():
         path.unlink()
 
 if not universe_ids:
     sys.exit("No securities selected")
+
+sub_ids, sub_members = get_subuniverse_data(engine, universe_id)
+pd.Series(sub_ids).to_csv(OUT["E"], header=False, index=False)
+sub_members.to_csv(OUT["F"], header=False, index=False)
+
 sec_ids: List[int] = []
 all_ts: set[pd.Timestamp] = set()
 first_G = True
