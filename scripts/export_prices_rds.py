@@ -107,7 +107,7 @@ def read_price_bars(
 ) -> pd.DataFrame:
     params = {"sid": security_id, "tf": timeframe}
     sql = (
-        "SELECT BarTimeUtc AS timestamp, [Close[] AS [close] "
+        "SELECT BarTimeUtc AS timestamp, [Close] AS [close] "
         "FROM Intraday.mkt.PriceBar "
         "WHERE SecurityId = :sid AND TimeframeMinute = :tf"
     )
