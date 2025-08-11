@@ -85,10 +85,10 @@ def frame(sec_id: int, ser: pd.Series) -> pd.DataFrame:
 
 def get_universe_info(
     engine: sa.engine.Engine, description: str
-) -> tuple[int, str, List[int]]:
+) -> tuple[int, str, pd.DataFrame]:
     query = sa.text(
         """
-        SELECT u.UniverseId, u.Name, um.SecurityId
+        SELECT u.UniverseId, u.Name, um.SecurityId, um.EffectiveFromUtc, um.EffectiveToUtc
         FROM Intraday.univ.Universe u
         JOIN Intraday.univ.UniverseMember um ON u.UniverseId = um.UniverseId
         WHERE u.Name = :desc
@@ -96,10 +96,10 @@ def get_universe_info(
     )
     df = pd.read_sql(query, engine, params={"desc": description})
     if df.empty:
-        return 0, description, []
+        return 0, description, df
     uid = int(df["UniverseId"].iloc[0])
     name = df["Name"].iloc[0]
-    return uid, name, df["SecurityId"].tolist()
+    return uid, name, df[["SecurityId", "EffectiveFromUtc", "EffectiveToUtc"]]
 
 
 def get_subuniverse_data(
@@ -219,7 +219,16 @@ args = cli.parse_args()
 conn_str = args.conn or get_conn_from_secret(args.secret_name, args.region, args.driver)
 engine = sa.create_engine(conn_str)
 
-universe_id, universe_name, universe_ids = get_universe_info(engine, args.universe)
+universe_id, universe_name, members_df = get_universe_info(engine, args.universe)
+universe_ids = members_df["SecurityId"].unique().tolist()
+membership_by_real_sid: dict[int, List[tuple[pd.Timestamp, pd.Timestamp]]] = {}
+for row in members_df.itertuples(index=False):
+    membership_by_real_sid.setdefault(row.SecurityId, []).append(
+        (
+            pd.to_datetime(row.EffectiveFromUtc, utc=True),
+            pd.to_datetime(row.EffectiveToUtc, utc=True),
+        )
+    )
 output_dir = pathlib.Path("src/TradingDaemon/Data/Universes") / universe_name
 output_dir.mkdir(parents=True, exist_ok=True)
 OUT = {k: output_dir / f"{k}.txt" for k in "ABCDEFGHI"}
@@ -238,11 +247,13 @@ sec_ids: List[int] = []
 all_ts: set[pd.Timestamp] = set()
 first_G = True
 sid_next = 100000
+membership_by_sid: dict[int, List[tuple[pd.Timestamp, pd.Timestamp]]] = {}
 
 for real_sid in universe_ids:
     sid = sid_next
     sid_next += 1
     sec_ids.append(sid)
+    membership_by_sid[sid] = membership_by_real_sid.get(real_sid, [])
     print("→", real_sid)
 
     df_raw = read_price_bars(
@@ -276,10 +287,14 @@ for real_sid in universe_ids:
 pd.Series(sec_ids).to_csv(OUT["B"], header=False, index=False)
 
 ts_sorted = sorted(all_ts)
-pd.Series(pd.to_datetime(ts_sorted).strftime(FMT)).to_csv(OUT["D"], header=False, index=False)
+ts_fmt = pd.to_datetime(ts_sorted).strftime(FMT)
+pd.Series(ts_fmt).to_csv(OUT["D"], header=False, index=False)
 with OUT["C"].open("w") as fhc:
-    for t in pd.to_datetime(ts_sorted).strftime(FMT):
-        for sid in sec_ids:
-            fhc.write(f"{sid},{t}\n")
+    for t, t_str in zip(ts_sorted, ts_fmt):
+        for sid, intervals in membership_by_sid.items():
+            for start, end in intervals:
+                if start <= t <= end:
+                    fhc.write(f"{sid},{t_str}\n")
+                    break
 
 print("✅  Export complete")
