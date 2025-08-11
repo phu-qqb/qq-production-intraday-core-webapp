@@ -223,12 +223,11 @@ universe_id, universe_name, members_df = get_universe_info(engine, args.universe
 universe_ids = members_df["SecurityId"].unique().tolist()
 membership_by_real_sid: dict[int, List[tuple[pd.Timestamp, pd.Timestamp]]] = {}
 for row in members_df.itertuples(index=False):
-    membership_by_real_sid.setdefault(row.SecurityId, []).append(
-        (
-            pd.to_datetime(row.EffectiveFromUtc, utc=True),
-            pd.to_datetime(row.EffectiveToUtc, utc=True),
-        )
-    )
+    start = pd.to_datetime(row.EffectiveFromUtc, utc=True)
+    end = pd.to_datetime(row.EffectiveToUtc, utc=True, errors="coerce")
+    if pd.isna(end):
+        end = pd.Timestamp.max.tz_localize("UTC")
+    membership_by_real_sid.setdefault(row.SecurityId, []).append((start, end))
 output_dir = pathlib.Path("src/TradingDaemon/Data/Universes") / universe_name
 output_dir.mkdir(parents=True, exist_ok=True)
 OUT = {k: output_dir / f"{k}.txt" for k in "ABCDEFGHI"}
