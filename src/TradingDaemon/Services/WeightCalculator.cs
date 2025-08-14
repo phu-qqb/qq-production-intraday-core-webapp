@@ -1,3 +1,4 @@
+using System.IO;
 using System.Text;
 using Dapper;
 using TradingDaemon.Data;
@@ -20,6 +21,18 @@ public class WeightCalculator
 
     public async Task CalculateAndStoreAsync()
     {
+        var pythonExec = _config["PriceExport:PythonExecutable"] ?? "python3";
+        var universe = _config["PriceExport:Universe"] ?? string.Empty;
+        var scriptPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../scripts/export_prices_rds.py"));
+        var scriptArgs = string.IsNullOrEmpty(universe) ? scriptPath : $"{scriptPath} --universe {universe}";
+
+        var (pyOut, pyErr, pyCode) = await ProcessRunner.RunAsync(pythonExec, scriptArgs);
+        if (pyCode != 0)
+        {
+            _logger.LogError("Price export script failed: {Error}", pyErr);
+            return;
+        }
+
         using var connection = _context.CreateConnection();
         var prices = await connection.QueryAsync<Price>("SELECT symbol, value FROM prices ORDER BY timestamp DESC");
 
