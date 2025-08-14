@@ -23,8 +23,9 @@ public class WeightCalculator
     {
         var pythonExec = _config["PriceExport:PythonExecutable"] ?? "python3";
         var universe = _config["PriceExport:Universe"] ?? string.Empty;
-        var scriptPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../scripts/export_prices_rds.py"));
-        var scriptArgs = string.IsNullOrEmpty(universe) ? scriptPath : $"{scriptPath} --universe {universe}";
+        var tradingSession = _config["PriceExport:Session"] ?? string.Empty;
+        var scriptPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../scripts/export_prices_rds.py"));
+        var scriptArgs = string.IsNullOrEmpty(universe) ? scriptPath : $"{scriptPath} --universe {universe} --session {tradingSession}";
 
         var (pyOut, pyErr, pyCode) = await ProcessRunner.RunAsync(pythonExec, scriptArgs);
         if (pyCode != 0)
