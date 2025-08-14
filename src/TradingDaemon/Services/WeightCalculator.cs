@@ -28,6 +28,8 @@ public class WeightCalculator
         var scriptArgs = string.IsNullOrEmpty(universe) ? scriptPath : $"{scriptPath} --universe {universe} --session {tradingSession}";
 
         var (pyOut, pyErr, pyCode) = await ProcessRunner.RunAsync(pythonExec, scriptArgs);
+        _logger.LogInformation("Price export script stdout: {StdOut}", pyOut);
+        _logger.LogInformation("Price export script stderr: {StdErr}", pyErr);
         if (pyCode != 0)
         {
             _logger.LogError("Price export script failed: {Error}", pyErr);
