@@ -64,7 +64,9 @@ public class WeightCalculator
         }
 
         using var connection = _context.CreateConnection();
-        var prices = await connection.QueryAsync<Price>("SELECT symbol, value FROM prices ORDER BY timestamp DESC");
+        var selectSql = "SELECT symbol, value FROM prices ORDER BY timestamp DESC";
+        _logger.LogInformation("Executing SQL: {Sql}", selectSql);
+        var prices = await connection.QueryAsync<Price>(selectSql);
 
         var inputPath = Path.GetTempFileName();
         await File.WriteAllLinesAsync(inputPath, prices.Select(p => $"{p.Symbol},{p.Value}"));
@@ -91,6 +93,7 @@ public class WeightCalculator
             };
             var sql = @"INSERT INTO weights (symbol, value, asof) VALUES (@Symbol, @Value, @AsOf)
                         ON CONFLICT (symbol) DO UPDATE SET value = excluded.value, asof = excluded.asof;";
+            _logger.LogInformation("Executing SQL: {Sql}", sql);
             await connection.ExecuteAsync(sql, weight);
         }
 
