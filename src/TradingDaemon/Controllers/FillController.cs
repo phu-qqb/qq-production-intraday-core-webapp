@@ -13,6 +13,7 @@ public static class FillController
             using var connection = context.CreateConnection();
             var sql = @"INSERT INTO fills (symbol, quantity, price, timestamp)
                         VALUES (@Symbol, @Quantity, @Price, @Timestamp)";
+            Console.WriteLine($"Executing SQL: {sql}");
             await connection.ExecuteAsync(sql, fill);
             return Results.Created($"/api/fills/{fill.Id}", fill);
         });
@@ -20,8 +21,12 @@ public static class FillController
         app.MapGet("/api/pnl", async (DateTime date, DapperContext context) =>
         {
             using var connection = context.CreateConnection();
-            var fills = await connection.QueryAsync<Fill>("SELECT * FROM fills WHERE DATE(timestamp) = @Date", new { Date = date.Date });
-            var weights = await connection.QueryAsync<Weight>("SELECT * FROM weights WHERE DATE(asof) = @Date", new { Date = date.Date });
+            var fillsSql = "SELECT * FROM fills WHERE DATE(timestamp) = @Date";
+            Console.WriteLine($"Executing SQL: {fillsSql}");
+            var fills = await connection.QueryAsync<Fill>(fillsSql, new { Date = date.Date });
+            var weightsSql = "SELECT * FROM weights WHERE DATE(asof) = @Date";
+            Console.WriteLine($"Executing SQL: {weightsSql}");
+            var weights = await connection.QueryAsync<Weight>(weightsSql, new { Date = date.Date });
 
             var pnl = (from f in fills
                        join w in weights on f.Symbol equals w.Symbol
