@@ -241,9 +241,9 @@ for row in members_df.itertuples(index=False):
     if pd.isna(end):
         end = pd.Timestamp.max.tz_localize("UTC")
     membership_by_real_sid.setdefault(row.SecurityId, []).append((start_member, end))
-# Save exported price files to a fixed Windows directory for downstream processes
-# that expect universes to reside under ``C:\IntradayFX``.
-output_dir = pathlib.Path(r"C:\IntradayFX") / universe_name
+# Save exported price files to a fixed directory for downstream processes
+# that expect universes to reside under ``/home/data/historical_data``.
+output_dir = pathlib.Path("/home/data/historical_data") / f"Univ{universe_id}"
 output_dir.mkdir(parents=True, exist_ok=True)
 OUT = {k: output_dir / f"{k}.txt" for k in "ABCDEFGHI"}
 for path in OUT.values():

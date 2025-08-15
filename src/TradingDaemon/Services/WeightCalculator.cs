@@ -48,7 +48,7 @@ public class WeightCalculator
             return;
         }
 
-        var exportDir = Path.Combine(@"C:\IntradayFX", universe);
+        var exportDir = Path.Combine("/home/data/historical_data", universe);
         foreach (var name in new[] {"A", "H", "I"})
         {
             var path = Path.Combine(exportDir, $"{name}.txt");
