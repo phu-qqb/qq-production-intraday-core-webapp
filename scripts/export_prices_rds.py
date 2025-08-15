@@ -256,21 +256,26 @@ for real_sid in universe_ids:
     )
     check_long_gaps(df_raw["timestamp"], 5)
     if df_raw.empty:
+        print(f"Skipping {real_sid}: no raw bars")
         continue
 
     df_flat = read_flat_bars(
         engine, real_sid, args.start, args.session, args.timeframe
     )
     if df_flat.empty:
+        print(f"Skipping {real_sid}: no flat bars")
         continue
 
     raw = df_raw.set_index("timestamp")["close"]
     flat = df_flat.set_index("timestamp")["close"]
     all_ts.update(raw.index)
 
-    frame(sid, flat).to_csv(OUT["A"], mode="a", header=False, index=False)
+    flat_frame = frame(sid, flat)
+    print(f"Writing {len(flat_frame)} rows to {OUT['A']}")
+    flat_frame.to_csv(OUT["A"], mode="a", header=False, index=False)
 
     fraw = frame(sid, raw)
+    print(f"Writing {len(fraw)} rows to {OUT['H']} and {OUT['I']}")
     fraw.to_csv(OUT["H"], mode="a", header=False, index=False)
     fraw.to_csv(OUT["I"], mode="a", header=False, index=False)
 
@@ -291,5 +296,12 @@ with OUT["C"].open("w") as fhc:
                 if start <= t <= end:
                     fhc.write(f"{real_sid},{t_str}\n")
                     break
+
+for key in ["A", "H", "I"]:
+    path = OUT[key]
+    if path.exists():
+        print(f"Created {path} ({path.stat().st_size} bytes)")
+    else:
+        print(f"Warning: expected {path} was not created")
 
 print("✅  Export complete")
