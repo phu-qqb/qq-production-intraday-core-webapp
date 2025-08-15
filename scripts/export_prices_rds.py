@@ -207,7 +207,10 @@ cli.add_argument(
     default="ODBC Driver 17 for SQL Server",
     help="ODBC driver name to use when connecting via pyodbc",
 )
-cli.add_argument("--start")
+cli.add_argument(
+    "--start",
+    help="Start date in America/New_York timezone (bars from this date onward)",
+)
 cli.add_argument(
     "--timeframe",
     type=int,
@@ -219,16 +222,28 @@ args = cli.parse_args()
 conn_str = args.conn or get_conn_from_secret(args.secret_name, args.region, args.driver)
 engine = sa.create_engine(conn_str)
 
+start_filter = None
+if args.start:
+    start_dt = pd.Timestamp(args.start)
+    if start_dt.tzinfo is None:
+        start_dt = start_dt.tz_localize("America/New_York")
+    else:
+        start_dt = start_dt.tz_convert("America/New_York")
+    start_dt = start_dt.normalize()
+    start_filter = start_dt.tz_convert("UTC").strftime("%Y-%m-%d %H:%M:%S")
+
 universe_id, universe_name, members_df = get_universe_info(engine, args.universe)
 universe_ids = members_df["SecurityId"].unique().tolist()
 membership_by_real_sid: dict[int, List[tuple[pd.Timestamp, pd.Timestamp]]] = {}
 for row in members_df.itertuples(index=False):
-    start = pd.to_datetime(row.EffectiveFromUtc, utc=True)
+    start_member = pd.to_datetime(row.EffectiveFromUtc, utc=True)
     end = pd.to_datetime(row.EffectiveToUtc, utc=True, errors="coerce")
     if pd.isna(end):
         end = pd.Timestamp.max.tz_localize("UTC")
-    membership_by_real_sid.setdefault(row.SecurityId, []).append((start, end))
-output_dir = pathlib.Path("src/TradingDaemon/Data/Universes") / universe_name
+    membership_by_real_sid.setdefault(row.SecurityId, []).append((start_member, end))
+# Save exported price files to a fixed directory for downstream processes
+# that expect universes to reside under ``/home/data/historical_data``.
+output_dir = pathlib.Path("/home/data/historical_data") / f"Univ{universe_id}"
 output_dir.mkdir(parents=True, exist_ok=True)
 OUT = {k: output_dir / f"{k}.txt" for k in "ABCDEFGHI"}
 for path in OUT.values():
@@ -250,25 +265,30 @@ for real_sid in universe_ids:
     print("→", real_sid)
 
     df_raw = read_price_bars(
-        engine, real_sid, args.start, args.session, args.timeframe
+        engine, real_sid, start_filter, args.session, args.timeframe
     )
     check_long_gaps(df_raw["timestamp"], 5)
     if df_raw.empty:
+        print(f"Skipping {real_sid}: no raw bars")
         continue
 
     df_flat = read_flat_bars(
-        engine, real_sid, args.start, args.session, args.timeframe
+        engine, real_sid, start_filter, args.session, args.timeframe
     )
     if df_flat.empty:
+        print(f"Skipping {real_sid}: no flat bars")
         continue
 
     raw = df_raw.set_index("timestamp")["close"]
     flat = df_flat.set_index("timestamp")["close"]
     all_ts.update(raw.index)
 
-    frame(sid, flat).to_csv(OUT["A"], mode="a", header=False, index=False)
+    flat_frame = frame(sid, flat)
+    print(f"Writing {len(flat_frame)} rows to {OUT['A']}")
+    flat_frame.to_csv(OUT["A"], mode="a", header=False, index=False)
 
     fraw = frame(sid, raw)
+    print(f"Writing {len(fraw)} rows to {OUT['H']} and {OUT['I']}")
     fraw.to_csv(OUT["H"], mode="a", header=False, index=False)
     fraw.to_csv(OUT["I"], mode="a", header=False, index=False)
 
@@ -289,5 +309,12 @@ with OUT["C"].open("w") as fhc:
                 if start <= t <= end:
                     fhc.write(f"{real_sid},{t_str}\n")
                     break
+
+for key in ["A", "H", "I"]:
+    path = OUT[key]
+    if path.exists():
+        print(f"Created {path} ({path.stat().st_size} bytes)")
+    else:
+        print(f"Warning: expected {path} was not created")
 
 print("✅  Export complete")

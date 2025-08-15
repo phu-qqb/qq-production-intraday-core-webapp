@@ -36,6 +36,7 @@ public class PriceFetcher
             var sql = @"INSERT INTO prices (symbol, timestamp, value)
                         VALUES (@Symbol, @Timestamp, @Value)
                         ON CONFLICT (symbol, timestamp) DO UPDATE SET value = excluded.value;";
+            _logger.LogInformation("Executing SQL: {Sql}", sql);
             await connection.ExecuteAsync(sql, price);
         }
     }

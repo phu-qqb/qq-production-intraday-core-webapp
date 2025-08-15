@@ -22,7 +22,9 @@ public class OrderSender
     public async Task SendOrdersAsync()
     {
         using var connection = _context.CreateConnection();
-        var weights = await connection.QueryAsync<Weight>("SELECT symbol, value FROM weights");
+        var sql = "SELECT symbol, value FROM weights";
+        _logger.LogInformation("Executing SQL: {Sql}", sql);
+        var weights = await connection.QueryAsync<Weight>(sql);
         var client = _clientFactory.CreateClient("OrderApi");
         var apiKey = Environment.GetEnvironmentVariable("ORDER_API_KEY") ?? string.Empty;
 

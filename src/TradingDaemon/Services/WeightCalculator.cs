@@ -30,17 +30,46 @@ public class WeightCalculator
         var scriptPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../scripts/export_prices_rds.py"));
         var scriptArgs = string.IsNullOrEmpty(universe) ? scriptPath : $"{scriptPath} --universe {universe} --session {tradingSession} --timeframe {timeFrame} --StartDate {StartDate}";
 
-        var (pyOut, pyErr, pyCode) = await ProcessRunner.RunAsync(pythonExec, scriptArgs);
-        _logger.LogInformation("Price export script stdout: {StdOut}", pyOut);
-        _logger.LogInformation("Price export script stderr: {StdErr}", pyErr);
+        var sbOut = new StringBuilder();
+        var sbErr = new StringBuilder();
+        var (_, _, pyCode) = await ProcessRunner.RunAsync(
+            pythonExec,
+            scriptArgs,
+            line =>
+            {
+                _logger.LogInformation("[price-export] {Line}", line);
+                sbOut.AppendLine(line);
+            },
+            line =>
+            {
+                _logger.LogWarning("[price-export] {Line}", line);
+                sbErr.AppendLine(line);
+            });
         if (pyCode != 0)
         {
-            _logger.LogError("Price export script failed: {Error}", pyErr);
+            _logger.LogError("Price export script failed: {Error}", sbErr.ToString());
             return;
         }
 
+        var exportDir = Path.Combine("/home/data/historical_data", universe);
+        foreach (var name in new[] {"A", "H", "I"})
+        {
+            var path = Path.Combine(exportDir, $"{name}.txt");
+            if (File.Exists(path))
+            {
+                var size = new FileInfo(path).Length;
+                _logger.LogInformation("Found export file {File} ({Size} bytes)", path, size);
+            }
+            else
+            {
+                _logger.LogWarning("Missing export file {File}", path);
+            }
+        }
+
         using var connection = _context.CreateConnection();
-        var prices = await connection.QueryAsync<Price>("SELECT symbol, value FROM prices ORDER BY timestamp DESC");
+        var selectSql = "SELECT symbol, value FROM prices ORDER BY timestamp DESC";
+        _logger.LogInformation("Executing SQL: {Sql}", selectSql);
+        var prices = await connection.QueryAsync<Price>(selectSql);
 
         var inputPath = Path.GetTempFileName();
         await File.WriteAllLinesAsync(inputPath, prices.Select(p => $"{p.Symbol},{p.Value}"));
@@ -67,6 +96,7 @@ public class WeightCalculator
             };
             var sql = @"INSERT INTO weights (symbol, value, asof) VALUES (@Symbol, @Value, @AsOf)
                         ON CONFLICT (symbol) DO UPDATE SET value = excluded.value, asof = excluded.asof;";
+            _logger.LogInformation("Executing SQL: {Sql}", sql);
             await connection.ExecuteAsync(sql, weight);
         }
 
