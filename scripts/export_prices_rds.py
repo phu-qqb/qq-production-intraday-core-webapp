@@ -80,7 +80,9 @@ def check_long_gaps(ts: pd.Series, limit_days: int = 5) -> None:
 def frame(sec_id: int, ser: pd.Series) -> pd.DataFrame:
     df = ser.rename("price").reset_index().rename(columns={"index": "timestamp"})
     df.insert(0, "securityId", sec_id)
-    df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.strftime(FMT)
+    df["timestamp"] = (
+        pd.to_datetime(df["timestamp"], utc=True).dt.tz_convert("UTC").dt.strftime(FMT)
+    )
     return df
 
 def get_universe_info(
@@ -143,16 +145,16 @@ def read_price_bars(
         params["start"] = start
     sql += " ORDER BY BarTimeUtc"
     df = pd.read_sql(sa.text(sql), engine, params=params)
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True) + pd.Timedelta(
+        minutes=timeframe
+    )
     start, end = SESSION_HOURS_NY[session]
-    ts = df["timestamp"].dt.tz_convert("America/New_York")
-    minutes = ts.dt.hour * 60 + ts.dt.minute
+    local = df["timestamp"].dt.tz_convert("America/New_York")
+    minutes = local.dt.hour * 60 + local.dt.minute
     lo = start.hour * 60 + start.minute
     hi = end.hour * 60 + end.minute + 1
     mask = minutes.between(lo, hi)
-    df = df[mask].copy()
-    df["timestamp"] = ts[mask]
-    return df
+    return df[mask].copy()
 
 
 def read_flat_bars(
@@ -173,16 +175,16 @@ def read_flat_bars(
         params["start"] = start
     sql += " ORDER BY BarTimeUtc"
     df = pd.read_sql(sa.text(sql), engine, params=params)
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True) + pd.Timedelta(
+        minutes=timeframe
+    )
     start_t, end_t = SESSION_HOURS_NY[session]
-    ts = df["timestamp"].dt.tz_convert("America/New_York")
-    minutes = ts.dt.hour * 60 + ts.dt.minute
+    local = df["timestamp"].dt.tz_convert("America/New_York")
+    minutes = local.dt.hour * 60 + local.dt.minute
     lo = start_t.hour * 60 + start_t.minute
     hi = end_t.hour * 60 + end_t.minute + 1
     mask = minutes.between(lo, hi)
-    df = df[mask].copy()
-    df["timestamp"] = ts[mask]
-    return df
+    return df[mask].copy()
 
 # ---------- CLI ----------
 cli = argparse.ArgumentParser()
@@ -281,7 +283,7 @@ for real_sid in universe_ids:
 
     raw = df_raw.set_index("timestamp")["close"]
     flat = df_flat.set_index("timestamp")["close"]
-    all_ts.update(raw.index)
+    all_ts.update(flat.index)
 
     flat_frame = frame(sid, flat)
     print(f"Writing {len(flat_frame)} rows to {OUT['A']}")
@@ -300,7 +302,9 @@ for real_sid in universe_ids:
 pd.Series(universe_ids).to_csv(OUT["B"], header=False, index=False)
 
 ts_sorted = sorted(all_ts)
-ts_fmt = pd.to_datetime(ts_sorted).strftime(FMT)
+ts_fmt = (
+    pd.to_datetime(ts_sorted, utc=True).tz_convert("UTC").strftime(FMT)
+)
 pd.Series(ts_fmt).to_csv(OUT["D"], header=False, index=False)
 with OUT["C"].open("w") as fhc:
     for t, t_str in zip(ts_sorted, ts_fmt):
