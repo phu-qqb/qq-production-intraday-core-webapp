@@ -148,7 +148,7 @@ def read_price_bars(
     ts = df["timestamp"].dt.tz_convert("America/New_York")
     minutes = ts.dt.hour * 60 + ts.dt.minute
     lo = start.hour * 60 + start.minute
-    hi = end.hour * 60 + end.minute
+    hi = end.hour * 60 + end.minute + 1
     mask = minutes.between(lo, hi)
     df = df[mask].copy()
     df["timestamp"] = ts[mask]
@@ -178,7 +178,7 @@ def read_flat_bars(
     ts = df["timestamp"].dt.tz_convert("America/New_York")
     minutes = ts.dt.hour * 60 + ts.dt.minute
     lo = start_t.hour * 60 + start_t.minute
-    hi = end_t.hour * 60 + end_t.minute
+    hi = end_t.hour * 60 + end_t.minute + 1
     mask = minutes.between(lo, hi)
     df = df[mask].copy()
     df["timestamp"] = ts[mask]
