@@ -24,8 +24,11 @@ public class WeightCalculator
         var pythonExec = _config["PriceExport:PythonExecutable"] ?? "python3";
         var universe = _config["PriceExport:Universe"] ?? string.Empty;
         var tradingSession = _config["PriceExport:Session"] ?? string.Empty;
+        var timeFrame = _config["PriceExport:TimeFrame"] ?? "60";
+        var StartDate = _config["PriceExport:StartDate"] ?? "2022-01-01T00:00:00Z";
+
         var scriptPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../scripts/export_prices_rds.py"));
-        var scriptArgs = string.IsNullOrEmpty(universe) ? scriptPath : $"{scriptPath} --universe {universe} --session {tradingSession}";
+        var scriptArgs = string.IsNullOrEmpty(universe) ? scriptPath : $"{scriptPath} --universe {universe} --session {tradingSession} --timeframe {timeFrame} --StartDate {StartDate}";
 
         var sbOut = new StringBuilder();
         var sbErr = new StringBuilder();
