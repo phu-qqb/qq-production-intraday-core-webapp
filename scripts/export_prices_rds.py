@@ -145,11 +145,10 @@ def read_price_bars(
         params["start"] = start
     sql += " ORDER BY BarTimeUtc"
     df = pd.read_sql(sa.text(sql), engine, params=params)
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True) + pd.Timedelta(
-        minutes=timeframe
-    )
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    end_times = df["timestamp"] + pd.Timedelta(minutes=timeframe)
     start, end = SESSION_HOURS_NY[session]
-    local = df["timestamp"].dt.tz_convert("America/New_York")
+    local = end_times.dt.tz_convert("America/New_York")
     minutes = local.dt.hour * 60 + local.dt.minute
     lo = start.hour * 60 + start.minute
     hi = end.hour * 60 + end.minute + 1
@@ -175,11 +174,10 @@ def read_flat_bars(
         params["start"] = start
     sql += " ORDER BY BarTimeUtc"
     df = pd.read_sql(sa.text(sql), engine, params=params)
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True) + pd.Timedelta(
-        minutes=timeframe
-    )
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+    end_times = df["timestamp"] + pd.Timedelta(minutes=timeframe)
     start_t, end_t = SESSION_HOURS_NY[session]
-    local = df["timestamp"].dt.tz_convert("America/New_York")
+    local = end_times.dt.tz_convert("America/New_York")
     minutes = local.dt.hour * 60 + local.dt.minute
     lo = start_t.hour * 60 + start_t.minute
     hi = end_t.hour * 60 + end_t.minute + 1
