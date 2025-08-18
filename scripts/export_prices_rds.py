@@ -234,13 +234,6 @@ if args.start:
 
 universe_id, universe_name, members_df = get_universe_info(engine, args.universe)
 universe_ids = members_df["SecurityId"].unique().tolist()
-membership_by_real_sid: dict[int, List[tuple[pd.Timestamp, pd.Timestamp]]] = {}
-for row in members_df.itertuples(index=False):
-    start_member = pd.to_datetime(row.EffectiveFromUtc, utc=True)
-    end = pd.to_datetime(row.EffectiveToUtc, utc=True, errors="coerce")
-    if pd.isna(end):
-        end = pd.Timestamp.max.tz_localize("UTC")
-    membership_by_real_sid.setdefault(row.SecurityId, []).append((start_member, end))
 # Save exported price files to a fixed directory for downstream processes
 # that expect universes to reside under ``/home/data/historical_data``.
 output_dir = pathlib.Path("/home/data/historical_data") / f"Univ{universe_id}"
@@ -301,16 +294,13 @@ pd.Series(universe_ids).to_csv(OUT["B"], header=False, index=False)
 
 ts_sorted = sorted(all_ts)
 ts_fmt = (
-    pd.to_datetime(ts_sorted, utc=True).tz_convert("UTC").strftime(FMT)
+    pd.to_datetime(ts_sorted, utc=True).tz_convert("UTC").strftime(FMT).tolist()
 )
 pd.Series(ts_fmt).to_csv(OUT["D"], header=False, index=False)
 with OUT["C"].open("w") as fhc:
-    for t, t_str in zip(ts_sorted, ts_fmt):
-        for real_sid, intervals in membership_by_real_sid.items():
-            for start, end in intervals:
-                if start <= t <= end:
-                    fhc.write(f"{real_sid},{t_str}\n")
-                    break
+    for sid in sorted(universe_ids):
+        for t_str in ts_fmt:
+            fhc.write(f"{sid},{t_str}\n")
 
 for key in ["A", "H", "I"]:
     path = OUT[key]
