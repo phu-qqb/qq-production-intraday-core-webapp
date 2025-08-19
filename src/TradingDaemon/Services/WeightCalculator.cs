@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using Dapper;
@@ -50,6 +51,7 @@ public class WeightCalculator
             _logger.LogError("Price export script failed: {Error}", sbErr.ToString());
             return;
         }
+        _logger.LogInformation("Price export script completed successfully: {Output}", sbOut.ToString());
 
         var exportDir = Path.Combine("/home/data/historical_data", universe);
         foreach (var name in new[] {"A", "H", "I"})
@@ -74,12 +76,25 @@ public class WeightCalculator
         var inputPath = Path.GetTempFileName();
         await File.WriteAllLinesAsync(inputPath, prices.Select(p => $"{p.Symbol},{p.Value}"));
 
-        var execPath = _config["GpuExecutable"] ?? string.Empty;
-        var (stdout, stderr, code) = await ProcessRunner.RunAsync(execPath, inputPath);
-        if (code != 0)
+        var executables = new List<(string Path, string Args)>
         {
-            _logger.LogError("GPU process failed: {Error}", stderr);
-            return;
+            (_config["GpuExecutable"] ?? string.Empty, inputPath),
+            // Add more executables here, e.g.:
+            // ("/path/to/executable", "--arg1 value1 --arg2 value2")
+        };
+
+        string stdout = string.Empty;
+        foreach (var (path, args) in executables)
+        {
+            if (string.IsNullOrWhiteSpace(path)) continue;
+            var (outText, errText, exit) = await ProcessRunner.RunAsync(path, args);
+            if (exit != 0)
+            {
+                _logger.LogError("Executable {Exec} failed: {Error}", path, errText);
+                return;
+            }
+            _logger.LogInformation("Executable {Exec} completed: {Output}", path, outText);
+            stdout = outText;
         }
 
         using var reader = new StringReader(stdout);
