@@ -135,17 +135,17 @@ public class WeightCalculator
                         .Select(h => long.TryParse(h, out var id) ? id : (long?)null)
                         .ToArray();
 
-                    var sql = @"MERGE model.TheoreticalWeight AS target
-USING (SELECT @SecurityId AS SecurityId, @ModelId AS ModelId, @BarTimeUtc AS BarTimeUtc, @ModelRunId AS ModelRunId, @Weight AS Weight) AS source
-ON target.SecurityId = source.SecurityId AND target.ModelId = source.ModelId AND target.BarTimeUtc = source.BarTimeUtc
-WHEN MATCHED THEN
-    UPDATE SET ModelRunId = source.ModelRunId, Weight = source.Weight
-WHEN NOT MATCHED THEN
-    INSERT (SecurityId, ModelId, BarTimeUtc, ModelRunId, Weight) VALUES (source.SecurityId, source.ModelId, source.BarTimeUtc, source.ModelRunId, source.Weight);";
+                    var sql = @"IF NOT EXISTS (
+    SELECT 1 FROM model.TheoreticalWeight
+    WHERE SecurityId = @SecurityId AND ModelId = @ModelId AND BarTimeUtc = @BarTimeUtc
+)
+BEGIN
+    INSERT INTO model.TheoreticalWeight (SecurityId, ModelId, BarTimeUtc, ModelRunId, Weight)
+    VALUES (@SecurityId, @ModelId, @BarTimeUtc, @ModelRunId, @Weight);
+END";
 
                     foreach (var line in lines.Skip(1))
                     {
-                        _logger.LogInformation("[aggregated-weights] {Line}", line);
                         var parts = line.Split(delimiter, StringSplitOptions.TrimEntries);
                         if (parts.Length <= 1 ||
                             !DateTime.TryParseExact(
@@ -157,6 +157,7 @@ WHEN NOT MATCHED THEN
                                     continue;
 
 
+                        var inserted = false;
                         for (var i = 1; i < parts.Length && i - 1 < securityIds.Length; i++)
                         {
                             var securityId = securityIds[i - 1];
@@ -173,7 +174,13 @@ WHEN NOT MATCHED THEN
                                 Weight = val
                             };
 
-                            await connection.ExecuteAsync(sql, record);
+                            var rows = await connection.ExecuteAsync(sql, record);
+                            if (rows > 0) inserted = true;
+                        }
+
+                        if (inserted)
+                        {
+                            _logger.LogInformation("[aggregated-weights] {Line}", line);
                         }
                     }
                 }
