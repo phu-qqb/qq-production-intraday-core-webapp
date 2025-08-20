@@ -22,7 +22,7 @@ public class WeightCalculator
 
     public async Task CalculateAndStoreAsync()
     {
-        var pythonExec = _config["PriceExport:PythonExecutable"] ?? "python3";
+        var pythonExec = _config["Executables:PythonExecutable"] ?? "python3";
         var universe = _config["PriceExport:Universe"] ?? string.Empty;
         var tradingSession = _config["PriceExport:Session"] ?? string.Empty;
         var timeFrame = _config["PriceExport:TimeFrame"] ?? "60";
@@ -68,17 +68,17 @@ public class WeightCalculator
             }
         }
 
-        using var connection = _context.CreateConnection();
-        var selectSql = "SELECT symbol, value FROM prices ORDER BY timestamp DESC";
-        _logger.LogInformation("Executing SQL: {Sql}", selectSql);
-        var prices = await connection.QueryAsync<Price>(selectSql);
+        //using var connection = _context.CreateConnection();
+        //var selectSql = "SELECT symbol, value FROM prices ORDER BY timestamp DESC";
+        //_logger.LogInformation("Executing SQL: {Sql}", selectSql);
+        //var prices = await connection.QueryAsync<Price>(selectSql);
 
-        var inputPath = Path.GetTempFileName();
-        await File.WriteAllLinesAsync(inputPath, prices.Select(p => $"{p.Symbol},{p.Value}"));
+        //var inputPath = Path.GetTempFileName();
+        //await File.WriteAllLinesAsync(inputPath, prices.Select(p => $"{p.Symbol},{p.Value}"));
 
         var executables = new List<(string Path, string Args)>
         {
-            (_config["GpuExecutable"] ?? string.Empty, inputPath),
+            //(_config["GenBinariesExecutable"] ?? string.Empty, inputPath),
             // Add more executables here, e.g.:
             // ("/path/to/executable", "--arg1 value1 --arg2 value2")
         };
