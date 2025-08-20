@@ -119,7 +119,9 @@ public class WeightCalculator
             {
                 var lines = await File.ReadAllLinesAsync(weightsFile);
                 using var connection = _context.CreateConnection();
+
                 connection.Open();
+
                 foreach (var line in lines)
                 {
                     _logger.LogInformation("[aggregated-weights] {Line}", line);
