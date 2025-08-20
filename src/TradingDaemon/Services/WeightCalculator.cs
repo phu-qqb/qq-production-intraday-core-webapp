@@ -127,23 +127,13 @@ public class WeightCalculator
                     "INSERT INTO model.ModelRun (ModelId, CodeVersion) VALUES (@ModelId, @CodeVersion); SELECT CAST(SCOPE_IDENTITY() AS bigint);",
                     new { ModelId = modelId, CodeVersion = version });
 
-                foreach (var line in lines)
+                if (lines.Length > 1)
                 {
-                    _logger.LogInformation("[aggregated-weights] {Line}", line);
-                    var parts = line.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-                    if (parts.Length < 2 ||
-                        !long.TryParse(parts[0], out var securityId) ||
-                        !decimal.TryParse(parts[1], NumberStyles.Any, CultureInfo.InvariantCulture, out var val))
-                        continue;
-
-                    var record = new
-                    {
-                        SecurityId = securityId,
-                        ModelId = modelId,
-                        BarTimeUtc = DateTime.UtcNow,
-                        ModelRunId = modelRunId,
-                        Weight = val
-                    };
+                    var delimiter = lines[0].Contains(';') ? ';' : ',';
+                    var headerParts = lines[0].Split(delimiter, StringSplitOptions.TrimEntries);
+                    var securityIds = headerParts.Skip(1)
+                        .Select(h => long.TryParse(h, out var id) ? id : (long?)null)
+                        .ToArray();
 
                     var sql = @"MERGE model.TheoreticalWeight AS target
 USING (SELECT @SecurityId AS SecurityId, @ModelId AS ModelId, @BarTimeUtc AS BarTimeUtc, @ModelRunId AS ModelRunId, @Weight AS Weight) AS source
@@ -153,7 +143,34 @@ WHEN MATCHED THEN
 WHEN NOT MATCHED THEN
     INSERT (SecurityId, ModelId, BarTimeUtc, ModelRunId, Weight) VALUES (source.SecurityId, source.ModelId, source.BarTimeUtc, source.ModelRunId, source.Weight);";
 
-                    await connection.ExecuteAsync(sql, record);
+                    foreach (var line in lines.Skip(1))
+                    {
+                        _logger.LogInformation("[aggregated-weights] {Line}", line);
+                        var parts = line.Split(delimiter, StringSplitOptions.TrimEntries);
+                        if (parts.Length <= 1 ||
+                            !DateTime.TryParse(parts[0], CultureInfo.InvariantCulture,
+                                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var barTimeUtc))
+                            continue;
+
+                        for (var i = 1; i < parts.Length && i - 1 < securityIds.Length; i++)
+                        {
+                            var securityId = securityIds[i - 1];
+                            if (securityId is null ||
+                                !decimal.TryParse(parts[i], NumberStyles.Any, CultureInfo.InvariantCulture, out var val))
+                                continue;
+
+                            var record = new
+                            {
+                                SecurityId = securityId.Value,
+                                ModelId = modelId,
+                                BarTimeUtc = barTimeUtc,
+                                ModelRunId = modelRunId,
+                                Weight = val
+                            };
+
+                            await connection.ExecuteAsync(sql, record);
+                        }
+                    }
                 }
             }
             else
