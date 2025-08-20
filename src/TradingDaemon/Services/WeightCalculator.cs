@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 using Dapper;
 using TradingDaemon.Data;
@@ -23,98 +24,92 @@ public class WeightCalculator
     public async Task CalculateAndStoreAsync()
     {
         var pythonExec = _config["Executables:PythonExecutable"] ?? "python3";
-        var universe = _config["PriceExport:Universe"] ?? string.Empty;
-        var tradingSession = _config["PriceExport:Session"] ?? string.Empty;
-        var timeFrame = _config["PriceExport:TimeFrame"] ?? "60";
-        var StartDate = _config["PriceExport:StartDate"] ?? "2022-01-01T00:00:00Z";
-
+        var execPath = _config["Executables:GenBinariesExecutable"] ?? string.Empty;
         var scriptPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../scripts/export_prices_rds.py"));
-        var scriptArgs = string.IsNullOrEmpty(universe) ? scriptPath : $"{scriptPath} --universe {universe} --session {tradingSession} --timeframe {timeFrame} --StartDate {StartDate}";
 
-        var sbOut = new StringBuilder();
-        var sbErr = new StringBuilder();
-        var (_, _, pyCode) = await ProcessRunner.RunAsync(
-            pythonExec,
-            scriptArgs,
-            line =>
-            {
-                _logger.LogInformation("[price-export] {Line}", line);
-                sbOut.AppendLine(line);
-            },
-            line =>
-            {
-                _logger.LogWarning("[price-export] {Line}", line);
-                sbErr.AppendLine(line);
-            });
-        if (pyCode != 0)
+        foreach (var model in _config.GetSection("Programmes").GetChildren())
         {
-            _logger.LogError("Price export script failed: {Error}", sbErr.ToString());
-            return;
-        }
-        _logger.LogInformation("Price export script completed successfully: {Output}", sbOut.ToString());
+            var universe = model["Universe"] ?? string.Empty;
+            var tradingSession = model["Session"] ?? string.Empty;
+            var timeFrame = model["Timeframe"] ?? "60";
+            var startDate = model["StartDate"] ?? "2022-01-01T00:00:00Z";
 
-        var exportDir = Path.Combine("/home/data/historical_data", universe);
-        foreach (var name in new[] {"A", "H", "I"})
-        {
-            var path = Path.Combine(exportDir, $"{name}.txt");
-            if (File.Exists(path))
+            var scriptArgs = string.IsNullOrEmpty(universe)
+                ? scriptPath
+                : $"{scriptPath} --universe {universe} --session {tradingSession} --timeframe {timeFrame} --StartDate {startDate}";
+
+            var sbOut = new StringBuilder();
+            var sbErr = new StringBuilder();
+            var (_, _, pyCode) = await ProcessRunner.RunAsync(
+                pythonExec,
+                scriptArgs,
+                line =>
+                {
+                    _logger.LogInformation("[price-export] {Line}", line);
+                    sbOut.AppendLine(line);
+                },
+                line =>
+                {
+                    _logger.LogWarning("[price-export] {Line}", line);
+                    sbErr.AppendLine(line);
+                });
+            if (pyCode != 0)
             {
-                var size = new FileInfo(path).Length;
-                _logger.LogInformation("Found export file {File} ({Size} bytes)", path, size);
+                _logger.LogError("Price export script failed for {Universe}: {Error}", universe, sbErr.ToString());
+                continue;
             }
-            else
+            _logger.LogInformation("Price export script completed successfully for {Universe}: {Output}", universe, sbOut.ToString());
+
+            var exportDir = Path.Combine("/home/data/historical_data", universe);
+            foreach (var name in new[] { "A", "H", "I" })
             {
-                _logger.LogWarning("Missing export file {File}", path);
+                var path = Path.Combine(exportDir, $"{name}.txt");
+                if (File.Exists(path))
+                {
+                    var size = new FileInfo(path).Length;
+                    _logger.LogInformation("Found export file {File} ({Size} bytes)", path, size);
+                }
+                else
+                {
+                    _logger.LogWarning("Missing export file {File}", path);
+                }
             }
-        }
 
-        //using var connection = _context.CreateConnection();
-        //var selectSql = "SELECT symbol, value FROM prices ORDER BY timestamp DESC";
-        //_logger.LogInformation("Executing SQL: {Sql}", selectSql);
-        //var prices = await connection.QueryAsync<Price>(selectSql);
+            using var connection = _context.CreateConnection();
+            var prices = await connection.QueryAsync<Price>("SELECT symbol, value FROM prices ORDER BY timestamp DESC");
 
-        //var inputPath = Path.GetTempFileName();
-        //await File.WriteAllLinesAsync(inputPath, prices.Select(p => $"{p.Symbol},{p.Value}"));
+            var inputPath = Path.GetTempFileName();
+            await File.WriteAllLinesAsync(inputPath, prices.Select(p => $"{p.Symbol},{p.Value}"));
 
-        var executables = new List<(string Path, string Args)>
-        {
-            //(_config["GenBinariesExecutable"] ?? string.Empty, inputPath),
-            // Add more executables here, e.g.:
-            // ("/path/to/executable", "--arg1 value1 --arg2 value2")
-        };
-
-        string stdout = string.Empty;
-        foreach (var (path, args) in executables)
-        {
-            if (string.IsNullOrWhiteSpace(path)) continue;
-            var (outText, errText, exit) = await ProcessRunner.RunAsync(path, args);
-            if (exit != 0)
+            if (!string.IsNullOrWhiteSpace(execPath))
             {
-                _logger.LogError("Executable {Exec} failed: {Error}", path, errText);
-                return;
+                var (stdout, stderr, code) = await ProcessRunner.RunAsync(execPath, inputPath);
+                if (code != 0)
+                {
+                    _logger.LogError("Executable {Exec} failed: {Error}", execPath, stderr);
+                    File.Delete(inputPath);
+                    continue;
+                }
+
+                using var reader = new StringReader(stdout);
+                string? line;
+                while ((line = await reader.ReadLineAsync()) != null)
+                {
+                    var parts = line.Split(',');
+                    if (parts.Length != 2) continue;
+                    var weight = new Weight
+                    {
+                        Symbol = parts[0],
+                        Value = decimal.Parse(parts[1]),
+                        AsOf = DateTime.UtcNow
+                    };
+                    var sql = @"INSERT INTO weights (symbol, value, asof) VALUES (@Symbol, @Value, @AsOf)
+                                ON CONFLICT (symbol) DO UPDATE SET value = excluded.value, asof = excluded.asof;";
+                    await connection.ExecuteAsync(sql, weight);
+                }
             }
-            _logger.LogInformation("Executable {Exec} completed: {Output}", path, outText);
-            stdout = outText;
-        }
 
-        using var reader = new StringReader(stdout);
-        string? line;
-        while ((line = await reader.ReadLineAsync()) != null)
-        {
-            var parts = line.Split(',');
-            if (parts.Length != 2) continue;
-            var weight = new Weight
-            {
-                Symbol = parts[0],
-                Value = decimal.Parse(parts[1]),
-                AsOf = DateTime.UtcNow
-            };
-            var sql = @"INSERT INTO weights (symbol, value, asof) VALUES (@Symbol, @Value, @AsOf)
-                        ON CONFLICT (symbol) DO UPDATE SET value = excluded.value, asof = excluded.asof;";
-            _logger.LogInformation("Executing SQL: {Sql}", sql);
-            await connection.ExecuteAsync(sql, weight);
+            File.Delete(inputPath);
         }
-
-        File.Delete(inputPath);
     }
 }
