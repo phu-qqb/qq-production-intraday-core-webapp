@@ -24,7 +24,6 @@ public class WeightCalculator
     public async Task CalculateAndStoreAsync()
     {
         var pythonExec = _config["Executables:PythonExecutable"] ?? "python3";
-        var execPath = _config["Executables:GenBinariesExecutable"] ?? string.Empty;
         var scriptPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../scripts/export_prices_rds.py"));
 
         foreach (var model in _config.GetSection("Programmes").GetChildren())
@@ -32,11 +31,11 @@ public class WeightCalculator
             var universe = model["Universe"] ?? string.Empty;
             var tradingSession = model["Session"] ?? string.Empty;
             var timeFrame = model["Timeframe"] ?? "60";
-            var startDate = model["StartDate"] ?? "2022-01-01T00:00:00Z";
+            var startDate = model["StartDate"] ?? "2022-01-01";
 
             var scriptArgs = string.IsNullOrEmpty(universe)
                 ? scriptPath
-                : $"{scriptPath} --universe {universe} --session {tradingSession} --timeframe {timeFrame} --StartDate {startDate}";
+                : $"{scriptPath} --universe {universe} --session {tradingSession} --timeframe {timeFrame} --start {startDate}";
 
             var sbOut = new StringBuilder();
             var sbErr = new StringBuilder();
@@ -53,7 +52,7 @@ public class WeightCalculator
                     _logger.LogWarning("[price-export] {Line}", line);
                     sbErr.AppendLine(line);
                 });
-                if (pyCode != 0)
+            if (pyCode != 0)
             {
                 _logger.LogError("Price export script failed for {Universe}: {Error}", universe, sbErr.ToString());
                 continue;
@@ -75,41 +74,62 @@ public class WeightCalculator
                 }
             }
 
-            using var connection = _context.CreateConnection();
-            var prices = await connection.QueryAsync<Price>("SELECT symbol, value FROM prices ORDER BY timestamp DESC");
-
-            var inputPath = Path.GetTempFileName();
-            await File.WriteAllLinesAsync(inputPath, prices.Select(p => $"{p.Symbol},{p.Value}"));
-
-            if (!string.IsNullOrWhiteSpace(execPath))
+            var executables = new List<(string Path, string Args)>
             {
-                var (stdout, stderr, code) = await ProcessRunner.RunAsync(execPath, inputPath);
-                if (code != 0)
-                {
-                    _logger.LogError("Executable {Exec} failed: {Error}", execPath, stderr);
-                    File.Delete(inputPath);
-                    continue;
-                }
+                (_config["Executables:GenBinariesExecutable"] ?? string.Empty, "INFX 1")
+                // Add more executables here, e.g.:
+                // ("/path/to/executable", "--arg1 value1 --arg2 value2")
+            };
 
-                using var reader = new StringReader(stdout);
-                string? line;
-                while ((line = await reader.ReadLineAsync()) != null)
+            string stdout = string.Empty;
+            foreach (var (path, args) in executables)
+            {
+                if (string.IsNullOrWhiteSpace(path)) continue;
+                var (outText, errText, exit) = await ProcessRunner.RunAsync(path, args);
+                if (exit != 0)
                 {
-                    var parts = line.Split(',');
-                    if (parts.Length != 2) continue;
-                    var weight = new Weight
-                    {
-                        Symbol = parts[0],
-                        Value = decimal.Parse(parts[1]),
-                        AsOf = DateTime.UtcNow
-                    };
-                    var sql = @"INSERT INTO weights (symbol, value, asof) VALUES (@Symbol, @Value, @AsOf)
-                                ON CONFLICT (symbol) DO UPDATE SET value = excluded.value, asof = excluded.asof;";
-                    await connection.ExecuteAsync(sql, weight);
+                    _logger.LogError("Error output: {Error}", errText);
+                    break;
                 }
+                _logger.LogInformation("Executable {Exec} completed: {Output}", path, outText);
+                stdout = outText;
             }
 
-            File.Delete(inputPath);
+            //using var connection = _context.CreateConnection();
+            //var prices = await connection.QueryAsync<Price>("SELECT symbol, value FROM prices ORDER BY timestamp DESC");
+
+            //var inputPath = Path.GetTempFileName();
+            //await File.WriteAllLinesAsync(inputPath, prices.Select(p => $"{p.Symbol},{p.Value}"));
+
+            //if (!string.IsNullOrWhiteSpace(execPath))
+            //{
+            //    var (stdout, stderr, code) = await ProcessRunner.RunAsync(execPath, inputPath);
+            //    if (code != 0)
+            //    {
+            //        _logger.LogError("Executable {Exec} failed: {Error}", execPath, stderr);
+            //        File.Delete(inputPath);
+            //        continue;
+            //    }
+
+            //    using var reader = new StringReader(stdout);
+            //    string? line;
+            //    while ((line = await reader.ReadLineAsync()) != null)
+            //    {
+            //        var parts = line.Split(',');
+            //        if (parts.Length != 2) continue;
+            //        var weight = new Weight
+            //        {
+            //            Symbol = parts[0],
+            //            Value = decimal.Parse(parts[1]),
+            //            AsOf = DateTime.UtcNow
+            //        };
+            //        var sql = @"INSERT INTO weights (symbol, value, asof) VALUES (@Symbol, @Value, @AsOf)
+            //                    ON CONFLICT (symbol) DO UPDATE SET value = excluded.value, asof = excluded.asof;";
+            //        await connection.ExecuteAsync(sql, weight);
+            //    }
+            //}
+
+            //File.Delete(inputPath);
         }
     }
 }

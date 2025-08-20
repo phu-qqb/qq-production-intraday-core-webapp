@@ -75,7 +75,7 @@ def check_long_gaps(ts: pd.Series, limit_days: int = 5) -> None:
     for idx in gaps.index:
         start = days.iloc[idx - 1].date()
         end = days.iloc[idx].date()
-        print(f"Warning: gap {start} → {end} ({int(gaps.loc[idx])} days)")
+        print(f"Warning: gap {start} to {end} ({int(gaps.loc[idx])} days)")
 
 def frame(sec_id: int, ser: pd.Series) -> pd.DataFrame:
     df = ser.rename("price").reset_index().rename(columns={"index": "timestamp"})
@@ -255,7 +255,7 @@ first_G = True
 
 for real_sid in universe_ids:
     sid = real_sid
-    print("→", real_sid)
+    print("done", real_sid)
 
     df_raw = read_price_bars(
         engine, real_sid, start_filter, args.session, args.timeframe
@@ -309,4 +309,4 @@ for key in ["A", "H", "I"]:
     else:
         print(f"Warning: expected {path} was not created")
 
-print("✅  Export complete")
+print("Export complete")
