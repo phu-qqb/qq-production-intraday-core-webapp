@@ -30,6 +30,7 @@ public class WeightCalculator
         foreach (var model in _config.GetSection("Programmes").GetChildren())
         {
             var universe = model["Universe"] ?? string.Empty;
+            var universeId = model["UniverseId"] ?? string.Empty;
             var tradingSession = model["Session"] ?? string.Empty;
             var timeFrame = model["Timeframe"] ?? "60";
             var startDate = model["StartDate"] ?? "2022-01-01";
@@ -60,7 +61,7 @@ public class WeightCalculator
             }
             _logger.LogInformation("Price export script completed successfully for {Universe}: {Output}", universe, sbOut.ToString());
 
-            var exportDir = Path.Combine("/home/data/historical_data", universe);
+            var exportDir = Path.Combine("/home/data/historical_data", $"Univ{universeId}");
             foreach (var name in new[] { "A", "H", "I" })
             {
                 var path = Path.Combine(exportDir, $"{name}.txt");
@@ -77,9 +78,9 @@ public class WeightCalculator
 
             var executables = new List<(string Path, string Args)>
             {
-                (_config["Executables:GenBinariesExecutable"] ?? string.Empty, "INFX 1")
-                // Add more executables here, e.g.:
-                // ("/path/to/executable", "--arg1 value1 --arg2 value2")
+                (_config["Executables:GenBinariesExecutable"] ?? string.Empty, $"{universe} {universeId}"),
+                (_config["Executables:GenTimeSeriesExecutable"] ?? string.Empty, $"{universe}"),
+                (_config["Executables:ProdManagerExecutable"] ?? string.Empty, $"{universe} account={universe}")
             };
 
             string stdout = string.Empty;
