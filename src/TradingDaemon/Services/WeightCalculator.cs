@@ -113,6 +113,20 @@ public class WeightCalculator
                 stdout = outText;
             }
 
+            var weightsFile = Path.Combine(@"C:\home\prod", universe, "AggregatedWeights.txt");
+            if (File.Exists(weightsFile))
+            {
+                var lines = await File.ReadAllLinesAsync(weightsFile);
+                foreach (var line in lines)
+                {
+                    _logger.LogInformation("[aggregated-weights] {Line}", line);
+                }
+            }
+            else
+            {
+                _logger.LogWarning("Missing weights file {File}", weightsFile);
+            }
+
             //using var connection = _context.CreateConnection();
             //var prices = await connection.QueryAsync<Price>("SELECT symbol, value FROM prices ORDER BY timestamp DESC");
 
