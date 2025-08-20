@@ -18,7 +18,10 @@ public class PriceFetcherTests
             .ReturnsAsync(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("[]") });
         var client = new HttpClient(handler.Object) { BaseAddress = new Uri("http://test") };
         var factory = Mock.Of<IHttpClientFactory>(f => f.CreateClient("PriceApi") == client);
-        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["ConnectionStrings:DefaultConnection"] = "" }).Build();
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["ConnectionStrings:DefaultConnection"] = "Server=localhost;Database=test;User Id=test;Password=test;"
+        }).Build();
         var context = new DapperContext(config);
         var logger = Mock.Of<ILogger<PriceFetcher>>();
         var fetcher = new PriceFetcher(factory, context, logger);
