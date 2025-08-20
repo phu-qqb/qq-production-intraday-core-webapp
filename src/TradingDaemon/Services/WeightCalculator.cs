@@ -148,9 +148,14 @@ WHEN NOT MATCHED THEN
                         _logger.LogInformation("[aggregated-weights] {Line}", line);
                         var parts = line.Split(delimiter, StringSplitOptions.TrimEntries);
                         if (parts.Length <= 1 ||
-                            !DateTime.TryParse(parts[0], CultureInfo.InvariantCulture,
-                                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var barTimeUtc))
-                            continue;
+                            !DateTime.TryParseExact(
+                                parts[0],
+                                "yyyyMMddHHmm",
+                                CultureInfo.InvariantCulture,
+                                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                                out var barTimeUtc))
+                                    continue;
+
 
                         for (var i = 1; i < parts.Length && i - 1 < securityIds.Length; i++)
                         {
