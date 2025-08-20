@@ -21,7 +21,7 @@ public class DapperContext
         }
 
         var secretName = "qq-intraday-credentials";
-        var region = configuration["AWS:Region"] ?? Environment.GetEnvironmentVariable("AWS_REGION") ?? "us-east-1";
+        var region = configuration["AWS:Region"] ?? Environment.GetEnvironmentVariable("AWS_REGION") ?? "eu-west-2";
 
         using var client = new AmazonSecretsManagerClient(RegionEndpoint.GetBySystemName(region));
         var request = new GetSecretValueRequest { SecretId = secretName };
@@ -31,8 +31,8 @@ public class DapperContext
         var host = doc.GetProperty("host").GetString();
         var username = doc.GetProperty("username").GetString();
         var password = doc.GetProperty("password").GetString();
-        var dbname = doc.TryGetProperty("dbname", out var dbEl) ? dbEl.GetString() : string.Empty;
-        var port = doc.TryGetProperty("port", out var portEl) ? portEl.GetInt32() : 1433;
+        var dbname = doc.TryGetProperty("database", out var dbEl) ? dbEl.GetString() : string.Empty;
+        var port = doc.TryGetProperty("port", out var portEl) ? Int32.Parse(portEl.GetString()) : 1433;
 
         _connectionString = $"Server={host},{port};Database={dbname};User Id={username};Password={password};Encrypt=True;TrustServerCertificate=True;";
     }

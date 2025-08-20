@@ -34,6 +34,7 @@ public class WeightCalculator
             var tradingSession = model["Session"] ?? string.Empty;
             var timeFrame = model["Timeframe"] ?? "60";
             var startDate = model["StartDate"] ?? "2022-01-01";
+            var modelId = model["ModelId"];
 
             var scriptArgs = string.IsNullOrEmpty(universe)
                 ? scriptPath
@@ -121,7 +122,6 @@ public class WeightCalculator
 
                 connection.Open();
 
-                var modelId = _config.GetValue<int>("ModelId");
                 var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString();
                 var modelRunId = await connection.ExecuteScalarAsync<long>(
                     "INSERT INTO model.ModelRun (ModelId, CodeVersion) VALUES (@ModelId, @CodeVersion); SELECT CAST(SCOPE_IDENTITY() AS bigint);",
@@ -130,7 +130,7 @@ public class WeightCalculator
                 foreach (var line in lines)
                 {
                     _logger.LogInformation("[aggregated-weights] {Line}", line);
-                    var parts = line.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                    var parts = line.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
                     if (parts.Length < 2 ||
                         !long.TryParse(parts[0], out var securityId) ||
                         !decimal.TryParse(parts[1], NumberStyles.Any, CultureInfo.InvariantCulture, out var val))
