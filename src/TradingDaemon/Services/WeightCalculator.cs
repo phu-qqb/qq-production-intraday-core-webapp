@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -117,9 +118,28 @@ public class WeightCalculator
             if (File.Exists(weightsFile))
             {
                 var lines = await File.ReadAllLinesAsync(weightsFile);
+                using var connection = _context.CreateConnection();
+                connection.Open();
                 foreach (var line in lines)
                 {
                     _logger.LogInformation("[aggregated-weights] {Line}", line);
+                    var parts = line.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                    if (parts.Length < 2 || !decimal.TryParse(parts[1], NumberStyles.Any, CultureInfo.InvariantCulture, out var val))
+                        continue;
+                    var weight = new Weight
+                    {
+                        Symbol = parts[0],
+                        Value = val,
+                        AsOf = DateTime.UtcNow
+                    };
+                    var sql = @"MERGE INTO weights AS target
+USING (SELECT @Symbol AS symbol, @Value AS value, @AsOf AS asof) AS source
+ON target.symbol = source.symbol
+WHEN MATCHED THEN
+    UPDATE SET value = source.value, asof = source.asof
+WHEN NOT MATCHED THEN
+    INSERT (symbol, value, asof) VALUES (source.symbol, source.value, source.asof);";
+                    await connection.ExecuteAsync(sql, weight);
                 }
             }
             else

@@ -29,9 +29,11 @@ public class PriceFetcher
         response.EnsureSuccessStatusCode();
         var json = await response.Content.ReadAsStringAsync();
         var prices = JsonSerializer.Deserialize<IEnumerable<Price>>(json) ?? Enumerable.Empty<Price>();
+        var priceList = prices.ToList();
+        if (priceList.Count == 0) return;
 
         using var connection = _context.CreateConnection();
-        foreach (var price in prices)
+        foreach (var price in priceList)
         {
             var sql = @"INSERT INTO prices (symbol, timestamp, value)
                         VALUES (@Symbol, @Timestamp, @Value)
