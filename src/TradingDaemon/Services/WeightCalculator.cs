@@ -146,13 +146,13 @@ END";
 
                     foreach (var line in lines.Skip(1))
                     {
-                        _logger.LogInformation("[aggregated-weights] {Line}", line);
                         var parts = line.Split(delimiter, StringSplitOptions.TrimEntries);
                         if (parts.Length <= 1 ||
                             !DateTime.TryParse(parts[0], CultureInfo.InvariantCulture,
                                 DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var barTimeUtc))
                             continue;
 
+                        var inserted = false;
                         for (var i = 1; i < parts.Length && i - 1 < securityIds.Length; i++)
                         {
                             var securityId = securityIds[i - 1];
@@ -169,7 +169,13 @@ END";
                                 Weight = val
                             };
 
-                            await connection.ExecuteAsync(sql, record);
+                            var rows = await connection.ExecuteAsync(sql, record);
+                            if (rows > 0) inserted = true;
+                        }
+
+                        if (inserted)
+                        {
+                            _logger.LogInformation("[aggregated-weights] {Line}", line);
                         }
                     }
                 }
