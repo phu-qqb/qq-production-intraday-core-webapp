@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -85,11 +86,27 @@ public class WeightCalculator
             foreach (var (path, args) in executables)
             {
                 if (string.IsNullOrWhiteSpace(path)) continue;
+                var commandLine = $"{path} {args}".Trim();
+                _logger.LogInformation("Executing command: {Command}", commandLine);
                 var (outText, errText, exit) = await ProcessRunner.RunAsync(path, args);
                 if (exit != 0)
                 {
-                    _logger.LogError("Error output: {Error}", errText);
-                    break;
+                    var message = $"Executable failed: {commandLine} (exit code {exit})";
+                    _logger.LogError("{Message}. Error output: {Error}", message, errText);
+                    if (OperatingSystem.IsWindows())
+                    {
+                        try
+                        {
+                            var type = Type.GetType("System.Windows.Forms.MessageBox, System.Windows.Forms");
+                            type?.GetMethod("Show", new[] { typeof(string), typeof(string) })?
+                                .Invoke(null, new object[] { $"{message}\n{errText}", "Execution Error" });
+                        }
+                        catch
+                        {
+                            // ignore any reflection errors
+                        }
+                    }
+                    return;
                 }
                 _logger.LogInformation("Executable {Exec} completed: {Output}", path, outText);
                 stdout = outText;
