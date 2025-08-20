@@ -6,7 +6,6 @@ using System.Linq;
 using System.Text;
 using Dapper;
 using TradingDaemon.Data;
-using TradingDaemon.Models;
 
 namespace TradingDaemon.Services;
 
@@ -122,26 +121,39 @@ public class WeightCalculator
 
                 connection.Open();
 
+                var modelId = _config.GetValue<int>("ModelId");
+                var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString();
+                var modelRunId = await connection.ExecuteScalarAsync<long>(
+                    "INSERT INTO model.ModelRun (ModelId, CodeVersion) VALUES (@ModelId, @CodeVersion); SELECT CAST(SCOPE_IDENTITY() AS bigint);",
+                    new { ModelId = modelId, CodeVersion = version });
+
                 foreach (var line in lines)
                 {
                     _logger.LogInformation("[aggregated-weights] {Line}", line);
                     var parts = line.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-                    if (parts.Length < 2 || !decimal.TryParse(parts[1], NumberStyles.Any, CultureInfo.InvariantCulture, out var val))
+                    if (parts.Length < 2 ||
+                        !long.TryParse(parts[0], out var securityId) ||
+                        !decimal.TryParse(parts[1], NumberStyles.Any, CultureInfo.InvariantCulture, out var val))
                         continue;
-                    var weight = new Weight
+
+                    var record = new
                     {
-                        Symbol = parts[0],
-                        Value = val,
-                        AsOf = DateTime.UtcNow
+                        SecurityId = securityId,
+                        ModelId = modelId,
+                        BarTimeUtc = DateTime.UtcNow,
+                        ModelRunId = modelRunId,
+                        Weight = val
                     };
-                    var sql = @"MERGE INTO weights AS target
-USING (SELECT @Symbol AS symbol, @Value AS value, @AsOf AS asof) AS source
-ON target.symbol = source.symbol
+
+                    var sql = @"MERGE model.TheoreticalWeight AS target
+USING (SELECT @SecurityId AS SecurityId, @ModelId AS ModelId, @BarTimeUtc AS BarTimeUtc, @ModelRunId AS ModelRunId, @Weight AS Weight) AS source
+ON target.SecurityId = source.SecurityId AND target.ModelId = source.ModelId AND target.BarTimeUtc = source.BarTimeUtc
 WHEN MATCHED THEN
-    UPDATE SET value = source.value, asof = source.asof
+    UPDATE SET ModelRunId = source.ModelRunId, Weight = source.Weight
 WHEN NOT MATCHED THEN
-    INSERT (symbol, value, asof) VALUES (source.symbol, source.value, source.asof);";
-                    await connection.ExecuteAsync(sql, weight);
+    INSERT (SecurityId, ModelId, BarTimeUtc, ModelRunId, Weight) VALUES (source.SecurityId, source.ModelId, source.BarTimeUtc, source.ModelRunId, source.Weight);";
+
+                    await connection.ExecuteAsync(sql, record);
                 }
             }
             else
