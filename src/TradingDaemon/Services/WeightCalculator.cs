@@ -53,7 +53,7 @@ public class WeightCalculator
                     _logger.LogWarning("[price-export] {Line}", line);
                     sbErr.AppendLine(line);
                 });
-            if (pyCode != 0)
+                if (pyCode != 0)
             {
                 _logger.LogError("Price export script failed for {Universe}: {Error}", universe, sbErr.ToString());
                 continue;
