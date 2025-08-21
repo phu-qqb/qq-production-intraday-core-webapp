@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Data;
 using Dapper;
 using TradingDaemon.Data;
 
@@ -34,7 +35,7 @@ public class WeightCalculator
             var tradingSession = model["Session"] ?? string.Empty;
             var timeFrame = model["Timeframe"] ?? "60";
             var startDate = model["StartDate"] ?? "2022-01-01";
-            var modelId = model["ModelId"];
+            var modelId = int.Parse(model["ModelId"] ?? "0");
 
             var scriptArgs = string.IsNullOrEmpty(universe)
                 ? scriptPath
@@ -184,6 +185,8 @@ END";
                         }
                     }
                 }
+
+                await ComputeNettedWeights(connection, modelId, modelRunId);
             }
             else
             {
@@ -225,6 +228,91 @@ END";
             //}
 
             //File.Delete(inputPath);
+        }
+    }
+
+    private async Task ComputeNettedWeights(IDbConnection connection, int modelId, long modelRunId)
+    {
+        var weights = await connection.QueryAsync<(long SecurityId, DateTime BarTimeUtc, decimal Weight, string Ticker)>(
+            @"SELECT tw.SecurityId, tw.BarTimeUtc, tw.Weight, s.BloombergTicker
+              FROM model.TheoreticalWeight tw
+              JOIN core.Security s ON tw.SecurityId = s.SecurityId
+              WHERE tw.ModelId = @ModelId AND tw.ModelRunId = @ModelRunId",
+            new { ModelId = modelId, ModelRunId = modelRunId });
+
+        var usdPairs = await connection.QueryAsync<(long SecurityId, string Ticker)>(
+            @"SELECT SecurityId, BloombergTicker FROM core.Security WHERE BloombergTicker LIKE '%USD%'");
+
+        var usdMap = new Dictionary<(string Base, string Quote), long>();
+        foreach (var p in usdPairs)
+        {
+            var pair = p.Ticker.Split(' ')[0];
+            if (pair.Length < 6) continue;
+            var baseCcy = pair[..3];
+            var quoteCcy = pair.Substring(3, 3);
+            usdMap[(baseCcy, quoteCcy)] = p.SecurityId;
+        }
+
+        var net = new Dictionary<(long SecurityId, DateTime BarTimeUtc), decimal>();
+
+        foreach (var w in weights)
+        {
+            var pair = w.Ticker.Split(' ')[0];
+            if (pair.Length < 6) continue;
+            var baseCcy = pair[..3];
+            var quoteCcy = pair.Substring(3, 3);
+
+            if (baseCcy == "USD" || quoteCcy == "USD")
+            {
+                var key = (w.SecurityId, w.BarTimeUtc);
+                net[key] = net.GetValueOrDefault(key) + w.Weight;
+                continue;
+            }
+
+            if (usdMap.TryGetValue((baseCcy, "USD"), out var baseId))
+            {
+                var key = (baseId, w.BarTimeUtc);
+                net[key] = net.GetValueOrDefault(key) + w.Weight;
+            }
+            else if (usdMap.TryGetValue(("USD", baseCcy), out var invBaseId))
+            {
+                var key = (invBaseId, w.BarTimeUtc);
+                net[key] = net.GetValueOrDefault(key) - w.Weight;
+            }
+
+            if (usdMap.TryGetValue((quoteCcy, "USD"), out var quoteId))
+            {
+                var key = (quoteId, w.BarTimeUtc);
+                net[key] = net.GetValueOrDefault(key) - w.Weight;
+            }
+            else if (usdMap.TryGetValue(("USD", quoteCcy), out var invQuoteId))
+            {
+                var key = (invQuoteId, w.BarTimeUtc);
+                net[key] = net.GetValueOrDefault(key) + w.Weight;
+            }
+        }
+
+        var insertSql = @"IF NOT EXISTS (
+    SELECT 1 FROM model.NettedWeight
+    WHERE SecurityId = @SecurityId AND ModelId = @ModelId AND BarTimeUtc = @BarTimeUtc
+)
+BEGIN
+    INSERT INTO model.NettedWeight (SecurityId, ModelId, BarTimeUtc, ModelRunId, Weight)
+    VALUES (@SecurityId, @ModelId, @BarTimeUtc, @ModelRunId, @Weight);
+END";
+
+        foreach (var entry in net)
+        {
+            var record = new
+            {
+                SecurityId = entry.Key.SecurityId,
+                ModelId = modelId,
+                BarTimeUtc = entry.Key.BarTimeUtc,
+                ModelRunId = modelRunId,
+                Weight = entry.Value
+            };
+
+            await connection.ExecuteAsync(insertSql, record);
         }
     }
 }
