@@ -256,8 +256,9 @@ END";
 
             if (baseCcy == "USD" || quoteCcy == "USD")
             {
-                var key = (w.SecurityId, w.BarTimeUtc);
-                net[key] = net.GetValueOrDefault(key) + w.Weight;
+                var (secId, weight) = NormalizeUsdPair(w.SecurityId, pair, w.Weight, usdMap);
+                var key = (secId, w.BarTimeUtc);
+                net[key] = net.GetValueOrDefault(key) + weight;
                 continue;
             }
 
@@ -317,10 +318,41 @@ END";
             if (pair.Length < 6) continue;
             var baseCcy = pair[..3];
             var quoteCcy = pair.Substring(3, 3);
-            if (usdMap.ContainsKey((quoteCcy, baseCcy))) continue;
             usdMap[(baseCcy, quoteCcy)] = p.SecurityId;
         }
 
         return usdMap;
+    }
+
+    private static (long SecurityId, decimal Weight) NormalizeUsdPair(
+        long securityId,
+        string pair,
+        decimal weight,
+        Dictionary<(string Base, string Quote), long> usdMap)
+    {
+        var baseCcy = pair[..3];
+        var quoteCcy = pair.Substring(3, 3);
+
+        if (baseCcy == "USD")
+        {
+            if (usdMap.TryGetValue((quoteCcy, "USD"), out var canonId))
+            {
+                return (canonId, -weight);
+            }
+
+            return (securityId, weight);
+        }
+
+        if (quoteCcy == "USD")
+        {
+            if (usdMap.TryGetValue((baseCcy, quoteCcy), out var canonId))
+            {
+                return (canonId, weight);
+            }
+
+            return (securityId, weight);
+        }
+
+        return (securityId, weight);
     }
 }
