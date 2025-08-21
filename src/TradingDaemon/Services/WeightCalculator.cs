@@ -243,15 +243,7 @@ END";
         var usdPairs = await connection.QueryAsync<(long SecurityId, string Ticker)>(
             @"SELECT SecurityId, BloombergTicker FROM core.Security WHERE BloombergTicker LIKE '%USD%'");
 
-        var usdMap = new Dictionary<(string Base, string Quote), long>();
-        foreach (var p in usdPairs)
-        {
-            var pair = p.Ticker.Split(' ')[0];
-            if (pair.Length < 6) continue;
-            var baseCcy = pair[..3];
-            var quoteCcy = pair.Substring(3, 3);
-            usdMap[(baseCcy, quoteCcy)] = p.SecurityId;
-        }
+        var usdMap = BuildUsdMap(usdPairs);
 
         var net = new Dictionary<(long SecurityId, DateTime BarTimeUtc), decimal>();
 
@@ -314,5 +306,21 @@ END";
 
             await connection.ExecuteAsync(insertSql, record);
         }
+    }
+
+    private static Dictionary<(string Base, string Quote), long> BuildUsdMap(IEnumerable<(long SecurityId, string Ticker)> usdPairs)
+    {
+        var usdMap = new Dictionary<(string Base, string Quote), long>();
+        foreach (var p in usdPairs)
+        {
+            var pair = p.Ticker.Split(' ')[0];
+            if (pair.Length < 6) continue;
+            var baseCcy = pair[..3];
+            var quoteCcy = pair.Substring(3, 3);
+            if (usdMap.ContainsKey((quoteCcy, baseCcy))) continue;
+            usdMap[(baseCcy, quoteCcy)] = p.SecurityId;
+        }
+
+        return usdMap;
     }
 }
