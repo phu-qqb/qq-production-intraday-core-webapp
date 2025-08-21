@@ -42,6 +42,7 @@ if (app.Environment.IsDevelopment())
 }
 
 app.MapFillEndpoints();
+app.MapPriceEndpoints();
 app.MapWeightEndpoints();
 app.MapTradingEndpoints();
 
