@@ -22,11 +22,11 @@ public class PriceFetcherTests
     {
         var tempFile = Path.GetTempFileName();
         File.WriteAllText(tempFile, "Timestamp,123\n");
-        Environment.SetEnvironmentVariable("PRICE_CSV_PATH", tempFile);
 
         var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
         {
-            ["ConnectionStrings:DefaultConnection"] = "Server=localhost;Database=test;User Id=test;Password=test;"
+            ["ConnectionStrings:DefaultConnection"] = "Server=localhost;Database=test;User Id=test;Password=test;",
+            ["PriceCsvPath"] = tempFile
         }).Build();
         var context = new TestDapperContext(config);
         var logger = Mock.Of<ILogger<PriceFetcher>>();
