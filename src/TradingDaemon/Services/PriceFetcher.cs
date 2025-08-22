@@ -148,7 +148,7 @@ public class PriceFetcher
             if (offset != 0) local = local.AddMinutes(-offset);
             var start = local.TimeOfDay;
             var end = start.Add(TimeSpan.FromMinutes(minutes - 1));
-            if (start > bounds.End || end < bounds.Start) continue;
+            if (start < bounds.Start || end > bounds.End) continue;
             var bucket = new DateTime(local.Year, local.Month, local.Day, local.Hour, local.Minute / minutes * minutes, 0);
             if (currentBucket != bucket)
             {
