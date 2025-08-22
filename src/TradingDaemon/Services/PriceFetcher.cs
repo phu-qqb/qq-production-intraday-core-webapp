@@ -66,7 +66,7 @@ public class PriceFetcher
         // Retrieve all existing raw bars for the affected securities so that
         // flat bars can be recomputed over the full history instead of only
         // the newly provided data.
-        const string selectRaw = "SELECT SecurityId, BarTimeUtc, Close FROM [Intraday].[mkt].[PriceBar] WHERE TimeframeMinute = 60 AND SecurityId IN @SecurityIds";
+        const string selectRaw = "SELECT SecurityId, BarTimeUtc, [Close] FROM [Intraday].[mkt].[PriceBar] WHERE TimeframeMinute = 60 AND SecurityId IN @SecurityIds";
         var existing = await connection.QueryAsync<HistClose>(selectRaw, new { SecurityIds = securityIds });
 
         // Combine existing database bars with the latest file data, removing duplicates
