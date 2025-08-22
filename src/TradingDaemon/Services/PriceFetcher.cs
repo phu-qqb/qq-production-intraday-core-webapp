@@ -56,7 +56,7 @@ public class PriceFetcher
 
         using var connection = _context.CreateConnection();
         await connection.ExecuteAsync("DELETE FROM [Intraday].[mkt].[Stage_HistClose]");
-        const string insertSql = "INSERT INTO [Intraday].[mkt].[Stage_HistClose] (SecurityId, BarTimeUtc, Close) VALUES (@SecurityId, @BarTimeUtc, @Close)";
+        const string insertSql = "INSERT INTO [Intraday].[mkt].[Stage_HistClose] (SecurityId, BarTimeUtc, [Close]) VALUES (@SecurityId, @BarTimeUtc, @Close)";
         await connection.ExecuteAsync(insertSql, records);
 
         await connection.ExecuteAsync("DELETE FROM [Intraday].[dbo].[mkt_FlatBar_Staging]");
@@ -77,7 +77,7 @@ public class PriceFetcher
 
         if (flatRecords.Count > 0)
         {
-            const string insertFlat = "INSERT INTO [Intraday].[dbo].[mkt_FlatBar_Staging] (SecurityId, BarTimeUtc, Close, Session) VALUES (@SecurityId, @BarTimeUtc, @Close, @Session)";
+            const string insertFlat = "INSERT INTO [Intraday].[dbo].[mkt_FlatBar_Staging] (SecurityId, BarTimeUtc, [Close], Session) VALUES (@SecurityId, @BarTimeUtc, @Close, @Session)";
             await connection.ExecuteAsync(insertFlat, flatRecords);
         }
     }
