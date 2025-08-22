@@ -59,9 +59,22 @@ public class PriceFetcher
         const string insertSql = "INSERT INTO [Intraday].[mkt].[Stage_HistClose] (SecurityId, BarTimeUtc, Close) VALUES (@SecurityId, @BarTimeUtc, @Close)";
         await connection.ExecuteAsync(insertSql, records);
 
+        // Retrieve all existing raw bars for the affected securities so that
+        // flat bars can be recomputed over the full history instead of only
+        // the newly provided data.
+        const string selectRaw = "SELECT SecurityId, BarTimeUtc, Close FROM [Intraday].[mkt].[PriceBar] WHERE TimeframeMinute = 60 AND SecurityId IN @SecurityIds";
+        var existing = await connection.QueryAsync<HistClose>(selectRaw, new { SecurityIds = securityIds });
+
+        // Combine existing database bars with the latest file data, removing duplicates
+        // by timestamp so that the most recent value for a given bar is used.
+        var allBars = existing.Concat(records)
+            .GroupBy(r => (r.SecurityId, r.BarTimeUtc))
+            .Select(g => g.Last())
+            .ToList();
+
         await connection.ExecuteAsync("DELETE FROM [Intraday].[dbo].[mkt_FlatBar_Staging]");
         var flatRecords = new List<FlatPrice>();
-        foreach (var grp in records.GroupBy(r => r.SecurityId))
+        foreach (var grp in allBars.GroupBy(r => r.SecurityId))
         {
             var ordered = grp.OrderBy(r => r.BarTimeUtc).ToList();
             var rawEU = RawNMin(ordered, 60, "EU", 0);
