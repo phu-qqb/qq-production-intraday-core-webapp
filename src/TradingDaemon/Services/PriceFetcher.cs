@@ -114,8 +114,9 @@ public class PriceFetcher
         {
             var ny = TimeZoneInfo.ConvertTimeFromUtc(item.BarTimeUtc, NewYorkZone);
             if (offset != 0) ny = ny.AddMinutes(-offset);
-            var tod = ny.TimeOfDay;
-            if (tod < bounds.Start || tod > bounds.End) continue;
+            var start = ny.TimeOfDay;
+            var end = start.Add(TimeSpan.FromMinutes(minutes - 1));
+            if (start > bounds.End || end < bounds.Start) continue;
             var bucket = new DateTime(ny.Year, ny.Month, ny.Day, ny.Hour, ny.Minute / minutes * minutes, 0);
             if (currentBucket != bucket)
             {
