@@ -2,6 +2,8 @@ using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Linq;
 using System.IO;
+using System.Data;
+using Microsoft.Data.SqlClient;
 using Dapper;
 using TradingDaemon.Data;
 using TradingDaemon.Models;
@@ -54,7 +56,8 @@ public class PriceFetcher
 
         if (records.Count == 0) return;
 
-        using var connection = _context.CreateConnection();
+        using var connection = (SqlConnection)_context.CreateConnection();
+        await connection.OpenAsync();
         await connection.ExecuteAsync("DELETE FROM [Intraday].[mkt].[Stage_HistClose]");
         const string insertSql = "INSERT INTO [Intraday].[mkt].[Stage_HistClose] (SecurityId, BarTimeUtc, Close) VALUES (@SecurityId, @BarTimeUtc, @Close)";
         await connection.ExecuteAsync(insertSql, records);
@@ -94,8 +97,22 @@ public class PriceFetcher
 
         if (flatRecords.Count > 0)
         {
-            const string insertFlat = "INSERT INTO [Intraday].[dbo].[mkt_FlatBar_Staging] (SecurityId, BarTimeUtc, Close, Session) VALUES (@SecurityId, @BarTimeUtc, @Close, @Session)";
-            await connection.ExecuteAsync(insertFlat, flatRecords);
+            var table = new DataTable();
+            table.Columns.Add("SecurityId", typeof(string));
+            table.Columns.Add("BarTimeUtc", typeof(DateTime));
+            table.Columns.Add("Close", typeof(decimal));
+            table.Columns.Add("Session", typeof(string));
+
+            foreach (var r in flatRecords)
+            {
+                table.Rows.Add(r.SecurityId, r.BarTimeUtc, r.Close, r.Session);
+            }
+
+            using (var bulkCopy = new SqlBulkCopy(connection))
+            {
+                bulkCopy.DestinationTableName = "[Intraday].[dbo].[mkt_FlatBar_Staging]";
+                await bulkCopy.WriteToServerAsync(table);
+            }
 
             // Move staged flat bars into the main table for each session.
             foreach (var session in flatRecords.Select(r => r.Session).Distinct())
