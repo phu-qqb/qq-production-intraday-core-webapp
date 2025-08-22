@@ -96,6 +96,13 @@ public class PriceFetcher
         {
             const string insertFlat = "INSERT INTO [Intraday].[dbo].[mkt_FlatBar_Staging] (SecurityId, BarTimeUtc, Close, Session) VALUES (@SecurityId, @BarTimeUtc, @Close, @Session)";
             await connection.ExecuteAsync(insertFlat, flatRecords);
+
+            // Move staged flat bars into the main table for each session.
+            foreach (var session in flatRecords.Select(r => r.Session).Distinct())
+            {
+                await connection.ExecuteAsync(
+                    $"EXEC mkt.LoadFlatFromMinimal @TimeframeMinute = 60, @Session = N'{session}'");
+            }
         }
     }
 
