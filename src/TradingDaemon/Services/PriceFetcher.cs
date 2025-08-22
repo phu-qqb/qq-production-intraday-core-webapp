@@ -118,7 +118,7 @@ public class PriceFetcher
             foreach (var session in flatRecords.Select(r => r.Session).Distinct())
             {
                 await connection.ExecuteAsync(
-                    $"EXEC mkt.LoadFlatFromMinimal @TimeframeMinute = 60, @Session = N'{session}'");
+                    $"EXEC mkt.LoadFlatFromMinimal @TimeframeMinute = 60, @SessionCode = N'{session}'");
             }
         }
     }
