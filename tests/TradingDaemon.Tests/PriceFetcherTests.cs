@@ -83,4 +83,37 @@ public class PriceFetcherTests
         Assert.DoesNotContain(new TimeSpan(1, 0, 0), times);
         Assert.DoesNotContain(new TimeSpan(9, 0, 0), times);
     }
+
+    [Fact]
+    public void Flatten_FiltersBarsToEUSession()
+    {
+        var series = new List<HistClose>
+        {
+            new HistClose { BarTimeUtc = new DateTime(2024, 1, 2, 0, 0, 0, DateTimeKind.Utc), Close = 1m },
+            new HistClose { BarTimeUtc = new DateTime(2024, 1, 2, 1, 0, 0, DateTimeKind.Utc), Close = 2m },
+            new HistClose { BarTimeUtc = new DateTime(2024, 1, 2, 2, 0, 0, DateTimeKind.Utc), Close = 3m },
+            new HistClose { BarTimeUtc = new DateTime(2024, 1, 2, 8, 0, 0, DateTimeKind.Utc), Close = 4m },
+            new HistClose { BarTimeUtc = new DateTime(2024, 1, 2, 9, 0, 0, DateTimeKind.Utc), Close = 5m }
+        };
+
+        var raw = (List<(DateTime TimestampUtc, decimal Close)>)typeof(PriceFetcher)
+            .GetMethod("RawNMin", BindingFlags.NonPublic | BindingFlags.Static)!
+            .Invoke(null, new object[] { series, 60, "EU", 0 })!;
+
+        var zoneId = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? "Central European Standard Time"
+            : "Europe/Berlin";
+        var zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
+
+        var flat = (List<(DateTime TimestampUtc, decimal Close)>)typeof(PriceFetcher)
+            .GetMethod("Flatten", BindingFlags.NonPublic | BindingFlags.Static)!
+            .Invoke(null, new object[] { raw, zone })!;
+
+        var times = flat.Select(r => TimeZoneInfo.ConvertTimeFromUtc(r.TimestampUtc, zone).TimeOfDay).ToList();
+
+        Assert.DoesNotContain(new TimeSpan(1, 0, 0), times);
+        Assert.DoesNotContain(new TimeSpan(9, 0, 0), times);
+        Assert.Contains(new TimeSpan(2, 0, 0), times);
+        Assert.Contains(new TimeSpan(8, 0, 0), times);
+    }
 }
