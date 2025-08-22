@@ -59,6 +59,10 @@ public class PriceFetcher
         const string insertSql = "INSERT INTO [Intraday].[mkt].[Stage_HistClose] (SecurityId, BarTimeUtc, Close) VALUES (@SecurityId, @BarTimeUtc, @Close)";
         await connection.ExecuteAsync(insertSql, records);
 
+        // Load newly staged raw bars into the PriceBar table so that subsequent
+        // queries include the latest data.
+        await connection.ExecuteAsync("EXEC mkt.LoadRawFromStage @TimeframeMinute = 60");
+
         // Retrieve all existing raw bars for the affected securities so that
         // flat bars can be recomputed over the full history instead of only
         // the newly provided data.
