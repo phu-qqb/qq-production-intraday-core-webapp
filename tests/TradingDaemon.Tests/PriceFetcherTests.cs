@@ -116,4 +116,36 @@ public class PriceFetcherTests
         Assert.Contains(new TimeSpan(2, 0, 0), times);
         Assert.Contains(new TimeSpan(8, 0, 0), times);
     }
+
+    [Fact]
+    public void Flatten_FiltersBarsToUSSession()
+    {
+        var series = new List<HistClose>
+        {
+            new HistClose { BarTimeUtc = new DateTime(2024, 1, 2, 13, 0, 0, DateTimeKind.Utc), Close = 1m },
+            new HistClose { BarTimeUtc = new DateTime(2024, 1, 2, 14, 0, 0, DateTimeKind.Utc), Close = 2m },
+            new HistClose { BarTimeUtc = new DateTime(2024, 1, 2, 20, 0, 0, DateTimeKind.Utc), Close = 3m },
+            new HistClose { BarTimeUtc = new DateTime(2024, 1, 2, 21, 0, 0, DateTimeKind.Utc), Close = 4m }
+        };
+
+        var raw = (List<(DateTime TimestampUtc, decimal Close)>)typeof(PriceFetcher)
+            .GetMethod("RawNMin", BindingFlags.NonPublic | BindingFlags.Static)!
+            .Invoke(null, new object[] { series, 60, "US", 0 })!;
+
+        var zoneId = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? "Eastern Standard Time"
+            : "America/New_York";
+        var zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
+
+        var flat = (List<(DateTime TimestampUtc, decimal Close)>)typeof(PriceFetcher)
+            .GetMethod("Flatten", BindingFlags.NonPublic | BindingFlags.Static)!
+            .Invoke(null, new object[] { raw, zone })!;
+
+        var times = flat.Select(r => TimeZoneInfo.ConvertTimeFromUtc(r.TimestampUtc, zone).TimeOfDay).ToList();
+
+        Assert.DoesNotContain(new TimeSpan(8, 0, 0), times);
+        Assert.DoesNotContain(new TimeSpan(16, 0, 0), times);
+        Assert.Contains(new TimeSpan(9, 0, 0), times);
+        Assert.Contains(new TimeSpan(15, 0, 0), times);
+    }
 }
