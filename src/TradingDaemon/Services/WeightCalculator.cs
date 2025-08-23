@@ -145,6 +145,8 @@ BEGIN
     VALUES (@SecurityId, @ModelId, @BarTimeUtc, @ModelRunId, @Weight);
 END";
 
+                    var rows = new List<WeightRow>();
+
                     foreach (var line in lines.Skip(1))
                     {
                         var parts = line.Split(delimiter, StringSplitOptions.TrimEntries);
@@ -157,31 +159,61 @@ END";
                                 out var barTimeUtc))
                                     continue;
 
-
-                        var inserted = false;
+                        var weightArr = new decimal?[securityIds.Length];
                         for (var i = 1; i < parts.Length && i - 1 < securityIds.Length; i++)
                         {
-                            var securityId = securityIds[i - 1];
-                            if (securityId is null ||
-                                !decimal.TryParse(parts[i], NumberStyles.Any, CultureInfo.InvariantCulture, out var val))
+                            if (decimal.TryParse(parts[i], NumberStyles.Any, CultureInfo.InvariantCulture, out var val))
+                            {
+                                weightArr[i - 1] = val;
+                            }
+                        }
+
+                        rows.Add(new WeightRow(barTimeUtc, weightArr));
+                    }
+
+                    foreach (var group in rows.GroupBy(r => r.BarTimeUtc.Date))
+                    {
+                        var ordered = group.OrderBy(r => r.BarTimeUtc).ToList();
+                        if (ordered.Count >= 2)
+                        {
+                            var secondLast = ordered[^2];
+                            for (var i = 0; i < secondLast.Weights.Length; i++)
+                            {
+                                if (secondLast.Weights[i].HasValue)
+                                    secondLast.Weights[i] = 0m;
+                            }
+                        }
+                    }
+
+                    foreach (var row in rows)
+                    {
+                        var inserted = false;
+                        for (var i = 0; i < row.Weights.Length && i < securityIds.Length; i++)
+                        {
+                            var securityId = securityIds[i];
+                            var val = row.Weights[i];
+                            if (securityId is null || val is null)
                                 continue;
 
                             var record = new
                             {
                                 SecurityId = securityId.Value,
                                 ModelId = modelId,
-                                BarTimeUtc = barTimeUtc,
+                                BarTimeUtc = row.BarTimeUtc,
                                 ModelRunId = modelRunId,
-                                Weight = val
+                                Weight = val.Value
                             };
 
-                            var rows = await connection.ExecuteAsync(sql, record);
-                            if (rows > 0) inserted = true;
+                            var affected = await connection.ExecuteAsync(sql, record);
+                            if (affected > 0) inserted = true;
                         }
 
                         if (inserted)
                         {
-                            _logger.LogInformation("[aggregated-weights] {Line}", line);
+                            var lineOut = string.Join(delimiter,
+                                new[] { row.BarTimeUtc.ToString("yyyyMMddHHmm") }
+                                    .Concat(row.Weights.Select(w => w?.ToString(CultureInfo.InvariantCulture) ?? string.Empty)));
+                            _logger.LogInformation("[aggregated-weights] {Line}", lineOut);
                         }
                     }
                 }
@@ -354,5 +386,17 @@ END";
         }
 
         return (securityId, weight);
+    }
+
+    private sealed class WeightRow
+    {
+        public DateTime BarTimeUtc { get; }
+        public decimal?[] Weights { get; set; }
+
+        public WeightRow(DateTime barTimeUtc, decimal?[] weights)
+        {
+            BarTimeUtc = barTimeUtc;
+            Weights = weights;
+        }
     }
 }
