@@ -13,7 +13,9 @@
             "args": [
                 "--universe", "INFXUS",
                 "--session", "US",
-                "--start", "2022-01-01"
+                "--start", "2022-01-01",
+                "--model-id", "1",
+                "--timeframe", "60"
             ]
         }
     ]
