@@ -7,7 +7,7 @@ using Xunit;
 public class UsdPairNormalizationTests
 {
     [Fact]
-    public void BuildUsdMap_PreservesBothDirections()
+    public void BuildUsdMap_UsesUsdAsBase()
     {
         var usdPairs = new List<(long SecurityId, string Ticker)>
         {
@@ -19,9 +19,9 @@ public class UsdPairNormalizationTests
         var method = typeof(WeightCalculator).GetMethod("BuildUsdMap", BindingFlags.NonPublic | BindingFlags.Static);
         var usdMap = (Dictionary<(string Base, string Quote), long>)method!.Invoke(null, new object[] { usdPairs })!;
 
-        Assert.Equal(3, usdMap.Count);
-        Assert.Contains(("AUD", "USD"), usdMap.Keys);
-        Assert.Contains(("USD", "AUD"), usdMap.Keys);
+        Assert.Equal(2, usdMap.Count);
+        Assert.Equal(2L, usdMap[("USD", "AUD")]);
+        Assert.Equal(3L, usdMap[("USD", "EUR")]);
     }
 
     [Fact]
@@ -41,10 +41,10 @@ public class UsdPairNormalizationTests
         var result1 = ((long SecurityId, decimal Weight))normMethod!.Invoke(null, new object[] { 1L, "USDCHF", 1m, usdMap })!;
         var result2 = ((long SecurityId, decimal Weight))normMethod!.Invoke(null, new object[] { 2L, "CHFUSD", 2m, usdMap })!;
 
-        Assert.Equal(2L, result1.SecurityId);
-        Assert.Equal(-1m, result1.Weight);
-        Assert.Equal(2L, result2.SecurityId);
-        Assert.Equal(2m, result2.Weight);
-        Assert.Equal(1m, result1.Weight + result2.Weight);
+        Assert.Equal(1L, result1.SecurityId);
+        Assert.Equal(1m, result1.Weight);
+        Assert.Equal(1L, result2.SecurityId);
+        Assert.Equal(-2m, result2.Weight);
+        Assert.Equal(-1m, result1.Weight + result2.Weight);
     }
 }

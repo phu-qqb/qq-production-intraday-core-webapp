@@ -385,7 +385,17 @@ END";
             if (pair.Length < 6) continue;
             var baseCcy = pair[..3];
             var quoteCcy = pair.Substring(3, 3);
-            usdMap[(baseCcy, quoteCcy)] = p.SecurityId;
+
+            if (baseCcy == "USD")
+            {
+                // prefer mappings where USD is the base currency
+                usdMap[(baseCcy, quoteCcy)] = p.SecurityId;
+            }
+            else if (quoteCcy == "USD" && !usdMap.ContainsKey(("USD", baseCcy)))
+            {
+                // fall back to inverse pairs if the USD-base pair is missing
+                usdMap[("USD", baseCcy)] = p.SecurityId;
+            }
         }
 
         return usdMap;
@@ -400,19 +410,19 @@ END";
         var baseCcy = pair[..3];
         var quoteCcy = pair.Substring(3, 3);
 
-        if (baseCcy == "USD")
+        if (quoteCcy == "USD")
         {
-            if (usdMap.TryGetValue((quoteCcy, "USD"), out var canonId))
+            if (usdMap.TryGetValue(("USD", baseCcy), out var canonId))
             {
                 return (canonId, -weight);
             }
 
-            return (securityId, weight);
+            return (securityId, -weight);
         }
 
-        if (quoteCcy == "USD")
+        if (baseCcy == "USD")
         {
-            if (usdMap.TryGetValue((baseCcy, quoteCcy), out var canonId))
+            if (usdMap.TryGetValue(("USD", quoteCcy), out var canonId))
             {
                 return (canonId, weight);
             }
