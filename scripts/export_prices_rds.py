@@ -276,6 +276,9 @@ for real_sid in universe_ids:
     flat = df_flat.set_index("timestamp")["close"]
     all_ts.update(flat.index)
 
+    # Ensure H and I only contain timestamps present in A
+    raw = raw.reindex(flat.index).dropna()
+
     flat_frame = frame(sid, flat)
     print(f"Writing {len(flat_frame)} rows to {OUT['A']}")
     flat_frame.to_csv(OUT["A"], mode="a", header=False, index=False)
