@@ -115,18 +115,15 @@ public class PriceFetcher
             }
 
             // Move staged flat bars into the main table for each session.
-            foreach (var session in flatRecords.Select(r => r.Session).Distinct())
-            {
-                await connection.ExecuteAsync(
-                    $"EXEC mkt.LoadFlatFromMinimal @TimeframeMinute = 60, @SessionCode = N'{session}'");
-            }
+            await connection.ExecuteAsync(
+                    $"EXEC mkt.LoadFlatFromMinimal @TimeframeMinute = 60");
         }
     }
 
     private static readonly Dictionary<string, (TimeZoneInfo Zone, TimeSpan Start, TimeSpan End)> SessionBounds = new()
     {
         ["US"] = (NewYorkZone, TimeSpan.Parse("09:30"), TimeSpan.Parse("15:59")),
-        ["EU"] = (CentralEuropeZone, TimeSpan.Parse("02:00"), TimeSpan.Parse("08:59"))
+        ["EU"] = (NewYorkZone, TimeSpan.Parse("02:00"), TimeSpan.Parse("08:59"))
     };
 
     private static TimeZoneInfo NewYorkZone => TimeZoneInfo.FindSystemTimeZoneById(
@@ -148,7 +145,7 @@ public class PriceFetcher
             if (offset != 0) local = local.AddMinutes(-offset);
             var start = local.TimeOfDay;
             var end = start.Add(TimeSpan.FromMinutes(minutes - 1));
-            if (start < bounds.Start || end > bounds.End) continue;
+            if (end < bounds.Start || end > bounds.End) continue;
             var bucket = new DateTime(local.Year, local.Month, local.Day, local.Hour, local.Minute / minutes * minutes, 0);
             if (currentBucket != bucket)
             {
