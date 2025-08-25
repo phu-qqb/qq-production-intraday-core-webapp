@@ -22,6 +22,8 @@ import argparse
 import json
 import logging
 import os
+import boto3
+from botocore.exceptions import ClientError
 from dataclasses import dataclass
 from typing import Dict, Iterable, List, Tuple
 
@@ -58,6 +60,33 @@ RESULTSET_NAMES = [
     "monthly_by_pair",
     "risk_snapshot",
 ]
+
+
+def get_conn_from_secret(secret_name: str, region_name: str, default_driver: str) -> str:
+    """Return an ODBC connection string from AWS Secrets Manager."""
+    session = boto3.session.Session()
+    client = session.client(service_name="secretsmanager", region_name=region_name)
+    try:
+        resp = client.get_secret_value(SecretId=secret_name)
+    except ClientError as exc:
+        raise RuntimeError(f"Failed to retrieve secret {secret_name}") from exc
+
+    secret_str = resp.get("SecretString", "")
+    data = json.loads(secret_str)
+
+    if "conn" in data:
+        return data["conn"]
+
+    user = data.get("username", "")
+    password = data.get("password", "")
+    host = data.get("host")
+    port = data.get("port", 1433)
+    db = data.get("dbname") or data.get("database") or ""
+    driver = data.get("driver", default_driver)
+    return (
+        f"DRIVER={{{driver}}};SERVER={host},{port};DATABASE={db};"
+        f"UID={user};PWD={password};Encrypt=no"
+    )
 
 
 def fetch_report(params: ReportParams) -> Dict[str, pd.DataFrame]:
@@ -472,7 +501,25 @@ def write_manifest(paths: Dict[str, str], out_pdf: str, out_html: str, dfs: Dict
 
 def parse_args() -> ReportParams:
     parser = argparse.ArgumentParser(description="Generate Model DWM report")
-    parser.add_argument("--conn-string", required=True, help="ODBC connection string")
+    parser.add_argument(
+        "--conn-string",
+        help="ODBC connection string (overrides AWS secret if provided)",
+    )
+    parser.add_argument(
+        "--secret-name",
+        default="qq-intraday-credentials",
+        help="AWS Secrets Manager name containing DB credentials",
+    )
+    parser.add_argument(
+        "--region",
+        default="eu-west-2",
+        help="AWS region where the secret is stored",
+    )
+    parser.add_argument(
+        "--driver",
+        default="ODBC Driver 17 for SQL Server",
+        help="ODBC driver name to use when connecting via pyodbc",
+    )
     parser.add_argument("--model-id", type=int, required=True)
     parser.add_argument("--timeframe", type=int, required=True)
     parser.add_argument("--from-date", default=None, help="YYYY-MM-DD or null")
@@ -482,7 +529,8 @@ def parse_args() -> ReportParams:
     parser.add_argument("--output-dir", default="output", help="Directory for outputs")
     args = parser.parse_args()
     return ReportParams(
-        conn_str=args.conn_string,
+        conn_str=args.conn_string
+        or get_conn_from_secret(args.secret_name, args.region, args.driver),
         model_id=args.model_id,
         timeframe=args.timeframe,
         from_date=args.from_date,
