@@ -28,6 +28,8 @@ public class WeightCalculator
         var pythonExec = _config["Executables:PythonExecutable"] ?? "python3";
         var scriptPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../scripts/export_prices_rds.py"));
 
+        var modelTimeframes = new Dictionary<int, int>();
+
         foreach (var model in _config.GetSection("Programmes").GetChildren())
         {
             var universe = model["Universe"] ?? string.Empty;
@@ -36,6 +38,9 @@ public class WeightCalculator
             var timeFrame = model["Timeframe"] ?? "60";
             var startDate = model["StartDate"] ?? "2022-01-01";
             var modelId = int.Parse(model["ModelId"] ?? "0");
+            var timeFrameInt = int.TryParse(timeFrame, out var tfVal) ? tfVal : 60;
+
+            modelTimeframes[modelId] = timeFrameInt;
 
             var scriptArgs = string.IsNullOrEmpty(universe)
                 ? scriptPath
@@ -260,6 +265,36 @@ END";
             //}
 
             //File.Delete(inputPath);
+        }
+
+        await RunModelReportsAsync(modelTimeframes);
+    }
+
+    private async Task RunModelReportsAsync(Dictionary<int, int> modelTimeframes)
+    {
+        using var connection = _context.CreateConnection();
+
+        connection.Open();
+
+        var toUtc = DateTime.UtcNow.Date;
+        var fromUtc = toUtc.AddDays(-10);
+        var fromDate = new DateTime(toUtc.Year, 1, 1);
+        var toDate = new DateTime(toUtc.Year, toUtc.Month, 1).AddMonths(1);
+
+        foreach (var kvp in modelTimeframes)
+        {
+            var modelId = kvp.Key;
+            var timeframe = kvp.Value;
+
+            await connection.ExecuteAsync(
+                "model.ComputeAndStoreModelBarPnL",
+                new { ModelId = modelId, TimeframeMinute = timeframe, FromUtc = fromUtc, ToUtc = toUtc, UseLogReturn = 0 },
+                commandType: CommandType.StoredProcedure);
+
+            await connection.ExecuteAsync(
+                "model.Report_ModelDWM",
+                new { ModelId = modelId, TimeframeMinute = timeframe, FromDate = fromDate, ToDate = toDate, AnnualizeDays = 252 },
+                commandType: CommandType.StoredProcedure);
         }
     }
 
