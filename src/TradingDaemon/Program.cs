@@ -25,6 +25,7 @@ builder.Services.AddHttpClient("OrderApi", client =>
 builder.Services.AddTransient<PriceFetcher>();
 builder.Services.AddTransient<WeightCalculator>();
 builder.Services.AddTransient<OrderSender>();
+builder.Services.AddTransient<ReportRunner>();
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
@@ -45,5 +46,6 @@ app.MapFillEndpoints();
 app.MapPriceEndpoints();
 app.MapWeightEndpoints();
 app.MapTradingEndpoints();
+app.MapReportEndpoints();
 
 app.Run();
