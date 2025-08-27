@@ -49,14 +49,14 @@ public class UsdPairNormalizationTests
     }
 
     [Fact]
-    public void AdjustWeightForUsdQuote_FlipsSign()
+    public void AdjustWeightForUsdBase_FlipsSign()
     {
         var method = typeof(WeightCalculator).GetMethod(
-            "AdjustWeightForUsdQuote", BindingFlags.NonPublic | BindingFlags.Static);
-        var usdQuoteIds = new HashSet<long> { 1L };
+            "AdjustWeightForUsdBase", BindingFlags.NonPublic | BindingFlags.Static);
+        var usdBaseIds = new HashSet<long> { 1L };
 
-        var flipped = (decimal)method!.Invoke(null, new object[] { 1L, 5m, usdQuoteIds })!;
-        var same = (decimal)method!.Invoke(null, new object[] { 2L, 5m, usdQuoteIds })!;
+        var flipped = (decimal)method!.Invoke(null, new object[] { 1L, 5m, usdBaseIds })!;
+        var same = (decimal)method!.Invoke(null, new object[] { 2L, 5m, usdBaseIds })!;
 
         Assert.Equal(-5m, flipped);
         Assert.Equal(5m, same);
