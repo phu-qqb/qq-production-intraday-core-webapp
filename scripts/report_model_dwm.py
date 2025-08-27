@@ -20,11 +20,23 @@ def _fig_pair_attrib(df: pd.DataFrame, top_n_pairs: int):
 
     fig, ax = plt.subplots()
 
+    # Nothing to do when the incoming dataframe has no rows or columns.
     if df.empty:
         ax.set_axis_off()
         return fig
 
-    numeric_df = df.select_dtypes(include="number")
+    # Attempt to convert every column to a numeric type.  ``to_numeric`` with
+    # ``errors='coerce'`` will turn anything that looks like a number (including
+    # strings such as "1" or "2.5") into a real numeric dtype and replace
+    # anything else with ``NaN``.
+    numeric_df = df.apply(pd.to_numeric, errors="coerce")
+
+    # Drop columns that failed conversion entirely – they will be all ``NaN``.
+    numeric_df = numeric_df.dropna(axis=1, how="all")
+
+    # If, after coercion, there is still nothing numeric to plot we simply
+    # return an empty figure with its axes hidden to avoid ``TypeError: no
+    # numeric data to plot`` from pandas.
     if numeric_df.empty:
         ax.set_axis_off()
         return fig
