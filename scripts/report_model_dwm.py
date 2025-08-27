@@ -28,6 +28,7 @@ def _fig_pair_attrib(df: pd.DataFrame, top_n_pairs: int):
     # Attempt to convert every column to a numeric type.  ``to_numeric`` with
     # ``errors='coerce'`` will turn anything that looks like a number (including
     # strings such as "1" or "2.5") into a real numeric dtype and replace
+
     # anything else with ``NaN``.  After coercion, select only the numeric
     # columns and drop those that are entirely ``NaN``.
     numeric_df = (
@@ -35,6 +36,7 @@ def _fig_pair_attrib(df: pd.DataFrame, top_n_pairs: int):
         .select_dtypes(include="number")
         .dropna(axis=1, how="all")
     )
+
 
     # If, after coercion, there is still nothing numeric to plot we simply
     # return an empty figure with its axes hidden to avoid ``TypeError: no
