@@ -311,6 +311,13 @@ END";
             @"SELECT SecurityId, BloombergTicker FROM core.Security WHERE BloombergTicker LIKE '%USD%'");
 
         var usdMap = BuildUsdMap(usdPairs);
+        var usdQuoteIds = new HashSet<long>(usdPairs
+            .Where(p =>
+            {
+                var pair = p.Ticker.Split(' ')[0];
+                return pair.Length >= 6 && pair.Substring(3, 3) == "USD";
+            })
+            .Select(p => p.SecurityId));
 
         var net = new Dictionary<(long SecurityId, DateTime BarTimeUtc), decimal>();
 
@@ -363,13 +370,14 @@ END";
 
         foreach (var entry in net)
         {
+            var weight = AdjustWeightForUsdQuote(entry.Key.SecurityId, entry.Value, usdQuoteIds);
             var record = new
             {
                 SecurityId = entry.Key.SecurityId,
                 ModelId = modelId,
                 BarTimeUtc = entry.Key.BarTimeUtc,
                 ModelRunId = modelRunId,
-                Weight = entry.Value
+                Weight = weight
             };
 
             await connection.ExecuteAsync(insertSql, record);
@@ -431,6 +439,11 @@ END";
         }
 
         return (securityId, -weight);
+    }
+
+    private static decimal AdjustWeightForUsdQuote(long securityId, decimal weight, HashSet<long> usdQuoteIds)
+    {
+        return usdQuoteIds.Contains(securityId) ? -weight : weight;
     }
 
     private sealed class WeightRow
