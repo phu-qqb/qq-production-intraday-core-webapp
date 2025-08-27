@@ -11,9 +11,6 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "args": [
-                "--universe", "INFXUS",
-                "--session", "US",
-                "--start", "2022-01-01",
                 "--model-id", "1",
                 "--timeframe", "60"
             ]

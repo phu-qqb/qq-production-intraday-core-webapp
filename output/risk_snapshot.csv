@@ -1,0 +1,2 @@
+NumDays,MeanDaily,StdDaily,AnnMean,AnnVol,Sharpe,ProfitFactorDaily,HitRatioDaily,BestDayPnL,BestDayDate,WorstDayPnL,WorstDayDate,MaxDrawdown,MaxDDDate,VaR95_Daily
+20,-0.000908,0.004854,-0.228829,0.077049,-2.969913,0.596018,0.500000,0.010050,2025-08-22,-0.013469,2025-08-01,-0.019903,2025-08-07,-0.006502
