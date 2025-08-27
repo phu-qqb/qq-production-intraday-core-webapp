@@ -414,10 +414,10 @@ END";
         {
             if (usdMap.TryGetValue(("USD", baseCcy), out var canonId))
             {
-                return (canonId, -weight);
+                return (canonId, weight);
             }
 
-            return (securityId, -weight);
+            return (securityId, weight);
         }
 
         if (baseCcy == "USD")
@@ -427,10 +427,10 @@ END";
                 return (canonId, weight);
             }
 
-            return (securityId, weight);
+            return (securityId, -weight);
         }
 
-        return (securityId, weight);
+        return (securityId, -weight);
     }
 
     private sealed class WeightRow
