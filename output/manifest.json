@@ -1,0 +1,32 @@
+{
+  "outputs": {
+    "daily_perf": "output\\daily_perf.csv",
+    "weekly_perf": "output\\weekly_perf.csv",
+    "monthly_perf": "output\\monthly_perf.csv",
+    "daily_by_pair": "output\\daily_by_pair.csv",
+    "weekly_by_pair": "output\\weekly_by_pair.csv",
+    "monthly_by_pair": "output\\monthly_by_pair.csv",
+    "risk_snapshot": "output\\risk_snapshot.csv",
+    "pdf": "output\\Report_Model_1_60_NA_NA.pdf",
+    "html": "output\\Report_Model_1_60_NA_NA.html"
+  },
+  "model_id": 1,
+  "timeframe": 60,
+  "risk_snapshot": {
+    "NumDays": 20,
+    "MeanDaily": -0.0009080523999999999,
+    "StdDaily": 0.004853638754266995,
+    "AnnMean": -0.2288292048,
+    "AnnVol": 0.07704912658521484,
+    "Sharpe": -2.969913027462022,
+    "ProfitFactorDaily": 0.596018,
+    "HitRatioDaily": 0.5,
+    "BestDayPnL": 0.010050196,
+    "BestDayDate": "2025-08-22",
+    "WorstDayPnL": -0.013469108,
+    "WorstDayDate": "2025-08-01",
+    "MaxDrawdown": -0.01990347,
+    "MaxDDDate": "2025-08-07",
+    "VaR95_Daily": -0.006501657899999998
+  }
+}

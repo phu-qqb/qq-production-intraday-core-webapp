@@ -1,0 +1,394 @@
+<html><head><meta charset='utf-8'><title>Report</title></head><body>
+<pre>Period: 2025-07-30 to 2025-08-26
+ModelId: 1  TF: 60
+NumDays: 20
+AnnMean: -0.228829
+AnnVol: 0.077049
+Sharpe: -2.97
+ProfitFactorDaily: 0.60
+HitRatioDaily: 0.50
+MaxDrawdown: -0.019903 (2025-08-07)
+VaR95_Daily: -0.006502
+
+Totals over period:
+  GrossPnL: -0.016106
+  Cost: 0.002055
+  NetPnL: -0.018161
+  TurnoverAbsSum: 205.504880
+
+Business rules:
+  - PnL per bar timestamped on price timeline shifted by 2 from weights.
+  - Cost proportional to prior bar turnover (|w_t - w_{t-1}|).
+  - NetPnL = GrossPnL - Cost.</pre>
+<h3>Equity Curve</h3>
+<img src='Report_Model_1_60_NA_NA_equity_curve.png' alt='equity_curve'>
+<h3>Histogram</h3>
+<img src='Report_Model_1_60_NA_NA_histogram.png' alt='histogram'>
+<h3>Rolling Sharpe</h3>
+<img src='Report_Model_1_60_NA_NA_rolling_sharpe.png' alt='rolling_sharpe'>
+<h3>Pair Attrib</h3>
+<img src='Report_Model_1_60_NA_NA_pair_attrib.png' alt='pair_attrib'>
+<h3>Heatmap</h3>
+<img src='Report_Model_1_60_NA_NA_heatmap.png' alt='heatmap'>
+<h3>Weekly Bar</h3>
+<img src='Report_Model_1_60_NA_NA_weekly_bar.png' alt='weekly_bar'>
+<h3>Monthly Bar</h3>
+<img src='Report_Model_1_60_NA_NA_monthly_bar.png' alt='monthly_bar'>
+<h3>Daily Performance</h3>
+<table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th>DayDate</th>
+      <th>GrossPnL</th>
+      <th>Cost</th>
+      <th>NetPnL</th>
+      <th>NBars</th>
+      <th>HitRatioBars</th>
+      <th>TurnoverAbsSum</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>2025-07-30</td>
+      <td>-0.000069</td>
+      <td>0.000003</td>
+      <td>-0.000072</td>
+      <td>3</td>
+      <td>0.333333</td>
+      <td>0.318638</td>
+    </tr>
+    <tr>
+      <td>2025-07-31</td>
+      <td>0.000891</td>
+      <td>0.000019</td>
+      <td>0.000872</td>
+      <td>7</td>
+      <td>0.571428</td>
+      <td>1.861906</td>
+    </tr>
+    <tr>
+      <td>2025-08-01</td>
+      <td>-0.013425</td>
+      <td>0.000044</td>
+      <td>-0.013469</td>
+      <td>7</td>
+      <td>0.428571</td>
+      <td>4.410782</td>
+    </tr>
+    <tr>
+      <td>2025-08-04</td>
+      <td>-0.002423</td>
+      <td>0.000064</td>
+      <td>-0.002487</td>
+      <td>7</td>
+      <td>0.285714</td>
+      <td>6.358086</td>
+    </tr>
+    <tr>
+      <td>2025-08-05</td>
+      <td>-0.002840</td>
+      <td>0.000070</td>
+      <td>-0.002910</td>
+      <td>7</td>
+      <td>0.571428</td>
+      <td>7.021944</td>
+    </tr>
+    <tr>
+      <td>2025-08-06</td>
+      <td>0.002582</td>
+      <td>0.000081</td>
+      <td>0.002501</td>
+      <td>7</td>
+      <td>0.428571</td>
+      <td>8.108696</td>
+    </tr>
+    <tr>
+      <td>2025-08-07</td>
+      <td>-0.003448</td>
+      <td>0.000090</td>
+      <td>-0.003538</td>
+      <td>7</td>
+      <td>0.428571</td>
+      <td>9.047360</td>
+    </tr>
+    <tr>
+      <td>2025-08-08</td>
+      <td>0.001684</td>
+      <td>0.000099</td>
+      <td>0.001585</td>
+      <td>7</td>
+      <td>0.714285</td>
+      <td>9.865092</td>
+    </tr>
+    <tr>
+      <td>2025-08-11</td>
+      <td>0.001272</td>
+      <td>0.000097</td>
+      <td>0.001175</td>
+      <td>7</td>
+      <td>0.428571</td>
+      <td>9.659998</td>
+    </tr>
+    <tr>
+      <td>2025-08-12</td>
+      <td>0.002142</td>
+      <td>0.000095</td>
+      <td>0.002047</td>
+      <td>7</td>
+      <td>0.571428</td>
+      <td>9.507507</td>
+    </tr>
+    <tr>
+      <td>2025-08-13</td>
+      <td>0.002599</td>
+      <td>0.000112</td>
+      <td>0.002487</td>
+      <td>7</td>
+      <td>0.428571</td>
+      <td>11.246577</td>
+    </tr>
+    <tr>
+      <td>2025-08-14</td>
+      <td>0.001431</td>
+      <td>0.000121</td>
+      <td>0.001310</td>
+      <td>7</td>
+      <td>0.571428</td>
+      <td>12.138271</td>
+    </tr>
+    <tr>
+      <td>2025-08-15</td>
+      <td>0.004859</td>
+      <td>0.000137</td>
+      <td>0.004722</td>
+      <td>7</td>
+      <td>0.571428</td>
+      <td>13.705477</td>
+    </tr>
+    <tr>
+      <td>2025-08-18</td>
+      <td>-0.003835</td>
+      <td>0.000076</td>
+      <td>-0.003911</td>
+      <td>5</td>
+      <td>0.400000</td>
+      <td>7.619347</td>
+    </tr>
+    <tr>
+      <td>2025-08-19</td>
+      <td>0.000191</td>
+      <td>0.000146</td>
+      <td>0.000045</td>
+      <td>7</td>
+      <td>0.428571</td>
+      <td>14.613334</td>
+    </tr>
+    <tr>
+      <td>2025-08-20</td>
+      <td>-0.002529</td>
+      <td>0.000139</td>
+      <td>-0.002668</td>
+      <td>7</td>
+      <td>0.428571</td>
+      <td>13.945284</td>
+    </tr>
+    <tr>
+      <td>2025-08-21</td>
+      <td>-0.003892</td>
+      <td>0.000134</td>
+      <td>-0.004026</td>
+      <td>7</td>
+      <td>0.571428</td>
+      <td>13.355032</td>
+    </tr>
+    <tr>
+      <td>2025-08-22</td>
+      <td>0.010169</td>
+      <td>0.000119</td>
+      <td>0.010050</td>
+      <td>7</td>
+      <td>0.714285</td>
+      <td>11.880490</td>
+    </tr>
+    <tr>
+      <td>2025-08-25</td>
+      <td>-0.005882</td>
+      <td>0.000253</td>
+      <td>-0.006135</td>
+      <td>7</td>
+      <td>0.000000</td>
+      <td>25.295251</td>
+    </tr>
+    <tr>
+      <td>2025-08-26</td>
+      <td>-0.005583</td>
+      <td>0.000155</td>
+      <td>-0.005738</td>
+      <td>7</td>
+      <td>0.142857</td>
+      <td>15.545808</td>
+    </tr>
+  </tbody>
+</table>
+<h3>Weekly Performance</h3>
+<table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th>WeekStart</th>
+      <th>GrossPnL</th>
+      <th>Cost</th>
+      <th>NetPnL</th>
+      <th>NBars</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>2025-07-28</td>
+      <td>-0.012603</td>
+      <td>0.000066</td>
+      <td>-0.012669</td>
+      <td>17</td>
+    </tr>
+    <tr>
+      <td>2025-08-04</td>
+      <td>-0.004445</td>
+      <td>0.000404</td>
+      <td>-0.004849</td>
+      <td>35</td>
+    </tr>
+    <tr>
+      <td>2025-08-11</td>
+      <td>0.012303</td>
+      <td>0.000563</td>
+      <td>0.011740</td>
+      <td>35</td>
+    </tr>
+    <tr>
+      <td>2025-08-18</td>
+      <td>0.000104</td>
+      <td>0.000614</td>
+      <td>-0.000510</td>
+      <td>33</td>
+    </tr>
+    <tr>
+      <td>2025-08-25</td>
+      <td>-0.011465</td>
+      <td>0.000408</td>
+      <td>-0.011873</td>
+      <td>14</td>
+    </tr>
+  </tbody>
+</table>
+<h3>Monthly Performance</h3>
+<table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th>MonthStart</th>
+      <th>GrossPnL</th>
+      <th>Cost</th>
+      <th>NetPnL</th>
+      <th>NBars</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>2025-07-01</td>
+      <td>0.000822</td>
+      <td>0.000022</td>
+      <td>0.000800</td>
+      <td>10</td>
+    </tr>
+    <tr>
+      <td>2025-08-01</td>
+      <td>-0.016928</td>
+      <td>0.002033</td>
+      <td>-0.018961</td>
+      <td>124</td>
+    </tr>
+  </tbody>
+</table>
+<h3>Top Pairs</h3>
+<table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th>PairCode</th>
+      <th>NetPnL</th>
+      <th>%</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>JPYUSD</td>
+      <td>0.018384</td>
+      <td>399.577066</td>
+    </tr>
+    <tr>
+      <td>EURUSD</td>
+      <td>0.007111</td>
+      <td>154.565338</td>
+    </tr>
+    <tr>
+      <td>NZDUSD</td>
+      <td>-0.003048</td>
+      <td>-66.245725</td>
+    </tr>
+    <tr>
+      <td>CHFUSD</td>
+      <td>-0.004273</td>
+      <td>-92.878235</td>
+    </tr>
+    <tr>
+      <td>GBPUSD</td>
+      <td>-0.005957</td>
+      <td>-129.477769</td>
+    </tr>
+    <tr>
+      <td>CADUSD</td>
+      <td>-0.007616</td>
+      <td>-165.540675</td>
+    </tr>
+  </tbody>
+</table>
+<h3>Bottom Pairs</h3>
+<table border="1" class="dataframe">
+  <thead>
+    <tr style="text-align: right;">
+      <th>PairCode</th>
+      <th>NetPnL</th>
+      <th>%</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>CADUSD</td>
+      <td>-0.007616</td>
+      <td>-165.540675</td>
+    </tr>
+    <tr>
+      <td>GBPUSD</td>
+      <td>-0.005957</td>
+      <td>-129.477769</td>
+    </tr>
+    <tr>
+      <td>CHFUSD</td>
+      <td>-0.004273</td>
+      <td>-92.878235</td>
+    </tr>
+    <tr>
+      <td>NZDUSD</td>
+      <td>-0.003048</td>
+      <td>-66.245725</td>
+    </tr>
+    <tr>
+      <td>EURUSD</td>
+      <td>0.007111</td>
+      <td>154.565338</td>
+    </tr>
+    <tr>
+      <td>JPYUSD</td>
+      <td>0.018384</td>
+      <td>399.577066</td>
+    </tr>
+  </tbody>
+</table>
+</body></html>

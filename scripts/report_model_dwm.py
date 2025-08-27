@@ -25,13 +25,16 @@ import os
 import boto3
 from botocore.exceptions import ClientError
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, List, Tuple
 
 import matplotlib.dates as mdates
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pyodbc
+from datetime import date, datetime
+from decimal import Decimal
+
 from matplotlib.backends.backend_pdf import PdfPages
 
 
@@ -88,6 +91,23 @@ def get_conn_from_secret(secret_name: str, region_name: str, default_driver: str
         f"UID={user};PWD={password};Encrypt=no"
     )
 
+def _json_default(o):
+    # pandas / datetime
+    if isinstance(o, (pd.Timestamp, datetime, date)):
+        return o.isoformat()
+    # numpy scalars
+    if isinstance(o, np.integer):
+        return int(o)
+    if isinstance(o, np.floating):
+        return float(o)
+    if isinstance(o, np.bool_):
+        return bool(o)
+    # Decimal
+    if isinstance(o, Decimal):
+        return float(o)
+    # Fallback
+    return str(o)
+
 
 def fetch_report(params: ReportParams) -> Dict[str, pd.DataFrame]:
     """Run the stored procedure and return result sets as DataFrames."""
@@ -116,16 +136,21 @@ def fetch_report(params: ReportParams) -> Dict[str, pd.DataFrame]:
             dfs[name] = df
             if not cur.nextset():
                 break
+
     # Convert date columns
     for key in ("daily_perf", "daily_by_pair"):
-        if not dfs[key].empty:
+        if key in dfs and not dfs[key].empty:
             dfs[key]["DayDate"] = pd.to_datetime(dfs[key]["DayDate"])
     for key in ("weekly_perf", "weekly_by_pair"):
-        if not dfs[key].empty:
+        if key in dfs and not dfs[key].empty:
             dfs[key]["WeekStart"] = pd.to_datetime(dfs[key]["WeekStart"])
     for key in ("monthly_perf", "monthly_by_pair"):
-        if not dfs[key].empty:
+        if key in dfs and not dfs[key].empty:
             dfs[key]["MonthStart"] = pd.to_datetime(dfs[key]["MonthStart"])
+
+    # Ensure numeric columns are actually numeric
+    _coerce_numeric_columns(dfs)
+
     return dfs
 
 
@@ -160,13 +185,36 @@ def export_csv(dfs: Dict[str, pd.DataFrame], out_dir: str) -> Dict[str, str]:
 # Figure construction
 # ---------------------------------------------------------------------------
 
+def _coerce_numeric_columns(dfs: Dict[str, pd.DataFrame]) -> None:
+    """Coerce known numeric columns to float in-place across all frames."""
+    numeric_map = {
+        "daily_perf": ["GrossPnL", "Cost", "NetPnL", "NBars", "HitRatioBars", "TurnoverAbsSum"],
+        "weekly_perf": ["GrossPnL", "Cost", "NetPnL", "NBars"],
+        "monthly_perf": ["GrossPnL", "Cost", "NetPnL", "NBars"],
+        "daily_by_pair": ["NetPnL"],
+        "weekly_by_pair": ["NetPnL"],
+        "monthly_by_pair": ["NetPnL"],
+        "risk_snapshot": [
+            "NumDays","AnnMean","AnnVol","Sharpe","ProfitFactorDaily","HitRatioDaily",
+            "MaxDrawdown","VaR95_Daily","MeanDaily"
+        ],
+    }
+    for key, cols in numeric_map.items():
+        df = dfs.get(key)
+        if df is None or df.empty:
+            continue
+        for c in cols:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+
+
 def _fig_equity_curve(daily: pd.DataFrame) -> plt.Figure:
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
     if daily.empty:
         ax1.text(0.5, 0.5, "No data", ha="center")
         ax2.axis("off")
         return fig
-    net = daily.set_index("DayDate")["NetPnL"].fillna(0)
+    net = pd.to_numeric(daily.set_index("DayDate")["NetPnL"], errors="coerce").fillna(0)
     cum_net = net.cumsum()
     running_max = cum_net.cummax()
     drawdown = cum_net - running_max
@@ -197,10 +245,13 @@ def _fig_equity_curve(daily: pd.DataFrame) -> plt.Figure:
 
 def _fig_histogram(daily: pd.DataFrame, mean: float, var95: float) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(10, 4))
-    if daily.empty:
+    if daily.empty or "NetPnL" not in daily:
         ax.text(0.5, 0.5, "No data", ha="center")
         return fig
-    net = daily["NetPnL"].fillna(0)
+    net = pd.to_numeric(daily["NetPnL"], errors="coerce").dropna()
+    if net.empty:
+        ax.text(0.5, 0.5, "No data", ha="center")
+        return fig
     ax.hist(net, bins=30)
     ax.axvline(mean, color="green", linestyle="--", label="Mean")
     ax.axvline(var95, color="red", linestyle="--", label="VaR95")
@@ -214,10 +265,10 @@ def _fig_histogram(daily: pd.DataFrame, mean: float, var95: float) -> plt.Figure
 
 def _fig_rolling_sharpe(daily: pd.DataFrame, ann_days: int) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(10, 4))
-    if daily.empty:
+    if daily.empty or "NetPnL" not in daily:
         ax.text(0.5, 0.5, "No data", ha="center")
         return fig
-    net = daily.set_index("DayDate")["NetPnL"].fillna(0)
+    net = pd.to_numeric(daily.set_index("DayDate")["NetPnL"], errors="coerce").fillna(0)
     roll_mean = net.rolling(21).mean()
     roll_std = net.rolling(21).std()
     roll_sharpe = (roll_mean / roll_std) * np.sqrt(ann_days)
@@ -236,15 +287,30 @@ def _fig_rolling_sharpe(daily: pd.DataFrame, ann_days: int) -> plt.Figure:
 
 def _fig_pair_attrib(daily_by_pair: pd.DataFrame, top_n: int) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(10, 6))
-    if daily_by_pair.empty:
+    if daily_by_pair.empty or "PairCode" not in daily_by_pair or "NetPnL" not in daily_by_pair:
         ax.text(0.5, 0.5, "No data", ha="center")
         return fig
-    agg = daily_by_pair.groupby("PairCode")["NetPnL"].sum().sort_values()
-    top = agg.tail(top_n)
-    bottom = agg.head(top_n)
+
+    dbp = daily_by_pair.copy()
+    dbp["NetPnL"] = pd.to_numeric(dbp["NetPnL"], errors="coerce")
+    dbp = dbp.dropna(subset=["NetPnL"])
+
+    if dbp.empty:
+        ax.text(0.5, 0.5, "No data", ha="center")
+        return fig
+
+    agg = dbp.groupby("PairCode", as_index=True)["NetPnL"].sum().sort_values()
+    if agg.empty:
+        ax.text(0.5, 0.5, "No data", ha="center")
+        return fig
+
+    n = min(top_n, len(agg))
+    top = agg.tail(n)
+    bottom = agg.head(n)
     combined = pd.concat([bottom, top])
+
     combined.plot(kind="barh", ax=ax)
-    ax.set_title(f"Cumulative NetPnL by Pair (Top/Bottom {top_n})")
+    ax.set_title(f"Cumulative NetPnL by Pair (Top/Bottom {n})")
     ax.set_xlabel("NetPnL")
     fig.tight_layout()
     return fig
@@ -277,10 +343,16 @@ def _fig_heatmap(weekly_by_pair: pd.DataFrame) -> plt.Figure:
 
 def _fig_bar(df: pd.DataFrame, date_col: str, title: str) -> plt.Figure:
     fig, ax = plt.subplots(figsize=(10, 4))
-    if df.empty:
+    if df.empty or date_col not in df or "NetPnL" not in df:
         ax.text(0.5, 0.5, "No data", ha="center")
         return fig
-    ax.bar(df[date_col], df["NetPnL"])
+    vals = pd.to_numeric(df["NetPnL"], errors="coerce")
+    x = df[date_col]
+    mask = vals.notna()
+    if not mask.any():
+        ax.text(0.5, 0.5, "No data", ha="center")
+        return fig
+    ax.bar(x[mask], vals[mask])
     ax.set_title(title)
     ax.set_xlabel("Date")
     ax.set_ylabel("NetPnL")
@@ -365,8 +437,12 @@ def _fig_table(df: pd.DataFrame, title: str) -> plt.Figure:
 
 def _top_bottom_tables(daily_by_pair: pd.DataFrame, top_n: int) -> Tuple[pd.DataFrame, pd.DataFrame]:
     if daily_by_pair.empty:
-        return pd.DataFrame(columns=["PairCode", "NetPnL", "%"], index=[]), pd.DataFrame(columns=["PairCode", "NetPnL", "%"], index=[])
-    agg = daily_by_pair.groupby("PairCode")["NetPnL"].sum()
+        cols = ["PairCode", "NetPnL", "%"]
+        return pd.DataFrame(columns=cols), pd.DataFrame(columns=cols)
+    dbp = daily_by_pair.copy()
+    if "NetPnL" in dbp:
+        dbp["NetPnL"] = pd.to_numeric(dbp["NetPnL"], errors="coerce")
+    agg = dbp.groupby("PairCode")["NetPnL"].sum()
     total = agg.sum()
     agg_pct = agg / total * 100 if total != 0 else agg * 0
     df = pd.DataFrame({"PairCode": agg.index, "NetPnL": agg.values, "%": agg_pct.values})
@@ -420,13 +496,16 @@ def render_pdf_html(
                 "HitRatioBars",
                 "TurnoverAbsSum",
             ]
-        ]
+        ] if "daily_perf" in dfs else pd.DataFrame()
+
         weekly_table = dfs.get("weekly_perf", pd.DataFrame())[
             ["WeekStart", "GrossPnL", "Cost", "NetPnL", "NBars"]
-        ]
+        ] if "weekly_perf" in dfs else pd.DataFrame()
+
         monthly_table = dfs.get("monthly_perf", pd.DataFrame())[
             ["MonthStart", "GrossPnL", "Cost", "NetPnL", "NBars"]
-        ]
+        ] if "monthly_perf" in dfs else pd.DataFrame()
+
         top_pairs, bottom_pairs = _top_bottom_tables(
             dfs.get("daily_by_pair", pd.DataFrame()), params.top_n_pairs
         )
@@ -454,11 +533,20 @@ def render_pdf_html(
         html.append(f"<img src='{img_paths[key]}' alt='{key}'>")
 
     html.append("<h3>Daily Performance</h3>")
-    html.append(daily_table.to_html(index=False))
+    html.append(dfs.get("daily_perf", pd.DataFrame())[[
+        "DayDate","GrossPnL","Cost","NetPnL","NBars","HitRatioBars","TurnoverAbsSum"
+    ]].to_html(index=False) if "daily_perf" in dfs and not dfs["daily_perf"].empty else "<p>No data</p>")
+
     html.append("<h3>Weekly Performance</h3>")
-    html.append(weekly_table.to_html(index=False))
+    html.append(dfs.get("weekly_perf", pd.DataFrame())[[
+        "WeekStart","GrossPnL","Cost","NetPnL","NBars"
+    ]].to_html(index=False) if "weekly_perf" in dfs and not dfs["weekly_perf"].empty else "<p>No data</p>")
+
     html.append("<h3>Monthly Performance</h3>")
-    html.append(monthly_table.to_html(index=False))
+    html.append(dfs.get("monthly_perf", pd.DataFrame())[[
+        "MonthStart","GrossPnL","Cost","NetPnL","NBars"
+    ]].to_html(index=False) if "monthly_perf" in dfs and not dfs["monthly_perf"].empty else "<p>No data</p>")
+
     html.append("<h3>Top Pairs</h3>")
     html.append(top_pairs.to_html(index=False))
     html.append("<h3>Bottom Pairs</h3>")
@@ -491,7 +579,7 @@ def write_manifest(paths: Dict[str, str], out_pdf: str, out_html: str, dfs: Dict
         manifest["risk_snapshot"] = risk.iloc[0].to_dict()
     path = os.path.join(params.output_dir, "manifest.json")
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2)
+        json.dump(manifest, f, indent=2, default=_json_default)
     logging.info("Wrote %s", path)
 
 
