@@ -22,9 +22,15 @@ builder.Services.AddHttpClient("OrderApi", client =>
     client.BaseAddress = new Uri(builder.Configuration["ExternalApis:OrderApi:BaseUrl"] ?? "");
 }).AddPolicyHandler(RetryPolicyFactory.GetPolicy());
 
+builder.Services.AddHttpClient("WakettApi", client =>
+{
+    client.BaseAddress = new Uri(builder.Configuration["ExternalApis:WakettApi:BaseUrl"] ?? "");
+}).AddPolicyHandler(RetryPolicyFactory.GetPolicy());
+
 builder.Services.AddTransient<PriceFetcher>();
 builder.Services.AddTransient<WeightCalculator>();
 builder.Services.AddTransient<OrderSender>();
+builder.Services.AddTransient<WakettApiClient>();
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
