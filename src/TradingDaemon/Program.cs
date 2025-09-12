@@ -30,14 +30,18 @@ builder.Services.AddHttpClient("WakettApi", client =>
 builder.Services.AddTransient<PriceFetcher>();
 builder.Services.AddTransient<WeightCalculator>();
 builder.Services.AddTransient<OrderSender>();
+
+builder.Services.AddTransient<ReportRunner>();
+
 builder.Services.AddTransient<WakettApiClient>();
+
 
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
 
 var app = builder.Build();
 
-if (app.Environment.IsDevelopment())
+//if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
     app.UseSwaggerUI(c =>
@@ -48,7 +52,9 @@ if (app.Environment.IsDevelopment())
 }
 
 app.MapFillEndpoints();
+app.MapPriceEndpoints();
 app.MapWeightEndpoints();
 app.MapTradingEndpoints();
+app.MapReportEndpoints();
 
 app.Run();

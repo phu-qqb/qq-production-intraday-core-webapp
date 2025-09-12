@@ -1,11 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Data;
 using Dapper;
 using TradingDaemon.Data;
-using TradingDaemon.Models;
 
 namespace TradingDaemon.Services;
 
@@ -27,6 +28,8 @@ public class WeightCalculator
         var pythonExec = _config["Executables:PythonExecutable"] ?? "python3";
         var scriptPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../scripts/export_prices_rds.py"));
 
+        var modelTimeframes = new Dictionary<int, int>();
+
         foreach (var model in _config.GetSection("Programmes").GetChildren())
         {
             var universe = model["Universe"] ?? string.Empty;
@@ -34,6 +37,10 @@ public class WeightCalculator
             var tradingSession = model["Session"] ?? string.Empty;
             var timeFrame = model["Timeframe"] ?? "60";
             var startDate = model["StartDate"] ?? "2022-01-01";
+            var modelId = int.Parse(model["ModelId"] ?? "0");
+            var timeFrameInt = int.TryParse(timeFrame, out var tfVal) ? tfVal : 60;
+
+            modelTimeframes[modelId] = timeFrameInt;
 
             var scriptArgs = string.IsNullOrEmpty(universe)
                 ? scriptPath
@@ -113,6 +120,116 @@ public class WeightCalculator
                 stdout = outText;
             }
 
+            var weightsFile = Path.Combine(@"C:\home\prod", universe, "AggregatedWeights.txt");
+            if (File.Exists(weightsFile))
+            {
+                var lines = await File.ReadAllLinesAsync(weightsFile);
+                using var connection = _context.CreateConnection();
+
+                connection.Open();
+
+                var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version?.ToString();
+                var modelRunId = await connection.ExecuteScalarAsync<long>(
+                    "INSERT INTO model.ModelRun (ModelId, CodeVersion) VALUES (@ModelId, @CodeVersion); SELECT CAST(SCOPE_IDENTITY() AS bigint);",
+                    new { ModelId = modelId, CodeVersion = version });
+
+                if (lines.Length > 1)
+                {
+                    var delimiter = lines[0].Contains(';') ? ';' : ',';
+                    var headerParts = lines[0].Split(delimiter, StringSplitOptions.TrimEntries);
+                    var securityIds = headerParts.Skip(1)
+                        .Select(h => long.TryParse(h, out var id) ? id : (long?)null)
+                        .ToArray();
+
+                    var sql = @"IF NOT EXISTS (
+    SELECT 1 FROM model.TheoreticalWeight
+    WHERE SecurityId = @SecurityId AND ModelId = @ModelId AND BarTimeUtc = @BarTimeUtc
+)
+BEGIN
+    INSERT INTO model.TheoreticalWeight (SecurityId, ModelId, BarTimeUtc, ModelRunId, Weight)
+    VALUES (@SecurityId, @ModelId, @BarTimeUtc, @ModelRunId, @Weight);
+END";
+
+                    var rows = new List<WeightRow>();
+
+                    foreach (var line in lines.Skip(1))
+                    {
+                        var parts = line.Split(delimiter, StringSplitOptions.TrimEntries);
+                        if (parts.Length <= 1 ||
+                            !DateTime.TryParseExact(
+                                parts[0],
+                                "yyyyMMddHHmm",
+                                CultureInfo.InvariantCulture,
+                                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                                out var barTimeUtc))
+                                    continue;
+
+                        var weightArr = new decimal?[securityIds.Length];
+                        for (var i = 1; i < parts.Length && i - 1 < securityIds.Length; i++)
+                        {
+                            if (decimal.TryParse(parts[i], NumberStyles.Any, CultureInfo.InvariantCulture, out var val))
+                            {
+                                weightArr[i - 1] = val;
+                            }
+                        }
+
+                        rows.Add(new WeightRow(barTimeUtc, weightArr));
+                    }
+
+                    foreach (var group in rows.GroupBy(r => r.BarTimeUtc.Date))
+                    {
+                        var ordered = group.OrderBy(r => r.BarTimeUtc).ToList();
+                        if (ordered.Count >= 2)
+                        {
+                            var secondLast = ordered[^2];
+                            for (var i = 0; i < secondLast.Weights.Length; i++)
+                            {
+                                if (secondLast.Weights[i].HasValue)
+                                    secondLast.Weights[i] = 0m;
+                            }
+                        }
+                    }
+
+                    foreach (var row in rows)
+                    {
+                        var inserted = false;
+                        for (var i = 0; i < row.Weights.Length && i < securityIds.Length; i++)
+                        {
+                            var securityId = securityIds[i];
+                            var val = row.Weights[i];
+                            if (securityId is null || val is null)
+                                continue;
+
+                            var record = new
+                            {
+                                SecurityId = securityId.Value,
+                                ModelId = modelId,
+                                BarTimeUtc = row.BarTimeUtc,
+                                ModelRunId = modelRunId,
+                                Weight = val.Value
+                            };
+
+                            var affected = await connection.ExecuteAsync(sql, record);
+                            if (affected > 0) inserted = true;
+                        }
+
+                        if (inserted)
+                        {
+                            var lineOut = string.Join(delimiter,
+                                new[] { row.BarTimeUtc.ToString("yyyyMMddHHmm") }
+                                    .Concat(row.Weights.Select(w => w?.ToString(CultureInfo.InvariantCulture) ?? string.Empty)));
+                            _logger.LogInformation("[aggregated-weights] {Line}", lineOut);
+                        }
+                    }
+                }
+
+                await ComputeNettedWeights(connection, modelId, modelRunId);
+            }
+            else
+            {
+                _logger.LogWarning("Missing weights file {File}", weightsFile);
+            }
+
             //using var connection = _context.CreateConnection();
             //var prices = await connection.QueryAsync<Price>("SELECT symbol, value FROM prices ORDER BY timestamp DESC");
 
@@ -148,6 +265,196 @@ public class WeightCalculator
             //}
 
             //File.Delete(inputPath);
+        }
+
+        await RunModelReportsAsync(modelTimeframes);
+    }
+
+    private async Task RunModelReportsAsync(Dictionary<int, int> modelTimeframes)
+    {
+        using var connection = _context.CreateConnection();
+
+        connection.Open();
+
+        var toUtc = DateTime.UtcNow.Date;
+        var fromUtc = toUtc.AddDays(-10);
+        var fromDate = new DateTime(toUtc.Year, 1, 1);
+        var toDate = new DateTime(toUtc.Year, toUtc.Month, 1).AddMonths(1);
+
+        foreach (var kvp in modelTimeframes)
+        {
+            var modelId = kvp.Key;
+            var timeframe = kvp.Value;
+
+            await connection.ExecuteAsync(
+                "model.ComputeAndStoreModelBarPnL",
+                new { ModelId = modelId, TimeframeMinute = timeframe, FromUtc = fromUtc, ToUtc = toUtc, UseLogReturn = 0 },
+                commandType: CommandType.StoredProcedure);
+
+            await connection.ExecuteAsync(
+                "model.Report_ModelDWM",
+                new { ModelId = modelId, TimeframeMinute = timeframe, FromDate = fromDate, ToDate = toDate, AnnualizeDays = 252 },
+                commandType: CommandType.StoredProcedure);
+        }
+    }
+
+    private async Task ComputeNettedWeights(IDbConnection connection, int modelId, long modelRunId)
+    {
+        var weights = await connection.QueryAsync<(long SecurityId, DateTime BarTimeUtc, decimal Weight, string Ticker)>(
+            @"SELECT tw.SecurityId, tw.BarTimeUtc, tw.Weight, s.BloombergTicker
+              FROM model.TheoreticalWeight tw
+              JOIN core.Security s ON tw.SecurityId = s.SecurityId
+              WHERE tw.ModelId = @ModelId AND tw.ModelRunId = @ModelRunId",
+            new { ModelId = modelId, ModelRunId = modelRunId });
+
+        var usdPairs = await connection.QueryAsync<(long SecurityId, string Ticker)>(
+            @"SELECT SecurityId, BloombergTicker FROM core.Security WHERE BloombergTicker LIKE '%USD%'");
+
+        var usdMap = BuildUsdMap(usdPairs);
+        var usdBaseIds = new HashSet<long>(usdPairs
+            .Where(p =>
+            {
+                var pair = p.Ticker.Split(' ')[0];
+                return pair.Length >= 6 && pair[..3] == "USD";
+            })
+            .Select(p => p.SecurityId));
+
+        var net = new Dictionary<(long SecurityId, DateTime BarTimeUtc), decimal>();
+
+        foreach (var w in weights)
+        {
+            var pair = w.Ticker.Split(' ')[0];
+            if (pair.Length < 6) continue;
+            var baseCcy = pair[..3];
+            var quoteCcy = pair.Substring(3, 3);
+
+            if (baseCcy == "USD" || quoteCcy == "USD")
+            {
+                var (secId, weight) = NormalizeUsdPair(w.SecurityId, pair, w.Weight, usdMap);
+                var key = (secId, w.BarTimeUtc);
+                net[key] = net.GetValueOrDefault(key) + weight;
+                continue;
+            }
+
+            if (usdMap.TryGetValue((baseCcy, "USD"), out var baseId))
+            {
+                var key = (baseId, w.BarTimeUtc);
+                net[key] = net.GetValueOrDefault(key) + w.Weight;
+            }
+            else if (usdMap.TryGetValue(("USD", baseCcy), out var invBaseId))
+            {
+                var key = (invBaseId, w.BarTimeUtc);
+                net[key] = net.GetValueOrDefault(key) - w.Weight;
+            }
+
+            if (usdMap.TryGetValue((quoteCcy, "USD"), out var quoteId))
+            {
+                var key = (quoteId, w.BarTimeUtc);
+                net[key] = net.GetValueOrDefault(key) - w.Weight;
+            }
+            else if (usdMap.TryGetValue(("USD", quoteCcy), out var invQuoteId))
+            {
+                var key = (invQuoteId, w.BarTimeUtc);
+                net[key] = net.GetValueOrDefault(key) + w.Weight;
+            }
+        }
+
+        var insertSql = @"IF NOT EXISTS (
+    SELECT 1 FROM model.NettedWeight
+    WHERE SecurityId = @SecurityId AND ModelId = @ModelId AND BarTimeUtc = @BarTimeUtc
+)
+BEGIN
+    INSERT INTO model.NettedWeight (SecurityId, ModelId, BarTimeUtc, ModelRunId, Weight)
+    VALUES (@SecurityId, @ModelId, @BarTimeUtc, @ModelRunId, @Weight);
+END";
+
+        foreach (var entry in net)
+        {
+            var weight = AdjustWeightForUsdBase(entry.Key.SecurityId, entry.Value, usdBaseIds);
+            var record = new
+            {
+                SecurityId = entry.Key.SecurityId,
+                ModelId = modelId,
+                BarTimeUtc = entry.Key.BarTimeUtc,
+                ModelRunId = modelRunId,
+                Weight = weight
+            };
+
+            await connection.ExecuteAsync(insertSql, record);
+        }
+    }
+
+    private static Dictionary<(string Base, string Quote), long> BuildUsdMap(IEnumerable<(long SecurityId, string Ticker)> usdPairs)
+    {
+        var usdMap = new Dictionary<(string Base, string Quote), long>();
+        foreach (var p in usdPairs)
+        {
+            var pair = p.Ticker.Split(' ')[0];
+            if (pair.Length < 6) continue;
+            var baseCcy = pair[..3];
+            var quoteCcy = pair.Substring(3, 3);
+
+            if (quoteCcy == "USD")
+            {
+                // prefer mappings where USD is the quote currency
+                usdMap[(baseCcy, quoteCcy)] = p.SecurityId;
+            }
+            else if (baseCcy == "USD" && !usdMap.ContainsKey((quoteCcy, "USD")))
+            {
+                // fall back to inverse pairs if the USD-quote pair is missing
+                usdMap[(quoteCcy, "USD")] = p.SecurityId;
+            }
+        }
+
+        return usdMap;
+    }
+
+    private static (long SecurityId, decimal Weight) NormalizeUsdPair(
+        long securityId,
+        string pair,
+        decimal weight,
+        Dictionary<(string Base, string Quote), long> usdMap)
+    {
+        var baseCcy = pair[..3];
+        var quoteCcy = pair.Substring(3, 3);
+
+        if (quoteCcy == "USD")
+        {
+            if (usdMap.TryGetValue((baseCcy, "USD"), out var canonId))
+            {
+                return (canonId, weight);
+            }
+
+            return (securityId, weight);
+        }
+
+        if (baseCcy == "USD")
+        {
+            if (usdMap.TryGetValue((quoteCcy, "USD"), out var canonId))
+            {
+                return (canonId, -weight);
+            }
+
+            return (securityId, -weight);
+        }
+
+        return (securityId, -weight);
+    }
+
+    private static decimal AdjustWeightForUsdBase(long securityId, decimal weight, HashSet<long> usdBaseIds)
+    {
+        return usdBaseIds.Contains(securityId) ? -weight : weight;
+    }
+
+    private sealed class WeightRow
+    {
+        public DateTime BarTimeUtc { get; }
+        public decimal?[] Weights { get; set; }
+
+        public WeightRow(DateTime barTimeUtc, decimal?[] weights)
+        {
+            BarTimeUtc = barTimeUtc;
+            Weights = weights;
         }
     }
 }

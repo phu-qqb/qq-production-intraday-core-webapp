@@ -1,0 +1,33 @@
+{
+  "outputs": {
+    "daily_perf": "output\\daily_perf.csv",
+    "weekly_perf": "output\\weekly_perf.csv",
+    "monthly_perf": "output\\monthly_perf.csv",
+    "daily_by_pair": "output\\daily_by_pair.csv",
+    "weekly_by_pair": "output\\weekly_by_pair.csv",
+    "monthly_by_pair": "output\\monthly_by_pair.csv",
+    "risk_snapshot": "output\\risk_snapshot.csv",
+    "pdf": "output\\Report_Model_1_60_NA_NA.pdf",
+    "html": "output\\Report_Model_1_60_NA_NA.html",
+    "onepager_pdf": "output\\Report_FX_-US-session_-majors_2025-08-28.pdf"
+  },
+  "model_id": 1,
+  "timeframe": 60,
+  "risk_snapshot": {
+    "NumDays": 21,
+    "MeanDaily": -0.0011673485714285715,
+    "StdDaily": 0.0049218960145515425,
+    "AnnMean": -0.29417184,
+    "AnnVol": 0.07813267700053997,
+    "Sharpe": -3.7650295790833717,
+    "ProfitFactorDaily": 0.522216,
+    "HitRatioDaily": 0.47619,
+    "BestDayPnL": 0.010050196,
+    "BestDayDate": "2025-08-22",
+    "WorstDayPnL": -0.013469108,
+    "WorstDayDate": "2025-08-01",
+    "MaxDrawdown": -0.025314517,
+    "MaxDDDate": "2025-08-27",
+    "VaR95_Daily": -0.008328359
+  }
+}

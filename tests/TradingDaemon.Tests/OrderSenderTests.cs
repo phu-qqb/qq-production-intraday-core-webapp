@@ -22,7 +22,10 @@ public class OrderSenderTests
         var client = new HttpClient(handler.Object) { BaseAddress = new Uri("http://test") };
         var factory = Mock.Of<IHttpClientFactory>(f => f.CreateClient("OrderApi") == client);
 
-        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?> { ["ConnectionStrings:DefaultConnection"] = "" }).Build();
+        var config = new ConfigurationBuilder().AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["ConnectionStrings:DefaultConnection"] = "Server=localhost;Database=test;User Id=test;Password=test;"
+        }).Build();
         var context = new Mock<DapperContext>(config);
         context.Setup(c => c.CreateConnection()).Returns(new FakeDbConnection());
 

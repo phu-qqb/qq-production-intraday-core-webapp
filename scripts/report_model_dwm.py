@@ -1,3 +1,920 @@
+
+#!/usr/bin/env python
+"""Generate intraday model performance reports from SQL Server.
+
+This script connects to SQL Server, runs the stored procedure
+``model.Report_ModelDWM`` which returns seven result sets describing
+intraday model performance, and produces CSV exports along with a PDF and
+HTML report containing tables and charts.  Only pandas and matplotlib are
+used for data handling and plotting.
+
+The business rules applied upstream to the stored procedure (repeated
+here for reference) are:
+* PnL per bar is timestamped on the price timeline corresponding to the
+  weight timeline shifted by two positions.
+* Transaction cost is proportional to the turnover of the previous bar
+  (|w_t - w_{t-1}|).
+* NetPnL aggregates are computed as ``GrossPnL - Cost``.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import logging
+import os
+from datetime import date, datetime
+from decimal import Decimal
+import boto3
+from botocore.exceptions import ClientError
+from dataclasses import dataclass
+from typing import Dict, List, Tuple
+
+import matplotlib.dates as mdates
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import pyodbc
+from matplotlib.backends.backend_pdf import PdfPages
+import re
+from datetime import datetime  # (déjà importé plus haut)
+
+
+
+
+# ---------------------------------------------------------------------------
+# Data access
+# ---------------------------------------------------------------------------
+
+@dataclass
+class ReportParams:
+    conn_str: str
+    model_id: int
+    timeframe: int
+    from_date: str | None
+    to_date: str | None
+    annualize_days: int
+    top_n_pairs: int
+    output_dir: str
+
+
+RESULTSET_NAMES = [
+    "daily_perf",
+    "weekly_perf",
+    "monthly_perf",
+    "daily_by_pair",
+    "weekly_by_pair",
+    "monthly_by_pair",
+    "risk_snapshot",
+]
+
+
+def get_conn_from_secret(secret_name: str, region_name: str, default_driver: str) -> str:
+    """Return an ODBC connection string from AWS Secrets Manager."""
+    session = boto3.session.Session()
+    client = session.client(service_name="secretsmanager", region_name=region_name)
+    try:
+        resp = client.get_secret_value(SecretId=secret_name)
+    except ClientError as exc:
+        raise RuntimeError(f"Failed to retrieve secret {secret_name}") from exc
+
+    secret_str = resp.get("SecretString", "")
+    data = json.loads(secret_str)
+
+    if "conn" in data:
+        return data["conn"]
+
+    user = data.get("username", "")
+    password = data.get("password", "")
+    host = data.get("host")
+    port = data.get("port", 1433)
+    db = data.get("dbname") or data.get("database") or ""
+    driver = data.get("driver", default_driver)
+    return (
+        f"DRIVER={{{driver}}};SERVER={host},{port};DATABASE={db};"
+        f"UID={user};PWD={password};Encrypt=no"
+    )
+
+def _slugify(s: str) -> str:
+    """Keep letters/digits/+-._ and collapse spaces to single '-'. Trim to 80 chars."""
+    if not s:
+        return "NA"
+    s = s.strip()
+    s = re.sub(r"\s+", "-", s)                 # spaces -> dash
+    s = re.sub(r"[^A-Za-z0-9._+-]", "_", s)    # safe filename
+    return s[:80] if len(s) > 80 else s
+
+def fetch_report(params: ReportParams) -> Dict[str, pd.DataFrame]:
+    """Run the stored procedure and return result sets as DataFrames."""
+    query = (
+        "EXEC model.Report_ModelDWM "
+        "@ModelId = ?, @TimeframeMinute = ?, @FromDate = ?, "
+        "@ToDate = ?, @AnnualizeDays = ?"
+    )
+    logging.info("Executing stored procedure model.Report_ModelDWM")
+    with pyodbc.connect(params.conn_str) as conn:
+        cur = conn.cursor()
+        cur.execute(
+            query,
+            params.model_id,
+            params.timeframe,
+            params.from_date,
+            params.to_date,
+            params.annualize_days,
+        )
+        dfs: Dict[str, pd.DataFrame] = {}
+        for name in RESULTSET_NAMES:
+            cols = [c[0] for c in cur.description]
+            rows = cur.fetchall()
+            df = pd.DataFrame.from_records(rows, columns=cols)
+            df.replace([np.inf, -np.inf], np.nan, inplace=True)
+            dfs[name] = df
+            if not cur.nextset():
+                break
+
+    # Convert date columns
+    for key in ("daily_perf", "daily_by_pair"):
+        if key in dfs and not dfs[key].empty:
+            dfs[key]["DayDate"] = pd.to_datetime(dfs[key]["DayDate"])
+    for key in ("weekly_perf", "weekly_by_pair"):
+        if key in dfs and not dfs[key].empty:
+            dfs[key]["WeekStart"] = pd.to_datetime(dfs[key]["WeekStart"])
+    for key in ("monthly_perf", "monthly_by_pair"):
+        if key in dfs and not dfs[key].empty:
+            dfs[key]["MonthStart"] = pd.to_datetime(dfs[key]["MonthStart"])
+
+    # Ensure numeric columns are actually numeric
+    _coerce_numeric_columns(dfs)
+
+    return dfs
+
+
+# ---------------------------------------------------------------------------
+# CSV export
+# ---------------------------------------------------------------------------
+
+CSV_MAPPING = {
+    "daily_perf": "daily_perf.csv",
+    "weekly_perf": "weekly_perf.csv",
+    "monthly_perf": "monthly_perf.csv",
+    "daily_by_pair": "daily_by_pair.csv",
+    "weekly_by_pair": "weekly_by_pair.csv",
+    "monthly_by_pair": "monthly_by_pair.csv",
+    "risk_snapshot": "risk_snapshot.csv",
+}
+
+
+def export_csv(dfs: Dict[str, pd.DataFrame], out_dir: str) -> Dict[str, str]:
+    """Export all datasets to CSV files."""
+    paths: Dict[str, str] = {}
+    for key, fname in CSV_MAPPING.items():
+        path = os.path.join(out_dir, fname)
+        df = dfs.get(key, pd.DataFrame())
+        df.to_csv(path, index=False, float_format="%.6f")
+        paths[key] = path
+        logging.info("Wrote %s", path)
+    return paths
+
+
+# ---------------------------------------------------------------------------
+# Figure construction
+# ---------------------------------------------------------------------------
+
+def _coerce_numeric_columns(dfs: Dict[str, pd.DataFrame]) -> None:
+    """Coerce known numeric columns to float in-place across all frames."""
+    numeric_map = {
+        "daily_perf": ["GrossPnL", "Cost", "NetPnL", "NBars", "HitRatioBars", "TurnoverAbsSum"],
+        "weekly_perf": ["GrossPnL", "Cost", "NetPnL", "NBars"],
+        "monthly_perf": ["GrossPnL", "Cost", "NetPnL", "NBars"],
+        "daily_by_pair": ["NetPnL"],
+        "weekly_by_pair": ["NetPnL"],
+        "monthly_by_pair": ["NetPnL"],
+        "risk_snapshot": [
+            "NumDays","AnnMean","AnnVol","Sharpe","ProfitFactorDaily","HitRatioDaily",
+            "MaxDrawdown","VaR95_Daily","MeanDaily"
+        ],
+    }
+    for key, cols in numeric_map.items():
+        df = dfs.get(key)
+        if df is None or df.empty:
+            continue
+        for c in cols:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+
+
+def _fig_equity_curve(daily: pd.DataFrame) -> plt.Figure:
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True)
+    if daily.empty:
+        ax1.text(0.5, 0.5, "No data", ha="center")
+        ax2.axis("off")
+        return fig
+    net = pd.to_numeric(daily.set_index("DayDate")["NetPnL"], errors="coerce").fillna(0)
+    cum_net = net.cumsum()
+    running_max = cum_net.cummax()
+    drawdown = cum_net - running_max
+    ax1.plot(cum_net.index, cum_net.values, label="Cumulative NetPnL")
+    ax1.axhline(0, color="black", linewidth=0.5)
+    ax1.set_title("Equity Curve")
+    ax1.set_ylabel("NetPnL")
+    ax2.fill_between(
+        drawdown.index,
+        drawdown.values,
+        0,
+        where=drawdown.values < 0,
+        color="red",
+        alpha=0.3,
+    )
+    ax2.axhline(0, color="black", linewidth=0.5)
+    ax2.set_ylabel("Drawdown")
+    ax2.set_xlabel("Date")
+    locator = mdates.AutoDateLocator()
+    formatter = mdates.ConciseDateFormatter(locator)
+    ax1.xaxis.set_major_locator(locator)
+    ax1.xaxis.set_major_formatter(formatter)
+    ax2.xaxis.set_major_locator(locator)
+    ax2.xaxis.set_major_formatter(formatter)
+    fig.tight_layout()
+    return fig
+
+
+def _fig_histogram(daily: pd.DataFrame, mean: float, var95: float) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(10, 4))
+    if daily.empty or "NetPnL" not in daily:
+        ax.text(0.5, 0.5, "No data", ha="center")
+        return fig
+    net = pd.to_numeric(daily["NetPnL"], errors="coerce").dropna()
+    if net.empty:
+        ax.text(0.5, 0.5, "No data", ha="center")
+        return fig
+    ax.hist(net, bins=30)
+    ax.axvline(mean, color="green", linestyle="--", label="Mean")
+    ax.axvline(var95, color="red", linestyle="--", label="VaR95")
+    ax.set_title("Distribution of Daily NetPnL")
+    ax.legend()
+    ax.set_xlabel("NetPnL")
+    ax.set_ylabel("Frequency")
+    fig.tight_layout()
+    return fig
+
+
+def _fig_rolling_sharpe(daily: pd.DataFrame, ann_days: int) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(10, 4))
+    if daily.empty or "NetPnL" not in daily:
+        ax.text(0.5, 0.5, "No data", ha="center")
+        return fig
+    net = pd.to_numeric(daily.set_index("DayDate")["NetPnL"], errors="coerce").fillna(0)
+    roll_mean = net.rolling(21).mean()
+    roll_std = net.rolling(21).std()
+    roll_sharpe = (roll_mean / roll_std) * np.sqrt(ann_days)
+    roll_sharpe.replace([np.inf, -np.inf], np.nan, inplace=True)
+    roll_sharpe.dropna(inplace=True)
+    ax.plot(roll_sharpe.index, roll_sharpe.values)
+    ax.set_title("21-day Rolling Sharpe")
+    ax.set_xlabel("Date")
+    ax.set_ylabel("Sharpe")
+    locator = mdates.AutoDateLocator()
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+    fig.tight_layout()
+    return fig
+
+
+def _fig_pair_attrib(daily_by_pair: pd.DataFrame, top_n: int) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(10, 6))
+    if daily_by_pair.empty or "PairCode" not in daily_by_pair or "NetPnL" not in daily_by_pair:
+        ax.text(0.5, 0.5, "No data", ha="center")
+        return fig
+
+    dbp = daily_by_pair.copy()
+    dbp["NetPnL"] = pd.to_numeric(dbp["NetPnL"], errors="coerce")
+    dbp = dbp.dropna(subset=["NetPnL"])
+
+    if dbp.empty:
+        ax.text(0.5, 0.5, "No data", ha="center")
+        return fig
+
+    agg = dbp.groupby("PairCode", as_index=True)["NetPnL"].sum().sort_values()
+    if agg.empty:
+        ax.text(0.5, 0.5, "No data", ha="center")
+        return fig
+
+    n = min(top_n, len(agg))
+    top = agg.tail(n)
+    bottom = agg.head(n)
+    combined = pd.concat([bottom, top])
+
+    combined.plot(kind="barh", ax=ax)
+    ax.set_title(f"Cumulative NetPnL by Pair (Top/Bottom {n})")
+    ax.set_xlabel("NetPnL")
+    fig.tight_layout()
+    return fig
+
+
+def _fig_heatmap(weekly_by_pair: pd.DataFrame) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(10, 6))
+    if weekly_by_pair.empty:
+        ax.text(0.5, 0.5, "No data", ha="center")
+        return fig
+    pivot = weekly_by_pair.pivot_table(
+        index="WeekStart", columns="PairCode", values="NetPnL", aggfunc="sum"
+    )
+    if pivot.empty:
+        ax.text(0.5, 0.5, "No data", ha="center")
+        return fig
+    contrib = pivot.abs().sum().sort_values(ascending=False)
+    top_pairs = contrib.index[:12]
+    pivot = pivot[top_pairs]
+    im = ax.imshow(pivot.T.values, aspect="auto")
+    ax.set_yticks(range(len(pivot.columns)))
+    ax.set_yticklabels(pivot.columns)
+    ax.set_xticks(range(len(pivot.index)))
+    ax.set_xticklabels(pivot.index.strftime("%Y-%m-%d"), rotation=90)
+    ax.set_title("Weekly NetPnL Heatmap by Pair")
+    fig.colorbar(im, ax=ax)
+    fig.tight_layout()
+    return fig
+
+
+def _fig_bar(df: pd.DataFrame, date_col: str, title: str) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(10, 4))
+    if df.empty or date_col not in df or "NetPnL" not in df:
+        ax.text(0.5, 0.5, "No data", ha="center")
+        return fig
+    vals = pd.to_numeric(df["NetPnL"], errors="coerce")
+    x = df[date_col]
+    mask = vals.notna()
+    if not mask.any():
+        ax.text(0.5, 0.5, "No data", ha="center")
+        return fig
+    ax.bar(x[mask], vals[mask])
+    ax.set_title(title)
+    ax.set_xlabel("Date")
+    ax.set_ylabel("NetPnL")
+    locator = mdates.AutoDateLocator()
+    ax.xaxis.set_major_locator(locator)
+    ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+    fig.tight_layout()
+    return fig
+
+
+def build_figures(dfs: Dict[str, pd.DataFrame], params: ReportParams) -> Dict[str, plt.Figure]:
+    risk = dfs.get("risk_snapshot", pd.DataFrame())
+    mean_daily = float(risk.get("MeanDaily", pd.Series([0])).iloc[0]) if not risk.empty else 0.0
+    var95 = float(risk.get("VaR95_Daily", pd.Series([0])).iloc[0]) if not risk.empty else 0.0
+    figures = {
+        "equity_curve": _fig_equity_curve(dfs.get("daily_perf", pd.DataFrame())),
+        "histogram": _fig_histogram(dfs.get("daily_perf", pd.DataFrame()), mean_daily, var95),
+        "rolling_sharpe": _fig_rolling_sharpe(dfs.get("daily_perf", pd.DataFrame()), params.annualize_days),
+        "pair_attrib": _fig_pair_attrib(dfs.get("daily_by_pair", pd.DataFrame()), params.top_n_pairs),
+        "heatmap": _fig_heatmap(dfs.get("weekly_by_pair", pd.DataFrame())),
+        "weekly_bar": _fig_bar(dfs.get("weekly_perf", pd.DataFrame()), "WeekStart", "Weekly NetPnL"),
+        "monthly_bar": _fig_bar(dfs.get("monthly_perf", pd.DataFrame()), "MonthStart", "Monthly NetPnL"),
+    }
+    return figures
+
+
+# ---------------------------------------------------------------------------
+# Report rendering
+# ---------------------------------------------------------------------------
+
+def _summary_text(dfs: Dict[str, pd.DataFrame], params: ReportParams) -> str:
+    daily = dfs.get("daily_perf", pd.DataFrame())
+    risk = dfs.get("risk_snapshot", pd.DataFrame())
+    start = daily["DayDate"].min() if not daily.empty else None
+    end = daily["DayDate"].max() if not daily.empty else None
+    totals = daily[["GrossPnL", "Cost", "NetPnL", "TurnoverAbsSum"]].sum()
+    r = risk.iloc[0] if not risk.empty else pd.Series(dtype=float)
+    text = [
+        f"Period: {start.date() if start is not None else 'NA'} to {end.date() if end is not None else 'NA'}",
+        f"ModelId: {params.model_id}  TF: {params.timeframe}",
+        f"NumDays: {int(r.get('NumDays', 0))}",
+        f"AnnMean: {r.get('AnnMean', 0):.6f}",
+        f"AnnVol: {r.get('AnnVol', 0):.6f}",
+        f"Sharpe: {r.get('Sharpe', 0):.2f}",
+        f"ProfitFactorDaily: {r.get('ProfitFactorDaily', 0):.2f}",
+        f"HitRatioDaily: {r.get('HitRatioDaily', 0):.2f}",
+        f"MaxDrawdown: {r.get('MaxDrawdown', 0):.6f} ({r.get('MaxDDDate', '')})",
+        f"VaR95_Daily: {r.get('VaR95_Daily', 0):.6f}",
+        "",
+        "Totals over period:",
+        f"  GrossPnL: {totals.get('GrossPnL', 0):.6f}",
+        f"  Cost: {totals.get('Cost', 0):.6f}",
+        f"  NetPnL: {totals.get('NetPnL', 0):.6f}",
+        f"  TurnoverAbsSum: {totals.get('TurnoverAbsSum', 0):.6f}",
+        "",
+        "Business rules:",
+        "  - PnL per bar timestamped on price timeline shifted by 2 from weights.",
+        "  - Cost proportional to prior bar turnover (|w_t - w_{t-1}|).",
+        "  - NetPnL = GrossPnL - Cost.",
+    ]
+    return "\n".join(text)
+
+
+def _fig_table(df: pd.DataFrame, title: str) -> plt.Figure:
+    fig, ax = plt.subplots(figsize=(11, 8))
+    ax.set_axis_off()
+    ax.set_title(title)
+    if df.empty:
+        ax.text(0.5, 0.5, "No data", ha="center")
+        return fig
+    table = ax.table(
+        cellText=df.values,
+        colLabels=list(df.columns),
+        loc="center",
+    )
+    table.auto_set_font_size(False)
+    table.set_fontsize(8)
+    table.scale(1, 1.5)
+    fig.tight_layout()
+    return fig
+
+
+def _top_bottom_tables(daily_by_pair: pd.DataFrame, top_n: int) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    if daily_by_pair.empty:
+        cols = ["PairCode", "NetPnL", "%"]
+        return pd.DataFrame(columns=cols), pd.DataFrame(columns=cols)
+    dbp = daily_by_pair.copy()
+    if "NetPnL" in dbp:
+        dbp["NetPnL"] = pd.to_numeric(dbp["NetPnL"], errors="coerce")
+    agg = dbp.groupby("PairCode")["NetPnL"].sum()
+    total = agg.sum()
+    agg_pct = agg / total * 100 if total != 0 else agg * 0
+    df = pd.DataFrame({"PairCode": agg.index, "NetPnL": agg.values, "%": agg_pct.values})
+    df.sort_values("NetPnL", inplace=True)
+    bottom = df.head(top_n)
+    top = df.tail(top_n).iloc[::-1]
+    return top, bottom
+
+
+def render_pdf_html(
+    dfs: Dict[str, pd.DataFrame],
+    figures: Dict[str, plt.Figure],
+    params: ReportParams,
+    fname_base: str,
+) -> Tuple[str, str]:
+    pdf_path = os.path.join(params.output_dir, f"{fname_base}.pdf")
+    html_path = os.path.join(params.output_dir, f"{fname_base}.html")
+
+    # Save figures to PNG for embedding in HTML
+    img_paths: Dict[str, str] = {}
+    for key, fig in figures.items():
+        img_file = os.path.join(params.output_dir, f"{fname_base}_{key}.png")
+        fig.savefig(img_file, bbox_inches="tight")
+        img_paths[key] = os.path.basename(img_file)
+
+    summary_text = _summary_text(dfs, params)
+
+    with PdfPages(pdf_path) as pdf:
+        fig = plt.figure(figsize=(8.27, 11.69))
+        ax = fig.add_subplot(111)
+        ax.axis("off")
+        ax.text(0, 1, summary_text, ha="left", va="top", family="monospace")
+        pdf.savefig(fig)
+        plt.close(fig)
+
+        pdf.savefig(figures["equity_curve"])
+        pdf.savefig(figures["histogram"])
+        pdf.savefig(figures["rolling_sharpe"])
+        pdf.savefig(figures["pair_attrib"])
+        pdf.savefig(figures["heatmap"])
+        pdf.savefig(figures["weekly_bar"])
+        pdf.savefig(figures["monthly_bar"])
+
+        daily_table = dfs.get("daily_perf", pd.DataFrame())[
+            [
+                "DayDate",
+                "GrossPnL",
+                "Cost",
+                "NetPnL",
+                "NBars",
+                "HitRatioBars",
+                "TurnoverAbsSum",
+            ]
+        ] if "daily_perf" in dfs else pd.DataFrame()
+
+        weekly_table = dfs.get("weekly_perf", pd.DataFrame())[
+            ["WeekStart", "GrossPnL", "Cost", "NetPnL", "NBars"]
+        ] if "weekly_perf" in dfs else pd.DataFrame()
+
+        monthly_table = dfs.get("monthly_perf", pd.DataFrame())[
+            ["MonthStart", "GrossPnL", "Cost", "NetPnL", "NBars"]
+        ] if "monthly_perf" in dfs else pd.DataFrame()
+
+        top_pairs, bottom_pairs = _top_bottom_tables(
+            dfs.get("daily_by_pair", pd.DataFrame()), params.top_n_pairs
+        )
+        pdf.savefig(_fig_table(daily_table, "Daily Performance"))
+        pdf.savefig(_fig_table(weekly_table, "Weekly Performance"))
+        pdf.savefig(_fig_table(monthly_table, "Monthly Performance"))
+        pdf.savefig(_fig_table(top_pairs, "Top Pairs"))
+        pdf.savefig(_fig_table(bottom_pairs, "Bottom Pairs"))
+
+    # HTML report
+    html: List[str] = [
+        "<html><head><meta charset='utf-8'><title>Report</title></head><body>",
+        "<pre>" + summary_text + "</pre>",
+    ]
+    for key in [
+        "equity_curve",
+        "histogram",
+        "rolling_sharpe",
+        "pair_attrib",
+        "heatmap",
+        "weekly_bar",
+        "monthly_bar",
+    ]:
+        html.append(f"<h3>{key.replace('_', ' ').title()}</h3>")
+        html.append(f"<img src='{img_paths[key]}' alt='{key}'>")
+
+    html.append("<h3>Daily Performance</h3>")
+    html.append(dfs.get("daily_perf", pd.DataFrame())[[
+        "DayDate","GrossPnL","Cost","NetPnL","NBars","HitRatioBars","TurnoverAbsSum"
+    ]].to_html(index=False) if "daily_perf" in dfs and not dfs["daily_perf"].empty else "<p>No data</p>")
+
+    html.append("<h3>Weekly Performance</h3>")
+    html.append(dfs.get("weekly_perf", pd.DataFrame())[[
+        "WeekStart","GrossPnL","Cost","NetPnL","NBars"
+    ]].to_html(index=False) if "weekly_perf" in dfs and not dfs["weekly_perf"].empty else "<p>No data</p>")
+
+    html.append("<h3>Monthly Performance</h3>")
+    html.append(dfs.get("monthly_perf", pd.DataFrame())[[
+        "MonthStart","GrossPnL","Cost","NetPnL","NBars"
+    ]].to_html(index=False) if "monthly_perf" in dfs and not dfs["monthly_perf"].empty else "<p>No data</p>")
+
+    html.append("<h3>Top Pairs</h3>")
+    html.append(top_pairs.to_html(index=False))
+    html.append("<h3>Bottom Pairs</h3>")
+    html.append(bottom_pairs.to_html(index=False))
+
+    html.append("</body></html>")
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(html))
+    logging.info("Wrote %s", pdf_path)
+    logging.info("Wrote %s", html_path)
+    return pdf_path, html_path
+
+
+# --------------------------  NEW: 1-PAGER  ----------------------------------
+
+def _json_default(o):
+    if isinstance(o, (pd.Timestamp, datetime, date)):
+        return o.isoformat()
+    if isinstance(o, np.integer):
+        return int(o)
+    if isinstance(o, np.floating):
+        return float(o)
+    if isinstance(o, np.bool_):
+        return bool(o)
+    if isinstance(o, Decimal):
+        return float(o)
+    return str(o)
+
+
+def _last_trading_day(daily: pd.DataFrame) -> pd.Timestamp | None:
+    if daily is None or daily.empty or "DayDate" not in daily:
+        return None
+    return pd.to_datetime(daily["DayDate"]).max()
+
+
+def _pct(v: float | int | np.number | None) -> str:
+    try:
+        return f"{float(v) * 100:.2f}%"
+    except Exception:
+        return "NA"
+
+def _fetch_model_meta(conn: pyodbc.Connection, model_id: int) -> Tuple[str, str]:
+    """
+    Return (Name, Description) from Intraday.model.Model for the given model_id.
+    Falls back to ('Model <id>', '') if not found.
+    """
+    try:
+        q = """
+        SELECT Name, Description
+        FROM Intraday.model.[Model] WITH (NOLOCK)
+        WHERE ModelId = ?
+        """
+        df = pd.read_sql(q, conn, params=(model_id,))
+        if not df.empty:
+            name = str(df.iloc[0]["Name"]) if "Name" in df.columns else f"Model {model_id}"
+            desc = str(df.iloc[0]["Description"]) if "Description" in df.columns else ""
+            return name, desc
+    except Exception as exc:
+        logging.warning("Could not fetch model meta: %s", exc)
+    return f"Model {model_id}", ""
+
+def _normalize_pairs_and_sign(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    - Nettoie PairCode pour ne garder que des lettres (gère 'EURUSD Curncy', etc.).
+    - Si la paire est USDxxx, la renverse en xxxUSD et inverse le signe du Weight.
+    """
+    if df.empty or "PairCode" not in df or "Weight" not in df:
+        return df
+
+    def _clean_and_flip(code: str, w: float) -> tuple[str, float]:
+        letters = "".join(ch for ch in str(code).upper() if ch.isalpha())
+        if len(letters) == 6 and letters.startswith("USD"):
+            # USDxxx -> xxxUSD  et  Weight -> -Weight
+            return letters[3:] + "USD", -float(w)
+        # sinon on garde tel quel (si EURUSD on garde EURUSD, signe inchangé)
+        return (letters if len(letters) == 6 else str(code), float(w))
+
+    # applique proprement
+    new = df[["PairCode", "Weight"]].apply(lambda r: _clean_and_flip(r["PairCode"], r["Weight"]), axis=1)
+    df["PairCode"] = [p for p, _ in new]
+    df["Weight"]   = [w for _, w in new]
+    return df
+
+
+def _fetch_last_day_positions(conn: pyodbc.Connection, params: ReportParams, day: pd.Timestamp) -> pd.DataFrame:
+    """
+    Pour chaque barre T du jour 'day', récupérer le weight de T-2 barres (LAG)
+    en conservant le timestamp T (pas de décalage de l'axe du temps).
+    Gère les trous et le passage à la veille via une fenêtre (inclut J-1).
+    """
+    try:
+        q = """
+        WITH src AS (
+          SELECT
+            nw.SecurityId,
+            nw.BarTimeUtc AS BarTimeUtc,
+            LAG(nw.Weight, 2) OVER (
+              PARTITION BY nw.SecurityId
+              ORDER BY nw.BarTimeUtc
+            ) AS WeightLag2
+          FROM Intraday.model.NettedWeight AS nw WITH (NOLOCK)
+          WHERE nw.ModelId = ?
+            -- on inclut la veille pour que les premières barres du jour aient un LAG valide
+            AND nw.BarTimeUtc >= DATEADD(day, -1, CAST(? AS date))
+            AND nw.BarTimeUtc <  DATEADD(day,  1, CAST(? AS date)) -- marge future inoffensive
+        )
+        SELECT
+          s2.BarTimeUtc,
+          COALESCE(sec.BloombergTicker, sec.Symbol, CAST(s2.SecurityId AS varchar(32))) AS PairCode,
+          s2.WeightLag2 AS Weight
+        FROM src AS s2
+        LEFT JOIN Intraday.core.Security AS sec WITH (NOLOCK)
+               ON sec.SecurityId = s2.SecurityId
+        WHERE CAST(s2.BarTimeUtc AS date) = CAST(? AS date)
+          AND s2.WeightLag2 IS NOT NULL
+        ORDER BY s2.BarTimeUtc, PairCode;
+        """
+        # Params: model_id, day, day, day
+        df = pd.read_sql(q, conn, params=(params.model_id, day.date(), day.date(), day.date()))
+        if df.empty:
+            return pd.DataFrame(columns=["BarTimeUtc", "PairCode", "Weight"])
+
+        df["BarTimeUtc"] = pd.to_datetime(df["BarTimeUtc"])
+        df["Weight"] = pd.to_numeric(df["Weight"], errors="coerce")
+        df.dropna(subset=["Weight"], inplace=True)
+
+        # USDxxx -> xxxUSD et inversion de signe
+        df = _normalize_pairs_and_sign(df)
+
+        # Petit tri au cas où
+        df.sort_values(["BarTimeUtc", "PairCode"], inplace=True)
+        return df
+
+    except Exception as exc:
+        logging.warning("Bar-level positions not available (%s). Skipping position plot.", exc)
+        return pd.DataFrame(columns=["BarTimeUtc", "PairCode", "Weight"])
+
+def render_last_day_onepager(dfs: Dict[str, pd.DataFrame], params: ReportParams, fname_base: str) -> str:
+    """
+    A4 portrait, 80% width centered, ample vertical spacing.
+    - Positions: full lines (no truncation), legend INSIDE (2 columns).
+    - Day-by-pair: its own row.
+    - MTD: its own row, larger vertical gap to avoid any overlap.
+    - Filename: Report_{model_description}_{YYYY-MM-DD}.pdf
+    """
+    daily = dfs.get("daily_perf", pd.DataFrame()).copy()
+    daily_by_pair = dfs.get("daily_by_pair", pd.DataFrame()).copy()
+    last_day = _last_trading_day(daily)
+
+    # KPIs
+    day_total = np.nan
+    if last_day is not None and not daily.empty and "NetPnL" in daily:
+        day_total = pd.to_numeric(daily.loc[daily["DayDate"] == last_day, "NetPnL"], errors="coerce").sum()
+
+    # MTD with baseline at previous month end
+    mtd_curve = pd.Series(dtype=float)
+    if last_day is not None and not daily.empty and "NetPnL" in daily:
+        month_start = last_day.replace(day=1)
+        prev_month_end = month_start - pd.Timedelta(days=1)
+        span = daily[(daily["DayDate"] >= month_start) & (daily["DayDate"] <= last_day)].copy()
+        if not span.empty:
+            span["NetPnL"] = pd.to_numeric(span["NetPnL"], errors="coerce").fillna(0.0)
+            mtd_curve = span.set_index("DayDate")["NetPnL"].cumsum()
+            mtd_curve = pd.concat([pd.Series({prev_month_end: 0.0}), mtd_curve]).sort_index()
+
+    # Day-by-pair
+    by_pair_day = pd.DataFrame(columns=["PairCode", "NetPnL"])
+    if last_day is not None and not daily_by_pair.empty and {"DayDate","PairCode","NetPnL"}.issubset(daily_by_pair.columns):
+        day_pairs = daily_by_pair[daily_by_pair["DayDate"] == last_day].copy()
+        if not day_pairs.empty:
+            day_pairs["NetPnL"] = pd.to_numeric(day_pairs["NetPnL"], errors="coerce")
+            by_pair_day = day_pairs.groupby("PairCode", as_index=False)["NetPnL"].sum().sort_values("NetPnL")
+
+    # Meta + positions (aligned with LAG(2))
+    model_name, model_desc = f"Model {params.model_id}", ""
+    positions = pd.DataFrame()
+    try:
+        with pyodbc.connect(params.conn_str) as conn:
+            model_name, model_desc = _fetch_model_meta(conn, params.model_id)
+            if last_day is not None:
+                positions = _fetch_last_day_positions(conn, params, last_day)
+    except Exception as exc:
+        logging.warning("Could not open connection for one-pager: %s", exc)
+
+    # ---------- Figure ----------
+    fig = plt.figure(figsize=(8.27, 11.69))  # A4 portrait
+    fig.suptitle(
+        f"{model_name} — {model_desc} — Last Day: {last_day.date().isoformat() if last_day is not None else 'NA'}",
+        fontsize=14, fontweight="bold", y=0.992
+    )
+    kpi_text = []
+    if not np.isnan(day_total): kpi_text.append(f"Day NetPnL: {_pct(day_total)}")
+    if not mtd_curve.empty:     kpi_text.append(f"MTD NetPnL: {_pct(mtd_curve.iloc[-1])}")
+    fig.text(0.5, 0.966, " | ".join(kpi_text) if kpi_text else " ",
+             ha="center", va="center", fontsize=11, weight="bold")
+
+    # -------- Layout: 80% width centered, bigger gaps --------
+        # -------- Layout: 80% width centered, moved down --------
+    width  = 0.80
+    left   = (1.0 - width) / 2.0
+    h_main = 0.19   # positions chart a bit shorter
+    h_small= 0.15   # lower charts shorter too
+    gap1   = 0.08   # gap between positions and day-by-pair
+    gap2   = 0.10   # larger gap between day-by-pair and MTD
+    top_start = 0.68   # lowered starting point (vs 0.74 before)
+
+    y_pos0 = top_start
+    y_pos1 = y_pos0 - h_main - gap1
+    y_pos2 = y_pos1 - h_small - gap2
+
+
+    # --- Chart 1 : Positions (full lines), legend INSIDE (2 columns) ---
+    pos_ax = fig.add_axes([left, y_pos0, width, h_main])
+    piv = pd.DataFrame()
+    if not positions.empty:
+        piv = positions.pivot_table(index="BarTimeUtc", columns="PairCode", values="Weight", aggfunc="last")
+        if not piv.empty:
+            k = min(8, piv.shape[1])
+            order = piv.abs().sum().sort_values(ascending=False).index.tolist()[:k]
+            piv = piv[order]
+            for col in piv.columns:
+                pos_ax.plot(piv.index, piv[col], label=col)
+            pos_ax.set_title("Positions by Pair", pad=8)
+            pos_ax.set_xlabel("Time"); pos_ax.set_ylabel("Weight")
+            loc = mdates.AutoDateLocator()
+            pos_ax.xaxis.set_major_locator(loc)
+            pos_ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(loc))
+            pos_ax.legend(
+                loc="upper right",
+                bbox_to_anchor=(0.985, 0.985),
+                fontsize=8,
+                frameon=True, facecolor="white", framealpha=0.9,
+                borderaxespad=0.0, ncols=2
+            )
+        else:
+            pos_ax.text(0.5, 0.5, "No position data for last day", ha="center")
+            pos_ax.set_axis_off()
+    else:
+        pos_ax.text(0.5, 0.5, "Position-by-bar data not available", ha="center")
+        pos_ax.set_axis_off()
+
+    # --- Chart 2 : Day NetPnL by Pair ---
+    bars_ax = fig.add_axes([left, y_pos1, width, h_small])
+    if not by_pair_day.empty:
+        n = min(10, len(by_pair_day))
+        comb = pd.concat([by_pair_day.head(n), by_pair_day.tail(n)])
+        bars_ax.barh(comb["PairCode"], comb["NetPnL"] * 100.0)
+        bars_ax.set_title("Day NetPnL by Pair", pad=12)
+        bars_ax.set_xlabel("Return (%)", labelpad=22)  # extra space above MTD title
+    else:
+        bars_ax.text(0.5, 0.5, "No data", ha="center")
+        bars_ax.set_axis_off()
+
+    # --- Chart 3 : MTD cumulative ---
+    mtd_ax = fig.add_axes([left, y_pos2, width, h_small])
+    if not mtd_curve.empty:
+        mtd_ax.plot(mtd_curve.index, mtd_curve.values * 100.0)
+        mtd_ax.set_title("MTD Cumulative NetPnL", pad=26)
+        mtd_ax.set_xlabel("Date"); mtd_ax.set_ylabel("Cumulative NetPnL (%)")
+        loc2 = mdates.AutoDateLocator()
+        mtd_ax.xaxis.set_major_locator(loc2)
+        mtd_ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(loc2))
+    else:
+        mtd_ax.text(0.5, 0.5, "No MTD data", ha="center")
+        mtd_ax.set_axis_off()
+
+    # -------- Filename: Report_{model_description}_{YYYY-MM-DD}.pdf --------
+    today = datetime.utcnow().date().strftime("%Y-%m-%d")
+    safe_desc = _slugify(model_desc or model_name)
+    out_name = f"Report_{safe_desc}_{today}.pdf"
+    out_path = os.path.join(params.output_dir, out_name)
+
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    logging.info("Wrote %s", out_path)
+    return out_path
+
+
+# ---------------------------------------------------------------------------
+# Manifest
+# ---------------------------------------------------------------------------
+
+def write_manifest(paths: Dict[str, str], out_pdf: str, out_html: str, dfs: Dict[str, pd.DataFrame], params: ReportParams, onepager_path: str | None = None) -> None:
+    manifest = {
+        "outputs": {
+            **paths,
+            "pdf": out_pdf,
+            "html": out_html,
+        },
+        "model_id": params.model_id,
+        "timeframe": params.timeframe,
+    }
+    if onepager_path:
+        manifest["outputs"]["onepager_pdf"] = onepager_path
+    risk = dfs.get("risk_snapshot", pd.DataFrame())
+    if not risk.empty:
+        manifest["risk_snapshot"] = risk.iloc[0].to_dict()
+    path = os.path.join(params.output_dir, "manifest.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, default=_json_default)
+    logging.info("Wrote %s", path)
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+def parse_args() -> ReportParams:
+    parser = argparse.ArgumentParser(description="Generate Model DWM report")
+    parser.add_argument(
+        "--conn-string",
+        help="ODBC connection string (overrides AWS secret if provided)",
+    )
+    parser.add_argument(
+        "--secret-name",
+        default="qq-intraday-credentials",
+        help="AWS Secrets Manager name containing DB credentials",
+    )
+    parser.add_argument(
+        "--region",
+        default="eu-west-2",
+        help="AWS region where the secret is stored",
+    )
+    parser.add_argument(
+        "--driver",
+        default="ODBC Driver 17 for SQL Server",
+        help="ODBC driver name to use when connecting via pyodbc",
+    )
+    parser.add_argument("--model-id", type=int, required=True)
+    parser.add_argument("--timeframe", type=int, required=True)
+    parser.add_argument("--from-date", default=None, help="YYYY-MM-DD or null")
+    parser.add_argument("--to-date", default=None, help="YYYY-MM-DD or null")
+    parser.add_argument("--annualize-days", type=int, default=252)
+    parser.add_argument("--top-n-pairs", type=int, default=10)
+    parser.add_argument("--output-dir", default="output", help="Directory for outputs")
+    args = parser.parse_args()
+    return ReportParams(
+        conn_str=args.conn_string
+        or get_conn_from_secret(args.secret_name, args.region, args.driver),
+        model_id=args.model_id,
+        timeframe=args.timeframe,
+        from_date=args.from_date,
+        to_date=args.to_date,
+        annualize_days=args.annualize_days,
+        top_n_pairs=args.top_n_pairs,
+        output_dir=args.output_dir,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    params = parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(message)s")
+    os.makedirs(params.output_dir, exist_ok=True)
+
+    dfs = fetch_report(params)
+    paths = export_csv(dfs, params.output_dir)
+    figures = build_figures(dfs, params)
+    fname_base = f"Report_Model_{params.model_id}_{params.timeframe}_{params.from_date or 'NA'}_{params.to_date or 'NA'}"
+    pdf_path, html_path = render_pdf_html(dfs, figures, params, fname_base)
+
+    # NEW: render one-pager (best effort; always produces a PDF)
+    onepager_path = render_last_day_onepager(dfs, params, fname_base)
+
+    write_manifest(paths, pdf_path, html_path, dfs, params, onepager_path=onepager_path)
+
+
+if __name__ == "__main__":  # pragma: no cover
+    main()
+=======
 import pandas as pd
 import matplotlib.pyplot as plt
 
@@ -64,3 +981,4 @@ if __name__ == "__main__":
     data = pd.DataFrame({"pair": ["A/B", "C/D"], "value": [1.2, -0.5]})
     data.set_index("pair", inplace=True)
     _fig_pair_attrib(data, 5)
+
