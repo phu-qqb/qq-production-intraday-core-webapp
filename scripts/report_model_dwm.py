@@ -22,6 +22,8 @@ import argparse
 import json
 import logging
 import os
+from datetime import date, datetime
+from decimal import Decimal
 import boto3
 from botocore.exceptions import ClientError
 from dataclasses import dataclass
@@ -32,10 +34,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pyodbc
-from datetime import date, datetime
-from decimal import Decimal
-
 from matplotlib.backends.backend_pdf import PdfPages
+import re
+from datetime import datetime  # (déjà importé plus haut)
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -91,23 +94,14 @@ def get_conn_from_secret(secret_name: str, region_name: str, default_driver: str
         f"UID={user};PWD={password};Encrypt=no"
     )
 
-def _json_default(o):
-    # pandas / datetime
-    if isinstance(o, (pd.Timestamp, datetime, date)):
-        return o.isoformat()
-    # numpy scalars
-    if isinstance(o, np.integer):
-        return int(o)
-    if isinstance(o, np.floating):
-        return float(o)
-    if isinstance(o, np.bool_):
-        return bool(o)
-    # Decimal
-    if isinstance(o, Decimal):
-        return float(o)
-    # Fallback
-    return str(o)
-
+def _slugify(s: str) -> str:
+    """Keep letters/digits/+-._ and collapse spaces to single '-'. Trim to 80 chars."""
+    if not s:
+        return "NA"
+    s = s.strip()
+    s = re.sub(r"\s+", "-", s)                 # spaces -> dash
+    s = re.sub(r"[^A-Za-z0-9._+-]", "_", s)    # safe filename
+    return s[:80] if len(s) > 80 else s
 
 def fetch_report(params: ReportParams) -> Dict[str, pd.DataFrame]:
     """Run the stored procedure and return result sets as DataFrames."""
@@ -560,11 +554,276 @@ def render_pdf_html(
     return pdf_path, html_path
 
 
+# --------------------------  NEW: 1-PAGER  ----------------------------------
+
+def _json_default(o):
+    if isinstance(o, (pd.Timestamp, datetime, date)):
+        return o.isoformat()
+    if isinstance(o, np.integer):
+        return int(o)
+    if isinstance(o, np.floating):
+        return float(o)
+    if isinstance(o, np.bool_):
+        return bool(o)
+    if isinstance(o, Decimal):
+        return float(o)
+    return str(o)
+
+
+def _last_trading_day(daily: pd.DataFrame) -> pd.Timestamp | None:
+    if daily is None or daily.empty or "DayDate" not in daily:
+        return None
+    return pd.to_datetime(daily["DayDate"]).max()
+
+
+def _pct(v: float | int | np.number | None) -> str:
+    try:
+        return f"{float(v) * 100:.2f}%"
+    except Exception:
+        return "NA"
+
+def _fetch_model_meta(conn: pyodbc.Connection, model_id: int) -> Tuple[str, str]:
+    """
+    Return (Name, Description) from Intraday.model.Model for the given model_id.
+    Falls back to ('Model <id>', '') if not found.
+    """
+    try:
+        q = """
+        SELECT Name, Description
+        FROM Intraday.model.[Model] WITH (NOLOCK)
+        WHERE ModelId = ?
+        """
+        df = pd.read_sql(q, conn, params=(model_id,))
+        if not df.empty:
+            name = str(df.iloc[0]["Name"]) if "Name" in df.columns else f"Model {model_id}"
+            desc = str(df.iloc[0]["Description"]) if "Description" in df.columns else ""
+            return name, desc
+    except Exception as exc:
+        logging.warning("Could not fetch model meta: %s", exc)
+    return f"Model {model_id}", ""
+
+def _normalize_pairs_and_sign(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    - Nettoie PairCode pour ne garder que des lettres (gère 'EURUSD Curncy', etc.).
+    - Si la paire est USDxxx, la renverse en xxxUSD et inverse le signe du Weight.
+    """
+    if df.empty or "PairCode" not in df or "Weight" not in df:
+        return df
+
+    def _clean_and_flip(code: str, w: float) -> tuple[str, float]:
+        letters = "".join(ch for ch in str(code).upper() if ch.isalpha())
+        if len(letters) == 6 and letters.startswith("USD"):
+            # USDxxx -> xxxUSD  et  Weight -> -Weight
+            return letters[3:] + "USD", -float(w)
+        # sinon on garde tel quel (si EURUSD on garde EURUSD, signe inchangé)
+        return (letters if len(letters) == 6 else str(code), float(w))
+
+    # applique proprement
+    new = df[["PairCode", "Weight"]].apply(lambda r: _clean_and_flip(r["PairCode"], r["Weight"]), axis=1)
+    df["PairCode"] = [p for p, _ in new]
+    df["Weight"]   = [w for _, w in new]
+    return df
+
+
+def _fetch_last_day_positions(conn: pyodbc.Connection, params: ReportParams, day: pd.Timestamp) -> pd.DataFrame:
+    """
+    Pour chaque barre T du jour 'day', récupérer le weight de T-2 barres (LAG)
+    en conservant le timestamp T (pas de décalage de l'axe du temps).
+    Gère les trous et le passage à la veille via une fenêtre (inclut J-1).
+    """
+    try:
+        q = """
+        WITH src AS (
+          SELECT
+            nw.SecurityId,
+            nw.BarTimeUtc AS BarTimeUtc,
+            LAG(nw.Weight, 2) OVER (
+              PARTITION BY nw.SecurityId
+              ORDER BY nw.BarTimeUtc
+            ) AS WeightLag2
+          FROM Intraday.model.NettedWeight AS nw WITH (NOLOCK)
+          WHERE nw.ModelId = ?
+            -- on inclut la veille pour que les premières barres du jour aient un LAG valide
+            AND nw.BarTimeUtc >= DATEADD(day, -1, CAST(? AS date))
+            AND nw.BarTimeUtc <  DATEADD(day,  1, CAST(? AS date)) -- marge future inoffensive
+        )
+        SELECT
+          s2.BarTimeUtc,
+          COALESCE(sec.BloombergTicker, sec.Symbol, CAST(s2.SecurityId AS varchar(32))) AS PairCode,
+          s2.WeightLag2 AS Weight
+        FROM src AS s2
+        LEFT JOIN Intraday.core.Security AS sec WITH (NOLOCK)
+               ON sec.SecurityId = s2.SecurityId
+        WHERE CAST(s2.BarTimeUtc AS date) = CAST(? AS date)
+          AND s2.WeightLag2 IS NOT NULL
+        ORDER BY s2.BarTimeUtc, PairCode;
+        """
+        # Params: model_id, day, day, day
+        df = pd.read_sql(q, conn, params=(params.model_id, day.date(), day.date(), day.date()))
+        if df.empty:
+            return pd.DataFrame(columns=["BarTimeUtc", "PairCode", "Weight"])
+
+        df["BarTimeUtc"] = pd.to_datetime(df["BarTimeUtc"])
+        df["Weight"] = pd.to_numeric(df["Weight"], errors="coerce")
+        df.dropna(subset=["Weight"], inplace=True)
+
+        # USDxxx -> xxxUSD et inversion de signe
+        df = _normalize_pairs_and_sign(df)
+
+        # Petit tri au cas où
+        df.sort_values(["BarTimeUtc", "PairCode"], inplace=True)
+        return df
+
+    except Exception as exc:
+        logging.warning("Bar-level positions not available (%s). Skipping position plot.", exc)
+        return pd.DataFrame(columns=["BarTimeUtc", "PairCode", "Weight"])
+
+def render_last_day_onepager(dfs: Dict[str, pd.DataFrame], params: ReportParams, fname_base: str) -> str:
+    """
+    A4 portrait, 80% width centered, ample vertical spacing.
+    - Positions: full lines (no truncation), legend INSIDE (2 columns).
+    - Day-by-pair: its own row.
+    - MTD: its own row, larger vertical gap to avoid any overlap.
+    - Filename: Report_{model_description}_{YYYY-MM-DD}.pdf
+    """
+    daily = dfs.get("daily_perf", pd.DataFrame()).copy()
+    daily_by_pair = dfs.get("daily_by_pair", pd.DataFrame()).copy()
+    last_day = _last_trading_day(daily)
+
+    # KPIs
+    day_total = np.nan
+    if last_day is not None and not daily.empty and "NetPnL" in daily:
+        day_total = pd.to_numeric(daily.loc[daily["DayDate"] == last_day, "NetPnL"], errors="coerce").sum()
+
+    # MTD with baseline at previous month end
+    mtd_curve = pd.Series(dtype=float)
+    if last_day is not None and not daily.empty and "NetPnL" in daily:
+        month_start = last_day.replace(day=1)
+        prev_month_end = month_start - pd.Timedelta(days=1)
+        span = daily[(daily["DayDate"] >= month_start) & (daily["DayDate"] <= last_day)].copy()
+        if not span.empty:
+            span["NetPnL"] = pd.to_numeric(span["NetPnL"], errors="coerce").fillna(0.0)
+            mtd_curve = span.set_index("DayDate")["NetPnL"].cumsum()
+            mtd_curve = pd.concat([pd.Series({prev_month_end: 0.0}), mtd_curve]).sort_index()
+
+    # Day-by-pair
+    by_pair_day = pd.DataFrame(columns=["PairCode", "NetPnL"])
+    if last_day is not None and not daily_by_pair.empty and {"DayDate","PairCode","NetPnL"}.issubset(daily_by_pair.columns):
+        day_pairs = daily_by_pair[daily_by_pair["DayDate"] == last_day].copy()
+        if not day_pairs.empty:
+            day_pairs["NetPnL"] = pd.to_numeric(day_pairs["NetPnL"], errors="coerce")
+            by_pair_day = day_pairs.groupby("PairCode", as_index=False)["NetPnL"].sum().sort_values("NetPnL")
+
+    # Meta + positions (aligned with LAG(2))
+    model_name, model_desc = f"Model {params.model_id}", ""
+    positions = pd.DataFrame()
+    try:
+        with pyodbc.connect(params.conn_str) as conn:
+            model_name, model_desc = _fetch_model_meta(conn, params.model_id)
+            if last_day is not None:
+                positions = _fetch_last_day_positions(conn, params, last_day)
+    except Exception as exc:
+        logging.warning("Could not open connection for one-pager: %s", exc)
+
+    # ---------- Figure ----------
+    fig = plt.figure(figsize=(8.27, 11.69))  # A4 portrait
+    fig.suptitle(
+        f"{model_name} — {model_desc} — Last Day: {last_day.date().isoformat() if last_day is not None else 'NA'}",
+        fontsize=14, fontweight="bold", y=0.992
+    )
+    kpi_text = []
+    if not np.isnan(day_total): kpi_text.append(f"Day NetPnL: {_pct(day_total)}")
+    if not mtd_curve.empty:     kpi_text.append(f"MTD NetPnL: {_pct(mtd_curve.iloc[-1])}")
+    fig.text(0.5, 0.966, " | ".join(kpi_text) if kpi_text else " ",
+             ha="center", va="center", fontsize=11, weight="bold")
+
+    # -------- Layout: 80% width centered, bigger gaps --------
+        # -------- Layout: 80% width centered, moved down --------
+    width  = 0.80
+    left   = (1.0 - width) / 2.0
+    h_main = 0.19   # positions chart a bit shorter
+    h_small= 0.15   # lower charts shorter too
+    gap1   = 0.08   # gap between positions and day-by-pair
+    gap2   = 0.10   # larger gap between day-by-pair and MTD
+    top_start = 0.68   # lowered starting point (vs 0.74 before)
+
+    y_pos0 = top_start
+    y_pos1 = y_pos0 - h_main - gap1
+    y_pos2 = y_pos1 - h_small - gap2
+
+
+    # --- Chart 1 : Positions (full lines), legend INSIDE (2 columns) ---
+    pos_ax = fig.add_axes([left, y_pos0, width, h_main])
+    piv = pd.DataFrame()
+    if not positions.empty:
+        piv = positions.pivot_table(index="BarTimeUtc", columns="PairCode", values="Weight", aggfunc="last")
+        if not piv.empty:
+            k = min(8, piv.shape[1])
+            order = piv.abs().sum().sort_values(ascending=False).index.tolist()[:k]
+            piv = piv[order]
+            for col in piv.columns:
+                pos_ax.plot(piv.index, piv[col], label=col)
+            pos_ax.set_title("Positions by Pair", pad=8)
+            pos_ax.set_xlabel("Time"); pos_ax.set_ylabel("Weight")
+            loc = mdates.AutoDateLocator()
+            pos_ax.xaxis.set_major_locator(loc)
+            pos_ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(loc))
+            pos_ax.legend(
+                loc="upper right",
+                bbox_to_anchor=(0.985, 0.985),
+                fontsize=8,
+                frameon=True, facecolor="white", framealpha=0.9,
+                borderaxespad=0.0, ncols=2
+            )
+        else:
+            pos_ax.text(0.5, 0.5, "No position data for last day", ha="center")
+            pos_ax.set_axis_off()
+    else:
+        pos_ax.text(0.5, 0.5, "Position-by-bar data not available", ha="center")
+        pos_ax.set_axis_off()
+
+    # --- Chart 2 : Day NetPnL by Pair ---
+    bars_ax = fig.add_axes([left, y_pos1, width, h_small])
+    if not by_pair_day.empty:
+        n = min(10, len(by_pair_day))
+        comb = pd.concat([by_pair_day.head(n), by_pair_day.tail(n)])
+        bars_ax.barh(comb["PairCode"], comb["NetPnL"] * 100.0)
+        bars_ax.set_title("Day NetPnL by Pair", pad=12)
+        bars_ax.set_xlabel("Return (%)", labelpad=22)  # extra space above MTD title
+    else:
+        bars_ax.text(0.5, 0.5, "No data", ha="center")
+        bars_ax.set_axis_off()
+
+    # --- Chart 3 : MTD cumulative ---
+    mtd_ax = fig.add_axes([left, y_pos2, width, h_small])
+    if not mtd_curve.empty:
+        mtd_ax.plot(mtd_curve.index, mtd_curve.values * 100.0)
+        mtd_ax.set_title("MTD Cumulative NetPnL", pad=26)
+        mtd_ax.set_xlabel("Date"); mtd_ax.set_ylabel("Cumulative NetPnL (%)")
+        loc2 = mdates.AutoDateLocator()
+        mtd_ax.xaxis.set_major_locator(loc2)
+        mtd_ax.xaxis.set_major_formatter(mdates.ConciseDateFormatter(loc2))
+    else:
+        mtd_ax.text(0.5, 0.5, "No MTD data", ha="center")
+        mtd_ax.set_axis_off()
+
+    # -------- Filename: Report_{model_description}_{YYYY-MM-DD}.pdf --------
+    today = datetime.utcnow().date().strftime("%Y-%m-%d")
+    safe_desc = _slugify(model_desc or model_name)
+    out_name = f"Report_{safe_desc}_{today}.pdf"
+    out_path = os.path.join(params.output_dir, out_name)
+
+    fig.savefig(out_path, bbox_inches="tight")
+    plt.close(fig)
+    logging.info("Wrote %s", out_path)
+    return out_path
+
+
 # ---------------------------------------------------------------------------
 # Manifest
 # ---------------------------------------------------------------------------
 
-def write_manifest(paths: Dict[str, str], out_pdf: str, out_html: str, dfs: Dict[str, pd.DataFrame], params: ReportParams) -> None:
+def write_manifest(paths: Dict[str, str], out_pdf: str, out_html: str, dfs: Dict[str, pd.DataFrame], params: ReportParams, onepager_path: str | None = None) -> None:
     manifest = {
         "outputs": {
             **paths,
@@ -574,6 +833,8 @@ def write_manifest(paths: Dict[str, str], out_pdf: str, out_html: str, dfs: Dict
         "model_id": params.model_id,
         "timeframe": params.timeframe,
     }
+    if onepager_path:
+        manifest["outputs"]["onepager_pdf"] = onepager_path
     risk = dfs.get("risk_snapshot", pd.DataFrame())
     if not risk.empty:
         manifest["risk_snapshot"] = risk.iloc[0].to_dict()
@@ -643,7 +904,11 @@ def main() -> None:
     figures = build_figures(dfs, params)
     fname_base = f"Report_Model_{params.model_id}_{params.timeframe}_{params.from_date or 'NA'}_{params.to_date or 'NA'}"
     pdf_path, html_path = render_pdf_html(dfs, figures, params, fname_base)
-    write_manifest(paths, pdf_path, html_path, dfs, params)
+
+    # NEW: render one-pager (best effort; always produces a PDF)
+    onepager_path = render_last_day_onepager(dfs, params, fname_base)
+
+    write_manifest(paths, pdf_path, html_path, dfs, params, onepager_path=onepager_path)
 
 
 if __name__ == "__main__":  # pragma: no cover
