@@ -21,7 +21,7 @@ public class WakettApiClient
         var payload = new
         {
             ts = ts?.ToString("yyyy-MM-dd HH:mm:ss.fffzzz"),
-            symbols = symbols.Select(s => new { securityid = s.SecurityId, symbol = s.Symbol })
+            symbols = symbols.Select(s => s.Symbol)
         };
         var response = await client.PostAsJsonAsync("prices", payload, _jsonOptions);
         response.EnsureSuccessStatusCode();

@@ -29,8 +29,8 @@ public class WakettApiClientTests
             ItExpr.IsAny<CancellationToken>());
 
         var body = await captured!.Content.ReadAsStringAsync();
-        Assert.Contains("\"securityid\":1", body);
-        Assert.Contains("\"symbol\":\"AAPL\"", body);
+        Assert.Contains("\"symbols\":[\"AAPL\"]", body);
+        Assert.DoesNotContain("\"securityid\"", body);
     }
 
     [Fact]
