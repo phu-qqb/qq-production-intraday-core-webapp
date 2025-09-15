@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Net.Http.Json;
+using System.Linq;
 using TradingDaemon.Models;
 
 namespace TradingDaemon.Services;
@@ -14,13 +15,13 @@ public class WakettApiClient
         _clientFactory = clientFactory;
     }
 
-    public async Task<WakettPriceResponse?> GetPricesAsync(IEnumerable<string> symbols, DateTimeOffset? ts = null)
+    public async Task<WakettPriceResponse?> GetPricesAsync(IEnumerable<WakettSecuritySymbol> symbols, DateTimeOffset? ts = null)
     {
         var client = _clientFactory.CreateClient("WakettApi");
         var payload = new
         {
             ts = ts?.ToString("yyyy-MM-dd HH:mm:ss.fffzzz"),
-            symbols
+            symbols = symbols.Select(s => new { securityid = s.SecurityId, symbol = s.Symbol })
         };
         var response = await client.PostAsJsonAsync("/prices", payload, _jsonOptions);
         response.EnsureSuccessStatusCode();
