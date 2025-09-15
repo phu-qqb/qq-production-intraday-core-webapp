@@ -1,5 +1,11 @@
 namespace TradingDaemon.Models;
 
+public class WakettPriceRequest
+{
+    public List<string> Symbols { get; set; } = new();
+    public DateTimeOffset? Ts { get; set; }
+}
+
 public class WakettPriceResponse
 {
     public string Ts { get; set; } = string.Empty;

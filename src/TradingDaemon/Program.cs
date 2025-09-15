@@ -56,5 +56,6 @@ app.MapPriceEndpoints();
 app.MapWeightEndpoints();
 app.MapTradingEndpoints();
 app.MapReportEndpoints();
+app.MapWakettEndpoints();
 
 app.Run();
