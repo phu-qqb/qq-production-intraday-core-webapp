@@ -11,20 +11,26 @@ public class WakettApiClientTests
     [Fact]
     public async Task GetPricesAsync_PostsToPricesEndpoint()
     {
+        HttpRequestMessage? captured = null;
         var handler = new Mock<HttpMessageHandler>();
         handler.Protected().Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+            .Callback<HttpRequestMessage, CancellationToken>((m, _) => captured = m)
             .ReturnsAsync(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"ts\":\"\",\"prices\":[]}") });
         var client = new HttpClient(handler.Object) { BaseAddress = new Uri("http://test") };
         var factory = Mock.Of<IHttpClientFactory>(f => f.CreateClient("WakettApi") == client);
         var api = new WakettApiClient(factory);
 
-        await api.GetPricesAsync(new[] { "AAPL" });
+        await api.GetPricesAsync(new[] { new WakettSecuritySymbol { SecurityId = 1, Symbol = "AAPL" } });
 
         handler.Protected().Verify(
             "SendAsync",
             Times.Once(),
             ItExpr.Is<HttpRequestMessage>(m => m.Method == HttpMethod.Post && m.RequestUri!.PathAndQuery == "/prices"),
             ItExpr.IsAny<CancellationToken>());
+
+        var body = await captured!.Content.ReadAsStringAsync();
+        Assert.Contains("\"securityid\":1", body);
+        Assert.Contains("\"symbol\":\"AAPL\"", body);
     }
 
     [Fact]
