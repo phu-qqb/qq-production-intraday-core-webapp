@@ -34,6 +34,25 @@ public class WakettApiClientTests
     }
 
     [Fact]
+    public async Task GetPricesAsync_FormatsTimestampInUtcWithZSuffix()
+    {
+        HttpRequestMessage? captured = null;
+        var handler = new Mock<HttpMessageHandler>();
+        handler.Protected().Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+            .Callback<HttpRequestMessage, CancellationToken>((m, _) => captured = m)
+            .ReturnsAsync(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"ts\":\"\",\"prices\":[]}") });
+        var client = new HttpClient(handler.Object) { BaseAddress = new Uri("http://test") };
+        var factory = Mock.Of<IHttpClientFactory>(f => f.CreateClient("WakettApi") == client);
+        var api = new WakettApiClient(factory);
+
+        var ts = new DateTimeOffset(2024, 1, 1, 12, 6, 0, TimeSpan.FromHours(1));
+        await api.GetPricesAsync(new[] { new WakettSecuritySymbol { SecurityId = 1, Symbol = "AAPL" } }, ts);
+
+        var body = await captured!.Content.ReadAsStringAsync();
+        Assert.Contains("\"ts\":\"2024-01-01T11:06:00.000Z\"", body);
+    }
+
+    [Fact]
     public async Task SendOrdersAsync_PostsToOrdersEndpoint()
     {
         var handler = new Mock<HttpMessageHandler>();
