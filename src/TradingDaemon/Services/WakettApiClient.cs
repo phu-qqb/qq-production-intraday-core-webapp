@@ -22,7 +22,7 @@ public class WakettApiClient
             ts = ts?.ToString("yyyy-MM-dd HH:mm:ss.fffzzz"),
             symbols
         };
-        var response = await client.PostAsJsonAsync("/prices", payload, _jsonOptions);
+        var response = await client.PostAsJsonAsync("prices", payload, _jsonOptions);
         response.EnsureSuccessStatusCode();
         var json = await response.Content.ReadAsStringAsync();
         return JsonSerializer.Deserialize<WakettPriceResponse>(json, _jsonOptions);
@@ -31,7 +31,7 @@ public class WakettApiClient
     public async Task<WakettOrderResponse?> SendOrdersAsync(WakettOrderRequest request)
     {
         var client = _clientFactory.CreateClient("WakettApi");
-        var response = await client.PostAsJsonAsync("/orders", request, _jsonOptions);
+        var response = await client.PostAsJsonAsync("orders", request, _jsonOptions);
         response.EnsureSuccessStatusCode();
         var json = await response.Content.ReadAsStringAsync();
         return JsonSerializer.Deserialize<WakettOrderResponse>(json, _jsonOptions);
@@ -40,7 +40,7 @@ public class WakettApiClient
     public async Task<WakettTradeResponse?> GetTradesAsync(WakettTradeRequest request)
     {
         var client = _clientFactory.CreateClient("WakettApi");
-        var response = await client.PostAsJsonAsync("/trades", request, _jsonOptions);
+        var response = await client.PostAsJsonAsync("trades", request, _jsonOptions);
         response.EnsureSuccessStatusCode();
         var json = await response.Content.ReadAsStringAsync();
         return JsonSerializer.Deserialize<WakettTradeResponse>(json, _jsonOptions);
