@@ -22,7 +22,12 @@ public class WakettApiClient
         string? formattedTs = null;
         if (ts.HasValue)
         {
-            formattedTs = ts.Value.UtcDateTime.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture);
+            var etZone = TimeZoneInfo.FindSystemTimeZoneById("Eastern Standard Time");
+
+            var etTime = TimeZoneInfo.ConvertTime(ts.Value, etZone);
+
+            // Avec offset (+HH:mm)
+            formattedTs = etTime.ToString("yyyy-MM-dd HH:mm:ss.fffK", CultureInfo.InvariantCulture);
         }
 
         var payload = new
