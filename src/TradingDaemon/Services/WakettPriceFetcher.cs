@@ -457,6 +457,9 @@ public class WakettPriceFetcher
             transaction);
 
         transaction.Commit();
+
+        await connection.ExecuteAsync("EXEC mkt.LoadRawFromStage @TimeframeMinute = 60");
+        await connection.ExecuteAsync("EXEC mkt.LoadFlatFromMinimal @TimeframeMinute = 60");
     }
 
     internal readonly record struct CurrencyPair(string Base, string Quote);
