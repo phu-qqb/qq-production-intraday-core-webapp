@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
@@ -481,3 +482,15 @@ public sealed record WakettPriceUploadItem(
     string Symbol,
     decimal Price,
     bool Inverted);
+
+public sealed record WakettPriceUploadResponse(
+    int Uploaded,
+    DateTime? TimestampUtc,
+    IReadOnlyList<WakettPriceUploadItem> Prices)
+{
+    public static WakettPriceUploadResponse FromResult(WakettPriceUploadResult result) =>
+        new(result.Prices.Count, result.TimestampUtc, result.Prices);
+
+    public static WakettPriceUploadResponse Empty() =>
+        new(0, null, Array.Empty<WakettPriceUploadItem>());
+}
