@@ -8,17 +8,18 @@ public static class WakettController
 {
     public static void MapWakettEndpoints(this IEndpointRouteBuilder app)
     {
-        app.MapPost("/api/wakett/prices", async (WakettApiClient client, IConfiguration config, WakettPriceRequest request) =>
+        app.MapPost("/api/wakett/prices", async (WakettPriceFetcher fetcher, WakettPriceRequest request) =>
         {
-            var symbols = config.GetSection("ExternalApis:WakettApi:Symbols").Get<List<WakettSecuritySymbol>>() ?? new();
-            var prices = await client.GetPricesAsync(symbols, request.Ts);
-            return Results.Ok(prices);
+            var result = await fetcher.FetchAndStoreAsync(request.Ts);
+            return result is not null
+                ? Results.Ok(result)
+                : Results.Ok(new { Uploaded = 0 });
         })
         .WithName("FetchWakettPrices")
         .WithOpenApi(op =>
         {
-            op.Summary = "Fetch prices from Wakett";
-            op.Description = "Calls the Wakett API to retrieve prices for the configured symbols.";
+            op.Summary = "Fetch and store Wakett FX prices.";
+            op.Description = "Retrieves FX prices from Wakett, reconstructs missing crosses, and stores them in the database.";
             return op;
         });
     }

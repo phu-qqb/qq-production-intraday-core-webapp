@@ -34,6 +34,7 @@ builder.Services.AddTransient<OrderSender>();
 builder.Services.AddTransient<ReportRunner>();
 
 builder.Services.AddTransient<WakettApiClient>();
+builder.Services.AddTransient<WakettPriceFetcher>();
 
 
 builder.Services.AddEndpointsApiExplorer();
