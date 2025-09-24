@@ -2,7 +2,6 @@ using System.Collections.Generic;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.OpenApi;
 using Microsoft.OpenApi.Models;
-using TradingDaemon.Models;
 using TradingDaemon.Services;
 
 namespace TradingDaemon.Controllers;
@@ -11,9 +10,9 @@ public static class WakettController
 {
     public static void MapWakettEndpoints(this IEndpointRouteBuilder app)
     {
-        app.MapPost("/api/wakett/prices", async Task<Ok<WakettPriceUploadResponse>> (WakettPriceFetcher fetcher, WakettPriceRequest request) =>
+        app.MapPost("/api/wakett/prices", async Task<Ok<WakettPriceUploadResponse>> (WakettPriceFetcher fetcher) =>
         {
-            var result = await fetcher.FetchAndStoreAsync(request.Ts);
+            var result = await fetcher.FetchAndStoreAsync();
             var response = result is not null
                 ? WakettPriceUploadResponse.FromResult(result)
                 : WakettPriceUploadResponse.Empty();
@@ -24,7 +23,7 @@ public static class WakettController
         .WithOpenApi(op =>
         {
             op.Summary = "Fetch and store Wakett FX prices.";
-            op.Description = "Retrieves FX prices from Wakett, reconstructs missing crosses, and stores them in the database.";
+            op.Description = "Retrieves FX prices from Wakett, reconstructs missing crosses, and stores any missing bars from the last 24 hours in the database.";
             op.Responses["200"] = new OpenApiResponse
             {
                 Description = "Summary of the FX prices that were uploaded to Stage_HistClose.",
