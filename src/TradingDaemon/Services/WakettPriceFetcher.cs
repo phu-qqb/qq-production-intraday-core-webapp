@@ -51,79 +51,109 @@ public class WakettPriceFetcher
             .GetSection("ExternalApis:WakettApi:MissingSymbols")
             .Get<List<WakettSecuritySymbol>>() ?? new();
 
-        var response = await _client.GetPricesAsync(baseSymbols, requestedTimestamp);
-        var computedRates = BuildComputedRates(baseSymbols, missingSymbols, response?.Prices, _logger);
-        if (computedRates.Count == 0)
+        var allSecurityIds = baseSymbols
+            .Concat(missingSymbols)
+            .Select(s => s.SecurityId)
+            .Distinct()
+            .ToArray();
+
+        var missingBars = await FindMissingBarTimestampsAsync(allSecurityIds, cancellationToken);
+        if (missingBars.Count == 0)
         {
-            _logger.LogWarning("Unable to compute any FX rates from Wakett response.");
+            _logger.LogInformation("No missing Wakett price bars detected in the last 24 hours.");
             return null;
         }
 
-        var timestampUtc = DetermineTimestampUtc(response?.Ts, requestedTimestamp, DateTime.UtcNow);
-        _logger.LogInformation("Using timestamp {TimestampUtc} for Wakett price upload.", timestampUtc);
+        var securityPairs = await LoadSecurityPairsAsync(allSecurityIds, cancellationToken);
+        WakettPriceUploadResult? lastResult = null;
 
-        var securityPairs = await LoadSecurityPairsAsync(
-            computedRates.Select(r => r.Definition.SecurityId).Distinct(),
-            cancellationToken);
-
-        var uploadItems = new Dictionary<int, WakettPriceUploadItem>();
-        var dbRecords = new Dictionary<int, DbPriceRecord>();
-
-        foreach (var rate in computedRates)
+        foreach (var barTimeUtc in missingBars.OrderBy(t => t))
         {
-            if (!TryParsePair(rate.Definition.Symbol, out var configPair))
+            var requestTimestamp = new DateTimeOffset(barTimeUtc, TimeSpan.Zero).AddMinutes(6);
+            _logger.LogInformation(
+                "Requesting Wakett prices for timestamp {TimestampUtc}.",
+                requestTimestamp.UtcDateTime);
+
+            var response = await _client.GetPricesAsync(baseSymbols, requestTimestamp);
+            var computedRates = BuildComputedRates(baseSymbols, missingSymbols, response?.Prices, _logger);
+            if (computedRates.Count == 0)
             {
                 _logger.LogWarning(
-                    "Skipping security {SecurityId} because its configured symbol {Symbol} cannot be parsed.",
-                    rate.Definition.SecurityId,
-                    rate.Definition.Symbol);
+                    "Unable to compute any FX rates from Wakett response for timestamp {TimestampUtc}.",
+                    barTimeUtc);
                 continue;
             }
 
-            var dbPair = securityPairs.TryGetValue(rate.Definition.SecurityId, out var pairFromDb)
-                ? pairFromDb
-                : configPair;
+            var timestampUtc = DetermineTimestampUtc(response?.Ts, requestTimestamp, barTimeUtc);
+            _logger.LogInformation("Using timestamp {TimestampUtc} for Wakett price upload.", timestampUtc);
 
-            if (!TryAdjustRateForSecurity(rate.Rate, configPair, dbPair, out var adjustedRate, out var inverted))
+            var uploadItems = new Dictionary<int, WakettPriceUploadItem>();
+            var dbRecords = new Dictionary<int, DbPriceRecord>();
+
+            foreach (var rate in computedRates)
+            {
+                if (!TryParsePair(rate.Definition.Symbol, out var configPair))
+                {
+                    _logger.LogWarning(
+                        "Skipping security {SecurityId} because its configured symbol {Symbol} cannot be parsed.",
+                        rate.Definition.SecurityId,
+                        rate.Definition.Symbol);
+                    continue;
+                }
+
+                var dbPair = securityPairs.TryGetValue(rate.Definition.SecurityId, out var pairFromDb)
+                    ? pairFromDb
+                    : configPair;
+
+                if (!TryAdjustRateForSecurity(rate.Rate, configPair, dbPair, out var adjustedRate, out var inverted))
+                {
+                    _logger.LogWarning(
+                        "Skipping security {SecurityId} because computed pair {Base}/{Quote} is incompatible with database orientation {DbBase}/{DbQuote}.",
+                        rate.Definition.SecurityId,
+                        configPair.Base,
+                        configPair.Quote,
+                        dbPair.Base,
+                        dbPair.Quote);
+                    continue;
+                }
+
+                var securityKey = rate.Definition.SecurityId.ToString(CultureInfo.InvariantCulture);
+                dbRecords[rate.Definition.SecurityId] = new DbPriceRecord(
+                    rate.Definition.SecurityId,
+                    securityKey,
+                    timestampUtc,
+                    adjustedRate);
+
+                uploadItems[rate.Definition.SecurityId] = new WakettPriceUploadItem(
+                    rate.Definition.SecurityId,
+                    rate.Definition.Symbol,
+                    adjustedRate,
+                    inverted);
+            }
+
+            if (dbRecords.Count == 0)
             {
                 _logger.LogWarning(
-                    "Skipping security {SecurityId} because computed pair {Base}/{Quote} is incompatible with database orientation {DbBase}/{DbQuote}.",
-                    rate.Definition.SecurityId,
-                    configPair.Base,
-                    configPair.Quote,
-                    dbPair.Base,
-                    dbPair.Quote);
+                    "No database records were produced after adjusting rates for timestamp {TimestampUtc}.",
+                    barTimeUtc);
                 continue;
             }
 
-            var securityKey = rate.Definition.SecurityId.ToString(CultureInfo.InvariantCulture);
-            dbRecords[rate.Definition.SecurityId] = new DbPriceRecord(
-                rate.Definition.SecurityId,
-                securityKey,
-                timestampUtc,
-                adjustedRate);
+            await StoreAsync(dbRecords.Values, cancellationToken);
 
-            uploadItems[rate.Definition.SecurityId] = new WakettPriceUploadItem(
-                rate.Definition.SecurityId,
-                rate.Definition.Symbol,
-                adjustedRate,
-                inverted);
+            var ordered = uploadItems.Values
+                .OrderBy(i => i.SecurityId)
+                .ToList();
+
+            _logger.LogInformation(
+                "Uploaded {Count} FX prices to Stage_HistClose for {TimestampUtc}.",
+                ordered.Count,
+                timestampUtc);
+
+            lastResult = new WakettPriceUploadResult(timestampUtc, ordered);
         }
 
-        if (dbRecords.Count == 0)
-        {
-            _logger.LogWarning("No database records were produced after adjusting rates.");
-            return null;
-        }
-
-        await StoreAsync(dbRecords.Values, cancellationToken);
-
-        var ordered = uploadItems.Values
-            .OrderBy(i => i.SecurityId)
-            .ToList();
-
-        _logger.LogInformation("Uploaded {Count} FX prices to Stage_HistClose.", ordered.Count);
-        return new WakettPriceUploadResult(timestampUtc, ordered);
+        return lastResult;
     }
 
     internal static IReadOnlyList<ComputedRate> BuildComputedRates(
@@ -400,6 +430,80 @@ public class WakettPriceFetcher
             graph[pair.Quote] = inverse;
         }
         inverse[pair.Base] = 1m / rate;
+    }
+
+    private async Task<IReadOnlyList<DateTime>> FindMissingBarTimestampsAsync(
+        IReadOnlyCollection<int> securityIds,
+        CancellationToken cancellationToken)
+    {
+        if (securityIds.Count == 0)
+            return Array.Empty<DateTime>();
+
+        var nowUtc = DateTime.UtcNow;
+        var endHourUtc = new DateTime(
+            nowUtc.Year,
+            nowUtc.Month,
+            nowUtc.Day,
+            nowUtc.Hour,
+            0,
+            0,
+            DateTimeKind.Utc);
+        var startHourUtc = endHourUtc.AddHours(-23);
+
+        var expectedTimestamps = new List<DateTime>(capacity: 24);
+        for (var i = 0; i < 24; i++)
+        {
+            expectedTimestamps.Add(startHourUtc.AddHours(i));
+        }
+
+        const string sql = @"SELECT SecurityId, BarTimeUtc FROM [Intraday].[mkt].[PriceBar] WHERE TimeframeMinute = 60 AND SecurityId IN @SecurityIds AND BarTimeUtc BETWEEN @StartUtc AND @EndUtc";
+
+        using var connection = _context.CreateConnection();
+        if (connection is DbConnection dbConnection)
+        {
+            await dbConnection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            connection.Open();
+        }
+
+        var rows = await connection.QueryAsync<(int SecurityId, DateTime BarTimeUtc)>(
+            sql,
+            new { SecurityIds = securityIds.ToArray(), StartUtc = startHourUtc, EndUtc = endHourUtc });
+
+        var existing = new Dictionary<DateTime, HashSet<int>>();
+        foreach (var row in rows)
+        {
+            var normalized = DateTime.SpecifyKind(row.BarTimeUtc, DateTimeKind.Utc);
+            normalized = new DateTime(
+                normalized.Year,
+                normalized.Month,
+                normalized.Day,
+                normalized.Hour,
+                0,
+                0,
+                DateTimeKind.Utc);
+
+            if (!existing.TryGetValue(normalized, out var set))
+            {
+                set = new HashSet<int>();
+                existing[normalized] = set;
+            }
+
+            set.Add(row.SecurityId);
+        }
+
+        var missing = new List<DateTime>();
+        foreach (var timestamp in expectedTimestamps)
+        {
+            if (!existing.TryGetValue(timestamp, out var set) || set.Count < securityIds.Count)
+            {
+                missing.Add(timestamp);
+            }
+        }
+
+        return missing;
     }
 
     private async Task<Dictionary<int, CurrencyPair>> LoadSecurityPairsAsync(
