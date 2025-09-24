@@ -35,7 +35,6 @@ public class WakettPriceFetcher
     }
 
     public async Task<WakettPriceUploadResult?> FetchAndStoreAsync(
-        DateTimeOffset? requestedTimestamp = null,
         CancellationToken cancellationToken = default)
     {
         var baseSymbols = _config

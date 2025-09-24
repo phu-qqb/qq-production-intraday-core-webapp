@@ -1,10 +1,5 @@
 namespace TradingDaemon.Models;
 
-public class WakettPriceRequest
-{
-    public DateTimeOffset? Ts { get; set; }
-}
-
 public class WakettSecuritySymbol
 {
     public int SecurityId { get; set; }
