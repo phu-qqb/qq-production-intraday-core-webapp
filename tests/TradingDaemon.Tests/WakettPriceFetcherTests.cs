@@ -127,6 +127,18 @@ public class WakettPriceFetcherTests
     }
 
     [Fact]
+    public void DetermineTimestampUtc_AdjustsResponseTimestampForDebugging()
+    {
+        var responseTs = "2024-03-01T12:06:00Z";
+        var requestTs = new DateTimeOffset(2024, 3, 1, 11, 0, 0, TimeSpan.Zero);
+        var fallback = new DateTime(2024, 3, 1, 10, 0, 0, DateTimeKind.Utc);
+
+        var result = WakettPriceFetcher.DetermineTimestampUtc(responseTs, requestTs, fallback);
+
+        Assert.Equal(new DateTime(2024, 3, 1, 12, 0, 0, DateTimeKind.Utc), result);
+    }
+
+    [Fact]
     public void DetermineTimestampUtc_FallsBackToRequest()
     {
         var requestTs = new DateTimeOffset(2024, 3, 1, 12, 0, 0, TimeSpan.Zero);

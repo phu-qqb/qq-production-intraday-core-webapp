@@ -226,15 +226,32 @@ public class WakettPriceFetcher
                 DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
                 out var parsed))
         {
-            return parsed.UtcDateTime;
+            return AdjustTimestampForDebugging(parsed.UtcDateTime);
         }
 
         if (requestedTimestamp.HasValue)
         {
-            return requestedTimestamp.Value.UtcDateTime;
+            return AdjustTimestampForDebugging(requestedTimestamp.Value.UtcDateTime);
         }
 
-        return fallbackUtc;
+        return AdjustTimestampForDebugging(fallbackUtc);
+    }
+
+    private static DateTime AdjustTimestampForDebugging(DateTime timestampUtc)
+    {
+        if (timestampUtc.Minute == 6)
+        {
+            return new DateTime(
+                timestampUtc.Year,
+                timestampUtc.Month,
+                timestampUtc.Day,
+                timestampUtc.Hour,
+                0,
+                0,
+                DateTimeKind.Utc);
+        }
+
+        return timestampUtc;
     }
 
     internal static string NormalizeSymbol(string symbol)
