@@ -557,7 +557,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
                 group => group.OrderBy(info => info.SecurityId).First(),
                 StringComparer.OrdinalIgnoreCase);
 
-        var orderDescriptors = new List<(int SecurityId, string Symbol, decimal Weight)>();
+        var orderDescriptors = new List<(int SecurityId, SymbolInfo Info, decimal Weight)>();
 
         foreach (var kvp in exposures)
         {
@@ -576,13 +576,13 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
             if (usdBasePairs.TryGetValue(currency, out var basePair))
             {
-                orderDescriptors.Add((basePair.SecurityId, basePair.Symbol, exposure));
+                orderDescriptors.Add((basePair.SecurityId, basePair, exposure));
                 continue;
             }
 
             if (usdQuotePairs.TryGetValue(currency, out var quotePair))
             {
-                orderDescriptors.Add((quotePair.SecurityId, quotePair.Symbol, -exposure));
+                orderDescriptors.Add((quotePair.SecurityId, quotePair, -exposure));
             }
         }
 
@@ -591,7 +591,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
             .OrderBy(order => order.SecurityId)
             .Select(order => new WakettOrderItem
             {
-                Symbol = order.Symbol,
+                Symbol = order.Info.FormattedSymbol,
                 Side = order.Weight > 0 ? "BUY" : "SELL",
                 Code = $"QQB-{order.SecurityId}",
                 Size = new WakettOrderSize
@@ -630,6 +630,8 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
     private sealed record SymbolInfo(int SecurityId, string Symbol, string BaseCurrency, string QuoteCurrency)
     {
+        public string FormattedSymbol => $"{BaseCurrency}/{QuoteCurrency}";
+
         public static bool TryCreate(int securityId, string? symbol, out SymbolInfo? info)
         {
             info = null;
