@@ -22,6 +22,17 @@ public class OrderSender
         ["ALL"] = (TimeSpan.Parse("02:00", CultureInfo.InvariantCulture), TimeSpan.Parse("15:59", CultureInfo.InvariantCulture)),
     };
 
+    private static readonly IReadOnlyList<string> SessionPreference = new[]
+    {
+        "US",
+        "US2",
+        "EU",
+        "EUUS",
+        "AS",
+        "ASEU",
+        "ALL"
+    };
+
     private const int TargetModelId = 1;
 
     private readonly WakettApiClient _wakettApiClient;
@@ -64,6 +75,10 @@ public class OrderSender
 
         var latestWeights = latest.Where(w => w.BarTimeUtc == latestBarTimeUtc).ToList();
 
+        var barInterval = ResolveBarInterval(latest, latestBarTimeUtc);
+        var session = ResolveTradingSession(latestBarTimeUtc);
+        var orderTimestampUtc = CalculateOrderTimestamp(latestBarTimeUtc, barInterval, session);
+
         var symbolMap = await LoadSymbolMapAsync(connection, cancellationToken);
         if (symbolMap.Count == 0)
         {
@@ -80,7 +95,7 @@ public class OrderSender
 
         var request = new WakettOrderRequest
         {
-            Ts = FormatTimestamp(latestBarTimeUtc),
+            Ts = FormatTimestamp(orderTimestampUtc),
             Aum = ResolveAum(),
             Orders = orders
         };
@@ -118,6 +133,135 @@ public class OrderSender
         var abs = offset.Duration();
         var offsetString = $"{sign}{abs.Hours:00}{abs.Minutes:00}";
         return $"{local:yyyy-MM-dd HH:mm:ss.fff}{offsetString}";
+    }
+
+    internal static DateTime CalculateOrderTimestamp(DateTime barTimeUtc, TimeSpan barInterval, string sessionKey)
+    {
+        if (!SessionBounds.TryGetValue(sessionKey, out var bounds))
+        {
+            bounds = SessionBounds["US"];
+        }
+
+        var zone = NewYorkZone;
+        var local = TimeZoneInfo.ConvertTimeFromUtc(barTimeUtc, zone);
+        var (sessionStart, sessionEnd) = GetSessionWindow(local, bounds);
+
+        var candidate = local + barInterval;
+        if (candidate <= sessionEnd)
+        {
+            return TimeZoneInfo.ConvertTimeToUtc(candidate, zone);
+        }
+
+        var nextSessionStart = sessionStart.AddDays(1);
+        return TimeZoneInfo.ConvertTimeToUtc(nextSessionStart, zone);
+    }
+
+    private TimeSpan ResolveBarInterval(IReadOnlyList<TheoreticalWeightRow> weights, DateTime latestBarTimeUtc)
+    {
+        foreach (var row in weights)
+        {
+            if (row.BarTimeUtc < latestBarTimeUtc)
+            {
+                var interval = latestBarTimeUtc - row.BarTimeUtc;
+                if (interval > TimeSpan.Zero)
+                {
+                    return interval;
+                }
+            }
+        }
+
+        var configured = Environment.GetEnvironmentVariable("WAKETT_BAR_INTERVAL_MINUTES")
+            ?? _configuration["ExternalApis:WakettApi:BarIntervalMinutes"];
+
+        if (int.TryParse(configured, NumberStyles.Integer, CultureInfo.InvariantCulture, out var minutes) && minutes > 0)
+        {
+            return TimeSpan.FromMinutes(minutes);
+        }
+
+        var programme = _configuration.GetSection("Programmes").GetChildren()
+            .FirstOrDefault(section => int.TryParse(section["ModelId"], out var id) && id == TargetModelId);
+
+        if (programme is not null && int.TryParse(programme["Timeframe"], NumberStyles.Integer, CultureInfo.InvariantCulture, out var programmeMinutes) && programmeMinutes > 0)
+        {
+            return TimeSpan.FromMinutes(programmeMinutes);
+        }
+
+        return TimeSpan.FromHours(1);
+    }
+
+    private string ResolveTradingSession(DateTime barTimeUtc)
+    {
+        var configured = Environment.GetEnvironmentVariable("WAKETT_SESSION")
+            ?? _configuration["ExternalApis:WakettApi:Session"];
+
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            var normalized = configured.Trim().ToUpperInvariant();
+            if (SessionBounds.ContainsKey(normalized))
+            {
+                return normalized;
+            }
+        }
+
+        var programme = _configuration.GetSection("Programmes").GetChildren()
+            .FirstOrDefault(section => int.TryParse(section["ModelId"], out var id) && id == TargetModelId);
+
+        if (programme is not null)
+        {
+            var programmeSession = programme["Session"];
+            if (!string.IsNullOrWhiteSpace(programmeSession))
+            {
+                var normalized = programmeSession.Trim().ToUpperInvariant();
+                if (SessionBounds.ContainsKey(normalized))
+                {
+                    return normalized;
+                }
+            }
+        }
+
+        var local = TimeZoneInfo.ConvertTimeFromUtc(barTimeUtc, NewYorkZone);
+        foreach (var session in SessionPreference)
+        {
+            if (SessionBounds.TryGetValue(session, out var bounds) && IsWithinSession(local, bounds))
+            {
+                return session;
+            }
+        }
+
+        return "US";
+    }
+
+    private static (DateTime Start, DateTime End) GetSessionWindow(DateTime local, (TimeSpan Start, TimeSpan End) bounds)
+    {
+        var duration = bounds.End - bounds.Start;
+        if (duration <= TimeSpan.Zero)
+        {
+            duration += TimeSpan.FromDays(1);
+        }
+
+        var start = local.Date + bounds.Start;
+
+        while (true)
+        {
+            var end = start + duration;
+            if (local >= start && local <= end)
+            {
+                return (start, end);
+            }
+
+            start = local < start ? start.AddDays(-1) : start.AddDays(1);
+        }
+    }
+
+    private static bool IsWithinSession(DateTime local, (TimeSpan Start, TimeSpan End) bounds)
+    {
+        var time = local.TimeOfDay;
+        if (bounds.Start <= bounds.End)
+        {
+            return time >= bounds.Start && time <= bounds.End;
+        }
+
+        return time >= bounds.Start || time <= bounds.End;
     }
 
     protected virtual async Task<IReadOnlyList<TheoreticalWeightRow>> LoadLatestWeightsAsync(

@@ -30,8 +30,8 @@ public class OrderSenderTests
         var factory = Mock.Of<IHttpClientFactory>(f => f.CreateClient("WakettApi") == client);
         var apiClient = new WakettApiClient(factory);
 
-        var now = new DateTimeOffset(2024, 1, 2, 15, 0, 0, TimeSpan.Zero);
-        var barTimeUtc = now.AddMinutes(-30).UtcDateTime;
+        var now = new DateTimeOffset(2024, 1, 2, 16, 30, 0, TimeSpan.Zero);
+        var barTimeUtc = now.AddMinutes(-60).UtcDateTime;
         var weights = new List<OrderSender.TheoreticalWeightRow>
         {
             new() { SecurityId = 58, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 10, Weight = 0.15m },
@@ -71,7 +71,8 @@ public class OrderSenderTests
         using var document = JsonDocument.Parse(payload);
         var root = document.RootElement;
 
-        Assert.Equal(OrderSender.FormatTimestamp(barTimeUtc), root.GetProperty("ts").GetString());
+        var expectedOrderTimestampUtc = OrderSender.CalculateOrderTimestamp(barTimeUtc, TimeSpan.FromMinutes(60), "US");
+        Assert.Equal(OrderSender.FormatTimestamp(expectedOrderTimestampUtc), root.GetProperty("ts").GetString());
         Assert.Equal(2_500_000d, root.GetProperty("aum").GetDouble());
 
         var orders = root.GetProperty("orders");
@@ -107,8 +108,8 @@ public class OrderSenderTests
         var factory = Mock.Of<IHttpClientFactory>(f => f.CreateClient("WakettApi") == client);
         var apiClient = new WakettApiClient(factory);
 
-        var now = new DateTimeOffset(2024, 1, 2, 15, 0, 0, TimeSpan.Zero);
-        var barTimeUtc = now.AddMinutes(-30).UtcDateTime;
+        var now = new DateTimeOffset(2024, 1, 2, 16, 30, 0, TimeSpan.Zero);
+        var barTimeUtc = now.AddMinutes(-60).UtcDateTime;
         var weights = new List<OrderSender.TheoreticalWeightRow>
         {
             new() { SecurityId = 61, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 11, Weight = 0.2m },
@@ -250,7 +251,7 @@ public class OrderSenderTests
 
         var nowLocal = new DateTime(2024, 1, 2, 7, 0, 0);
         var nowUtc = TimeZoneInfo.ConvertTimeToUtc(nowLocal, zone);
-        var previousDayLocal = new DateTime(2024, 1, 1, 15, 59, 0);
+        var previousDayLocal = new DateTime(2024, 1, 1, 21, 0, 0);
         var previousDayUtc = TimeZoneInfo.ConvertTimeToUtc(previousDayLocal, zone);
 
         var timeProvider = new TestTimeProvider(new DateTimeOffset(nowUtc, TimeSpan.Zero));
@@ -274,11 +275,26 @@ public class OrderSenderTests
         var payload = await captured!.Content.ReadAsStringAsync();
         using var document = JsonDocument.Parse(payload);
         var root = document.RootElement;
-        Assert.Equal(OrderSender.FormatTimestamp(previousDayUtc), root.GetProperty("ts").GetString());
+        var expectedTsUtc = OrderSender.CalculateOrderTimestamp(previousDayUtc, TimeSpan.FromMinutes(60), "US");
+        Assert.Equal(OrderSender.FormatTimestamp(expectedTsUtc), root.GetProperty("ts").GetString());
     }
 
     private static IConfigurationRoot BuildConfiguration(IDictionary<string, string?> values)
-        => new ConfigurationBuilder().AddInMemoryCollection(values).Build();
+    {
+        var defaults = new Dictionary<string, string?>
+        {
+            ["Programmes:0:ModelId"] = "1",
+            ["Programmes:0:Session"] = "US",
+            ["Programmes:0:Timeframe"] = "60"
+        };
+
+        foreach (var kvp in values)
+        {
+            defaults[kvp.Key] = kvp.Value;
+        }
+
+        return new ConfigurationBuilder().AddInMemoryCollection(defaults).Build();
+    }
 
     private sealed class TestOrderSender : OrderSender
     {
