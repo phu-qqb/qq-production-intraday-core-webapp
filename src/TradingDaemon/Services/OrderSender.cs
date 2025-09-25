@@ -77,7 +77,13 @@ public class OrderSender
 
         var barInterval = ResolveBarInterval(latest, latestBarTimeUtc);
         var session = ResolveTradingSession(latestBarTimeUtc);
-        var orderTimestampUtc = CalculateOrderTimestamp(latestBarTimeUtc, barInterval, session);
+        var schedule = await LoadModelScheduleAsync(connection, cancellationToken);
+        var orderTimestampUtc = CalculateOrderTimestamp(
+            latestBarTimeUtc,
+            barInterval,
+            session,
+            schedule?.Offset,
+            schedule?.BarSize);
 
         var symbolMap = await LoadSymbolMapAsync(connection, cancellationToken);
         if (symbolMap.Count == 0)
@@ -135,7 +141,12 @@ public class OrderSender
         return $"{local:yyyy-MM-dd HH:mm:ss.fff}{offsetString}";
     }
 
-    internal static DateTime CalculateOrderTimestamp(DateTime barTimeUtc, TimeSpan barInterval, string sessionKey)
+    internal static DateTime CalculateOrderTimestamp(
+        DateTime barTimeUtc,
+        TimeSpan barInterval,
+        string sessionKey,
+        int? offsetMinutes = null,
+        int? barSizeMinutes = null)
     {
         if (!SessionBounds.TryGetValue(sessionKey, out var bounds))
         {
@@ -146,6 +157,18 @@ public class OrderSender
         var local = TimeZoneInfo.ConvertTimeFromUtc(barTimeUtc, zone);
         var (sessionStart, sessionEnd) = GetSessionWindow(local, bounds);
 
+        var scheduleCandidate = TryGetNextScheduledTime(
+            local,
+            sessionStart,
+            sessionEnd,
+            offsetMinutes,
+            barSizeMinutes);
+
+        if (scheduleCandidate is not null)
+        {
+            return TimeZoneInfo.ConvertTimeToUtc(scheduleCandidate.Value, zone);
+        }
+
         var candidate = local + barInterval;
         if (candidate <= sessionEnd)
         {
@@ -154,6 +177,86 @@ public class OrderSender
 
         var nextSessionStart = sessionStart.AddDays(1);
         return TimeZoneInfo.ConvertTimeToUtc(nextSessionStart, zone);
+    }
+
+    private static DateTime? TryGetNextScheduledTime(
+        DateTime local,
+        DateTime sessionStart,
+        DateTime sessionEnd,
+        int? offsetMinutes,
+        int? barSizeMinutes)
+    {
+        if (offsetMinutes is not > 0)
+        {
+            return null;
+        }
+
+        var baseMinute = Math.Max(0, barSizeMinutes ?? 0);
+        var step = offsetMinutes.Value;
+
+        var withinSession = GetNextScheduledLocal(local, step, baseMinute, strictlyGreater: true);
+        if (withinSession <= sessionEnd)
+        {
+            return withinSession;
+        }
+
+        var duration = sessionEnd - sessionStart;
+        if (duration <= TimeSpan.Zero)
+        {
+            duration += TimeSpan.FromDays(1);
+        }
+
+        var nextSessionStart = sessionStart.AddDays(1);
+        var nextSessionEnd = nextSessionStart + duration;
+
+        var nextSession = GetNextScheduledLocal(nextSessionStart, step, baseMinute, strictlyGreater: false);
+        if (nextSession > nextSessionEnd)
+        {
+            return nextSessionStart;
+        }
+
+        return nextSession;
+    }
+
+    private static DateTime GetNextScheduledLocal(
+        DateTime reference,
+        int stepMinutes,
+        int baseMinute,
+        bool strictlyGreater)
+    {
+        const int MinutesPerDay = 24 * 60;
+
+        var minutes = (int)Math.Floor(reference.TimeOfDay.TotalMinutes);
+
+        int nextMinute;
+        if (minutes < baseMinute || (minutes == baseMinute && !strictlyGreater))
+        {
+            nextMinute = baseMinute;
+        }
+        else
+        {
+            var delta = minutes - baseMinute;
+            var steps = delta / stepMinutes;
+            var remainder = delta % stepMinutes;
+
+            if (remainder == 0)
+            {
+                if (strictlyGreater)
+                {
+                    steps += 1;
+                }
+            }
+            else
+            {
+                steps += 1;
+            }
+
+            nextMinute = baseMinute + (steps * stepMinutes);
+        }
+
+        var dayOffset = Math.DivRem(nextMinute, MinutesPerDay, out var minuteOfDay);
+        var candidateDate = reference.Date.AddDays(dayOffset);
+        return candidateDate + TimeSpan.FromMinutes(minuteOfDay);
     }
 
     private TimeSpan ResolveBarInterval(IReadOnlyList<TheoreticalWeightRow> weights, DateTime latestBarTimeUtc)
@@ -285,6 +388,26 @@ ORDER BY tw.BarTimeUtc DESC, tw.SecurityId";
 
         var rows = await connection.QueryAsync<TheoreticalWeightRow>(definition);
         return rows.ToList();
+    }
+
+    protected virtual async Task<ModelScheduleRow?> LoadModelScheduleAsync(
+        IDbConnection connection,
+        CancellationToken cancellationToken)
+    {
+        const string sql = @"SELECT TOP (1)
+    BarSize,
+    Offset
+FROM [Intraday].[model].[Model]
+WHERE ModelId = @ModelId
+ORDER BY ModelId";
+
+        var definition = new CommandDefinition(
+            sql,
+            new { ModelId = TargetModelId },
+            cancellationToken: cancellationToken);
+
+        var row = await connection.QueryFirstOrDefaultAsync<ModelScheduleRow>(definition);
+        return row;
     }
 
     private bool IsBarRecentEnough(DateTime barTimeUtc, DateTime utcNow)
@@ -556,5 +679,12 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         public int SecurityId { get; init; }
 
         public string? Symbol { get; init; }
+    }
+
+    protected sealed record ModelScheduleRow
+    {
+        public int? BarSize { get; init; }
+
+        public int? Offset { get; init; }
     }
 }
