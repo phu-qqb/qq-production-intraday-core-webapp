@@ -40,14 +40,15 @@ public class OrderSenderTests
 
         var configuration = BuildConfiguration(new Dictionary<string, string?>
         {
-            ["ExternalApis:WakettApi:Symbols:0:SecurityId"] = "58",
-            ["ExternalApis:WakettApi:Symbols:0:Symbol"] = "EUR/USD",
-            ["ExternalApis:WakettApi:Symbols:1:SecurityId"] = "61",
-            ["ExternalApis:WakettApi:Symbols:1:Symbol"] = "EUR/CHF",
-            ["ExternalApis:WakettApi:Symbols:2:SecurityId"] = "136",
-            ["ExternalApis:WakettApi:Symbols:2:Symbol"] = "USD/CHF",
             ["ExternalApis:WakettApi:Aum"] = "2500000"
         });
+
+        var symbolMap = new Dictionary<int, string>
+        {
+            [58] = "EURUSD",
+            [61] = "EURCHF",
+            [136] = "USDCHF"
+        };
 
         var context = new Mock<DapperContext>(configuration);
         context.Setup(c => c.CreateConnection()).Returns(Mock.Of<IDbConnection>());
@@ -55,7 +56,7 @@ public class OrderSenderTests
         var logger = Mock.Of<ILogger<OrderSender>>();
         var timeProvider = new TestTimeProvider(now);
 
-        var sender = new TestOrderSender(apiClient, context.Object, logger, configuration, timeProvider, weights);
+        var sender = new TestOrderSender(apiClient, context.Object, logger, configuration, timeProvider, weights, symbolMap);
 
         await sender.SendOrdersAsync();
 
@@ -77,14 +78,14 @@ public class OrderSenderTests
         Assert.Equal(2, orders.GetArrayLength());
 
         var first = orders[0];
-        Assert.Equal("EUR/USD", first.GetProperty("symbol").GetString());
+        Assert.Equal("EURUSD", first.GetProperty("symbol").GetString());
         Assert.Equal("BUY", first.GetProperty("side").GetString());
         Assert.Equal("QQB-58", first.GetProperty("code").GetString());
         Assert.Equal("percentage", first.GetProperty("size").GetProperty("type").GetString());
         Assert.Equal(0.1, first.GetProperty("size").GetProperty("value").GetDouble(), 6);
 
         var second = orders[1];
-        Assert.Equal("USD/CHF", second.GetProperty("symbol").GetString());
+        Assert.Equal("USDCHF", second.GetProperty("symbol").GetString());
         Assert.Equal("SELL", second.GetProperty("side").GetString());
         Assert.Equal("QQB-136", second.GetProperty("code").GetString());
         Assert.Equal(0.05, second.GetProperty("size").GetProperty("value").GetDouble(), 6);
@@ -115,21 +116,17 @@ public class OrderSenderTests
             new() { SecurityId = 65, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 11, Weight = -0.1m }
         };
 
-        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        var configuration = BuildConfiguration(new Dictionary<string, string?>());
+
+        var symbolMap = new Dictionary<int, string>
         {
-            ["ExternalApis:WakettApi:Symbols:0:SecurityId"] = "61",
-            ["ExternalApis:WakettApi:Symbols:0:Symbol"] = "EUR/CHF",
-            ["ExternalApis:WakettApi:Symbols:1:SecurityId"] = "62",
-            ["ExternalApis:WakettApi:Symbols:1:Symbol"] = "CAD/JPY",
-            ["ExternalApis:WakettApi:Symbols:2:SecurityId"] = "65",
-            ["ExternalApis:WakettApi:Symbols:2:Symbol"] = "USD/JPY",
-            ["ExternalApis:WakettApi:Symbols:3:SecurityId"] = "66",
-            ["ExternalApis:WakettApi:Symbols:3:Symbol"] = "EUR/USD",
-            ["ExternalApis:WakettApi:Symbols:4:SecurityId"] = "64",
-            ["ExternalApis:WakettApi:Symbols:4:Symbol"] = "USD/CAD",
-            ["ExternalApis:WakettApi:Symbols:5:SecurityId"] = "136",
-            ["ExternalApis:WakettApi:Symbols:5:Symbol"] = "USD/CHF"
-        });
+            [61] = "EURCHF",
+            [62] = "CADJPY",
+            [65] = "USDJPY",
+            [66] = "EURUSD",
+            [64] = "USDCAD",
+            [136] = "USDCHF"
+        };
 
         var context = new Mock<DapperContext>(configuration);
         context.Setup(c => c.CreateConnection()).Returns(Mock.Of<IDbConnection>());
@@ -137,7 +134,7 @@ public class OrderSenderTests
         var logger = Mock.Of<ILogger<OrderSender>>();
         var timeProvider = new TestTimeProvider(now);
 
-        var sender = new TestOrderSender(apiClient, context.Object, logger, configuration, timeProvider, weights);
+        var sender = new TestOrderSender(apiClient, context.Object, logger, configuration, timeProvider, weights, symbolMap);
 
         await sender.SendOrdersAsync();
 
@@ -155,19 +152,19 @@ public class OrderSenderTests
         Assert.Equal(3, orders.GetArrayLength());
 
         var first = orders[0];
-        Assert.Equal("USD/CAD", first.GetProperty("symbol").GetString());
+        Assert.Equal("USDCAD", first.GetProperty("symbol").GetString());
         Assert.Equal("SELL", first.GetProperty("side").GetString());
         Assert.Equal("QQB-64", first.GetProperty("code").GetString());
         Assert.Equal(0.1, first.GetProperty("size").GetProperty("value").GetDouble(), 6);
 
         var second = orders[1];
-        Assert.Equal("EUR/USD", second.GetProperty("symbol").GetString());
+        Assert.Equal("EURUSD", second.GetProperty("symbol").GetString());
         Assert.Equal("BUY", second.GetProperty("side").GetString());
         Assert.Equal("QQB-66", second.GetProperty("code").GetString());
         Assert.Equal(0.2, second.GetProperty("size").GetProperty("value").GetDouble(), 6);
 
         var third = orders[2];
-        Assert.Equal("USD/CHF", third.GetProperty("symbol").GetString());
+        Assert.Equal("USDCHF", third.GetProperty("symbol").GetString());
         Assert.Equal("BUY", third.GetProperty("side").GetString());
         Assert.Equal("QQB-136", third.GetProperty("code").GetString());
         Assert.Equal(0.2, third.GetProperty("size").GetProperty("value").GetDouble(), 6);
@@ -184,11 +181,12 @@ public class OrderSenderTests
         var factory = Mock.Of<IHttpClientFactory>(f => f.CreateClient("WakettApi") == client);
         var apiClient = new WakettApiClient(factory);
 
-        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        var configuration = BuildConfiguration(new Dictionary<string, string?>());
+
+        var symbolMap = new Dictionary<int, string>
         {
-            ["ExternalApis:WakettApi:Symbols:0:SecurityId"] = "58",
-            ["ExternalApis:WakettApi:Symbols:0:Symbol"] = "EUR/USD"
-        });
+            [58] = "EURUSD"
+        };
 
         var context = new Mock<DapperContext>(configuration);
         context.Setup(c => c.CreateConnection()).Returns(Mock.Of<IDbConnection>());
@@ -208,7 +206,7 @@ public class OrderSenderTests
             new() { SecurityId = 58, ModelId = 1, BarTimeUtc = staleUtc, ModelRunId = 1, Weight = 0.2m }
         };
 
-        var sender = new TestOrderSender(apiClient, context.Object, logger, configuration, timeProvider, weights);
+        var sender = new TestOrderSender(apiClient, context.Object, logger, configuration, timeProvider, weights, symbolMap);
 
         await sender.SendOrdersAsync();
 
@@ -235,11 +233,12 @@ public class OrderSenderTests
         var factory = Mock.Of<IHttpClientFactory>(f => f.CreateClient("WakettApi") == client);
         var apiClient = new WakettApiClient(factory);
 
-        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        var configuration = BuildConfiguration(new Dictionary<string, string?>());
+
+        var symbolMap = new Dictionary<int, string>
         {
-            ["ExternalApis:WakettApi:Symbols:0:SecurityId"] = "58",
-            ["ExternalApis:WakettApi:Symbols:0:Symbol"] = "EUR/USD"
-        });
+            [58] = "EURUSD"
+        };
 
         var context = new Mock<DapperContext>(configuration);
         context.Setup(c => c.CreateConnection()).Returns(Mock.Of<IDbConnection>());
@@ -261,7 +260,7 @@ public class OrderSenderTests
             new() { SecurityId = 58, ModelId = 1, BarTimeUtc = previousDayUtc, ModelRunId = 1, Weight = 0.3m }
         };
 
-        var sender = new TestOrderSender(apiClient, context.Object, logger, configuration, timeProvider, weights);
+        var sender = new TestOrderSender(apiClient, context.Object, logger, configuration, timeProvider, weights, symbolMap);
 
         await sender.SendOrdersAsync();
 
@@ -284,6 +283,7 @@ public class OrderSenderTests
     private sealed class TestOrderSender : OrderSender
     {
         private readonly IReadOnlyList<TheoreticalWeightRow> _weights;
+        private readonly IReadOnlyDictionary<int, string> _symbolMap;
 
         public TestOrderSender(
             WakettApiClient client,
@@ -291,16 +291,23 @@ public class OrderSenderTests
             ILogger<OrderSender> logger,
             IConfiguration configuration,
             TimeProvider timeProvider,
-            IReadOnlyList<TheoreticalWeightRow> weights)
+            IReadOnlyList<TheoreticalWeightRow> weights,
+            IReadOnlyDictionary<int, string> symbolMap)
             : base(client, context, logger, configuration, timeProvider)
         {
             _weights = weights;
+            _symbolMap = symbolMap;
         }
 
         protected override Task<IReadOnlyList<TheoreticalWeightRow>> LoadLatestWeightsAsync(
             IDbConnection connection,
             CancellationToken cancellationToken)
             => Task.FromResult(_weights);
+
+        protected override Task<Dictionary<int, string>> LoadSymbolMapAsync(
+            IDbConnection connection,
+            CancellationToken cancellationToken)
+            => Task.FromResult(new Dictionary<int, string>(_symbolMap));
     }
 
     private sealed class TestTimeProvider : TimeProvider
