@@ -41,7 +41,7 @@ public class PriceFetcherTests
     }
 
     [Fact]
-    public void RawNMin_Includes9amBarInUSSession()
+    public void RawNMin_FirstUsBarAlignsToNextHour()
     {
         var series = new List<HistClose>
         {
@@ -57,7 +57,31 @@ public class PriceFetcherTests
         var zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
         var times = result.Select(r => TimeZoneInfo.ConvertTimeFromUtc(r.TimestampUtc, zone).TimeOfDay).ToList();
 
-        Assert.Contains(new TimeSpan(9, 0, 0), times);
+        Assert.Contains(new TimeSpan(10, 0, 0), times);
+        Assert.DoesNotContain(new TimeSpan(9, 0, 0), times);
+    }
+
+    [Fact]
+    public void RawNMin_FirstUsBarProducesTopOfHourTimestamp()
+    {
+        var series = new List<HistClose>
+        {
+            new HistClose { BarTimeUtc = new DateTime(2024, 1, 2, 14, 30, 0, DateTimeKind.Utc), Close = 1m },
+            new HistClose { BarTimeUtc = new DateTime(2024, 1, 2, 15, 30, 0, DateTimeKind.Utc), Close = 2m },
+            new HistClose { BarTimeUtc = new DateTime(2024, 1, 2, 16, 30, 0, DateTimeKind.Utc), Close = 3m }
+        };
+
+        var method = typeof(PriceFetcher).GetMethod("RawNMin", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var result = (List<(DateTime TimestampUtc, decimal Close)>)method.Invoke(null, new object[] { series, 60, "US", 0 })!;
+
+        var zoneId = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York";
+        var zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
+        var localTimes = result
+            .Select(r => TimeZoneInfo.ConvertTimeFromUtc(r.TimestampUtc, zone))
+            .ToList();
+
+        Assert.Equal(new TimeSpan(10, 0, 0), localTimes.First().TimeOfDay);
+        Assert.All(localTimes, t => Assert.Equal(0, t.Minute));
     }
 
     [Fact]
@@ -145,7 +169,7 @@ public class PriceFetcherTests
 
         Assert.DoesNotContain(new TimeSpan(8, 0, 0), times);
         Assert.DoesNotContain(new TimeSpan(16, 0, 0), times);
-        Assert.Contains(new TimeSpan(9, 0, 0), times);
+        Assert.Contains(new TimeSpan(10, 0, 0), times);
         Assert.Contains(new TimeSpan(15, 0, 0), times);
     }
 }
