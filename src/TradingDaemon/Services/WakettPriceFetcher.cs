@@ -4,10 +4,12 @@ using System.Data;
 using System.Data.Common;
 using System.Globalization;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Dapper;
+using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using TradingDaemon.Data;
@@ -588,8 +590,137 @@ public class WakettPriceFetcher
             transaction?.Dispose();
         }
 
-        await connection.ExecuteAsync("EXEC mkt.LoadRawFromStage @TimeframeMinute = 60");
-        await connection.ExecuteAsync("EXEC mkt.LoadFlatFromMinimal @TimeframeMinute = 60");
+        if (recordList.Count > 0)
+        {
+            await connection.ExecuteAsync("EXEC mkt.LoadRawFromStage @TimeframeMinute = 60");
+
+            const string selectRaw =
+                "SELECT SecurityId, BarTimeUtc, [Close] FROM [Intraday].[mkt].[PriceBar] WHERE TimeframeMinute = 60 AND SecurityId IN @SecurityIds";
+            var existing = (await connection.QueryAsync<HistClose>(selectRaw, new { SecurityIds = securityKeys }))
+                .GroupBy(r => (r.SecurityId, r.BarTimeUtc))
+                .Select(g => g.Last())
+                .ToList();
+
+            var flatRecords = new List<FlatPrice>();
+            foreach (var grp in existing.GroupBy(r => r.SecurityId))
+            {
+                var ordered = grp.OrderBy(r => r.BarTimeUtc).ToList();
+                var rawEu = RawNMin(ordered, 60, "EU", 0);
+                var flatEu = Flatten(rawEu, SessionBounds["EU"].Zone)
+                    .Select(r => new FlatPrice
+                    {
+                        SecurityId = grp.Key,
+                        BarTimeUtc = r.TimestampUtc,
+                        Close = r.Close,
+                        Session = "EU"
+                    });
+                flatRecords.AddRange(flatEu);
+
+                var rawUs = RawNMin(ordered, 60, "US", 0);
+                var flatUs = Flatten(rawUs, SessionBounds["US"].Zone)
+                    .Select(r => new FlatPrice
+                    {
+                        SecurityId = grp.Key,
+                        BarTimeUtc = r.TimestampUtc,
+                        Close = r.Close,
+                        Session = "US"
+                    });
+                flatRecords.AddRange(flatUs);
+            }
+
+            if (flatRecords.Count > 0)
+            {
+                await connection.ExecuteAsync("DELETE FROM [Intraday].[dbo].[mkt_FlatBar_Staging]");
+
+                var table = new DataTable();
+                table.Columns.Add("SecurityId", typeof(string));
+                table.Columns.Add("BarTimeUtc", typeof(DateTime));
+                table.Columns.Add("Close", typeof(decimal));
+                table.Columns.Add("Session", typeof(string));
+
+                foreach (var record in flatRecords)
+                {
+                    table.Rows.Add(record.SecurityId, record.BarTimeUtc, record.Close, record.Session);
+                }
+
+                if (connection is SqlConnection sqlConnection)
+                {
+                    using var bulkCopy = new SqlBulkCopy(sqlConnection);
+                    bulkCopy.DestinationTableName = "[Intraday].[dbo].[mkt_FlatBar_Staging]";
+                    await bulkCopy.WriteToServerAsync(table);
+                }
+                else
+                {
+                    throw new InvalidOperationException("Expected SqlConnection for bulk copy operations.");
+                }
+            }
+
+            await connection.ExecuteAsync("EXEC mkt.LoadFlatFromMinimal @TimeframeMinute = 60");
+        }
+    }
+
+    private static readonly Dictionary<string, (TimeZoneInfo Zone, TimeSpan Start, TimeSpan End)> SessionBounds = new()
+    {
+        ["US"] = (NewYorkZone, TimeSpan.Parse("09:30"), TimeSpan.Parse("15:59")),
+        ["EU"] = (NewYorkZone, TimeSpan.Parse("02:00"), TimeSpan.Parse("08:59"))
+    };
+
+    private static TimeZoneInfo NewYorkZone => TimeZoneInfo.FindSystemTimeZoneById(
+        RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York");
+
+    private static List<(DateTime TimestampUtc, decimal Close)> RawNMin(List<HistClose> series, int minutes, string session, int offset)
+    {
+        var bounds = SessionBounds[session];
+        var zone = bounds.Zone;
+        var result = new List<(DateTime, decimal)>();
+        DateTime? currentBucket = null;
+        decimal lastClose = 0;
+        foreach (var item in series.OrderBy(s => s.BarTimeUtc))
+        {
+            var local = TimeZoneInfo.ConvertTimeFromUtc(item.BarTimeUtc, zone);
+            if (offset != 0) local = local.AddMinutes(-offset);
+            var start = local.TimeOfDay;
+            var end = start.Add(TimeSpan.FromMinutes(minutes - 1));
+            if (end < bounds.Start || end > bounds.End) continue;
+            var bucket = new DateTime(local.Year, local.Month, local.Day, local.Hour, local.Minute / minutes * minutes, 0);
+            if (currentBucket != bucket)
+            {
+                if (currentBucket.HasValue)
+                    result.Add((TimeZoneInfo.ConvertTimeToUtc(currentBucket.Value.AddMinutes(offset), zone), lastClose));
+                currentBucket = bucket;
+            }
+            lastClose = item.Close;
+        }
+        if (currentBucket.HasValue)
+            result.Add((TimeZoneInfo.ConvertTimeToUtc(currentBucket.Value.AddMinutes(offset), zone), lastClose));
+        return result;
+    }
+
+    private static List<(DateTime TimestampUtc, decimal Close)> Flatten(List<(DateTime TimestampUtc, decimal Close)> raw, TimeZoneInfo zone)
+    {
+        if (raw.Count == 0) return new();
+        var times = raw.Select(r => r.TimestampUtc).ToList();
+        var px = raw.Select(r => r.Close).ToList();
+        var localTimes = times.Select(t => TimeZoneInfo.ConvertTimeFromUtc(t, zone)).ToList();
+        var ret = new decimal[px.Count];
+        for (int i = 1; i < px.Count; i++)
+        {
+            var prev = px[i - 1];
+            ret[i] = prev != 0 ? (px[i] - prev) / prev : 0m;
+            if (localTimes[i].Date != localTimes[i - 1].Date)
+                ret[i] = 0m;
+        }
+        var flat = new decimal[px.Count];
+        flat[px.Count - 1] = px[px.Count - 1];
+        for (int i = px.Count - 2; i >= 0; i--)
+        {
+            var inc = ret[i + 1];
+            flat[i] = flat[i + 1] / (1 + inc);
+        }
+        var result = new List<(DateTime, decimal)>();
+        for (int i = 0; i < px.Count; i++)
+            result.Add((times[i], flat[i]));
+        return result;
     }
 
     internal readonly record struct CurrencyPair(string Base, string Quote);
