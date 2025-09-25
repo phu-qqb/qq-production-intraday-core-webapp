@@ -251,6 +251,74 @@ public class OrderSenderTests
     }
 
     [Fact]
+    public async Task SendOrdersAsync_FlipsSideForReversedAllowedSymbol()
+    {
+        HttpRequestMessage? captured = null;
+        var handler = new Mock<HttpMessageHandler>();
+        handler.Protected().Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+            .Callback<HttpRequestMessage, CancellationToken>((message, _) => captured = message)
+            .ReturnsAsync(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"ts\":\"\",\"orders\":[]}")
+            });
+
+        var client = new HttpClient(handler.Object) { BaseAddress = new Uri("http://wakett") };
+        var factory = Mock.Of<IHttpClientFactory>(f => f.CreateClient("WakettApi") == client);
+        var apiClient = new WakettApiClient(factory);
+
+        var now = new DateTimeOffset(2024, 1, 2, 16, 30, 0, TimeSpan.Zero);
+        var barTimeUtc = now.AddMinutes(-60).UtcDateTime;
+        var weights = new List<OrderSender.TheoreticalWeightRow>
+        {
+            new() { SecurityId = 200, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 11, Weight = 0.2m }
+        };
+
+        var configuration = BuildConfiguration(new Dictionary<string, string?>());
+
+        var symbolMap = new Dictionary<int, string>
+        {
+            [200] = "CHFUSD"
+        };
+
+        var context = new Mock<DapperContext>(configuration);
+        context.Setup(c => c.CreateConnection()).Returns(Mock.Of<IDbConnection>());
+
+        var logger = Mock.Of<ILogger<OrderSender>>();
+        var timeProvider = new TestTimeProvider(now);
+
+        var sender = new TestOrderSender(
+            apiClient,
+            context.Object,
+            logger,
+            configuration,
+            timeProvider,
+            weights,
+            symbolMap,
+            new OrderSender.ModelScheduleRow { Offset = 60, BarSize = 0 });
+
+        await sender.SendOrdersAsync();
+
+        handler.Protected().Verify(
+            "SendAsync",
+            Times.Once(),
+            ItExpr.IsAny<HttpRequestMessage>(),
+            ItExpr.IsAny<CancellationToken>());
+
+        Assert.NotNull(captured);
+        var payload = await captured!.Content.ReadAsStringAsync();
+        using var document = JsonDocument.Parse(payload);
+        var orders = document.RootElement.GetProperty("orders");
+
+        Assert.Equal(1, orders.GetArrayLength());
+
+        var first = orders[0];
+        Assert.Equal("USD/CHF", first.GetProperty("symbol").GetString());
+        Assert.Equal("SELL", first.GetProperty("side").GetString());
+        Assert.Equal("QQB-200", first.GetProperty("code").GetString());
+        Assert.Equal(0.2, first.GetProperty("size").GetProperty("value").GetDouble(), 6);
+    }
+
+    [Fact]
     public async Task SendOrdersAsync_DoesNotSendWhenWeightsAreStale()
     {
         var handler = new Mock<HttpMessageHandler>();
@@ -448,7 +516,21 @@ public class OrderSenderTests
         {
             ["Programmes:0:ModelId"] = "1",
             ["Programmes:0:Session"] = "US",
-            ["Programmes:0:Timeframe"] = "60"
+            ["Programmes:0:Timeframe"] = "60",
+            ["ExternalApis:WakettApi:Symbols:0:SecurityId"] = "58",
+            ["ExternalApis:WakettApi:Symbols:0:Symbol"] = "EUR/USD",
+            ["ExternalApis:WakettApi:Symbols:1:SecurityId"] = "61",
+            ["ExternalApis:WakettApi:Symbols:1:Symbol"] = "EUR/CHF",
+            ["ExternalApis:WakettApi:Symbols:2:SecurityId"] = "62",
+            ["ExternalApis:WakettApi:Symbols:2:Symbol"] = "CAD/JPY",
+            ["ExternalApis:WakettApi:Symbols:3:SecurityId"] = "64",
+            ["ExternalApis:WakettApi:Symbols:3:Symbol"] = "USD/CAD",
+            ["ExternalApis:WakettApi:Symbols:4:SecurityId"] = "65",
+            ["ExternalApis:WakettApi:Symbols:4:Symbol"] = "USD/JPY",
+            ["ExternalApis:WakettApi:Symbols:5:SecurityId"] = "66",
+            ["ExternalApis:WakettApi:Symbols:5:Symbol"] = "EUR/USD",
+            ["ExternalApis:WakettApi:Symbols:6:SecurityId"] = "136",
+            ["ExternalApis:WakettApi:Symbols:6:Symbol"] = "USD/CHF"
         };
 
         foreach (var kvp in values)
