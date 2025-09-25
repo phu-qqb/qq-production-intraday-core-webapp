@@ -44,6 +44,8 @@ public class OrderSenderTests
             ["ExternalApis:WakettApi:Symbols:0:Symbol"] = "EUR/USD",
             ["ExternalApis:WakettApi:Symbols:1:SecurityId"] = "61",
             ["ExternalApis:WakettApi:Symbols:1:Symbol"] = "EUR/CHF",
+            ["ExternalApis:WakettApi:Symbols:2:SecurityId"] = "136",
+            ["ExternalApis:WakettApi:Symbols:2:Symbol"] = "USD/CHF",
             ["ExternalApis:WakettApi:Aum"] = "2500000"
         });
 
@@ -79,12 +81,96 @@ public class OrderSenderTests
         Assert.Equal("BUY", first.GetProperty("side").GetString());
         Assert.Equal("QQB-58", first.GetProperty("code").GetString());
         Assert.Equal("percentage", first.GetProperty("size").GetProperty("type").GetString());
-        Assert.Equal(0.15, first.GetProperty("size").GetProperty("value").GetDouble(), 6);
+        Assert.Equal(0.1, first.GetProperty("size").GetProperty("value").GetDouble(), 6);
 
         var second = orders[1];
-        Assert.Equal("EUR/CHF", second.GetProperty("symbol").GetString());
+        Assert.Equal("USD/CHF", second.GetProperty("symbol").GetString());
         Assert.Equal("SELL", second.GetProperty("side").GetString());
+        Assert.Equal("QQB-136", second.GetProperty("code").GetString());
         Assert.Equal(0.05, second.GetProperty("size").GetProperty("value").GetDouble(), 6);
+    }
+
+    [Fact]
+    public async Task SendOrdersAsync_NetsCrossesIntoUsdPairs()
+    {
+        HttpRequestMessage? captured = null;
+        var handler = new Mock<HttpMessageHandler>();
+        handler.Protected().Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+            .Callback<HttpRequestMessage, CancellationToken>((message, _) => captured = message)
+            .ReturnsAsync(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"ts\":\"\",\"orders\":[]}")
+            });
+
+        var client = new HttpClient(handler.Object) { BaseAddress = new Uri("http://wakett") };
+        var factory = Mock.Of<IHttpClientFactory>(f => f.CreateClient("WakettApi") == client);
+        var apiClient = new WakettApiClient(factory);
+
+        var now = new DateTimeOffset(2024, 1, 2, 15, 0, 0, TimeSpan.Zero);
+        var barTimeUtc = now.AddMinutes(-30).UtcDateTime;
+        var weights = new List<OrderSender.TheoreticalWeightRow>
+        {
+            new() { SecurityId = 61, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 11, Weight = 0.2m },
+            new() { SecurityId = 62, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 11, Weight = 0.1m },
+            new() { SecurityId = 65, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 11, Weight = -0.1m }
+        };
+
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["ExternalApis:WakettApi:Symbols:0:SecurityId"] = "61",
+            ["ExternalApis:WakettApi:Symbols:0:Symbol"] = "EUR/CHF",
+            ["ExternalApis:WakettApi:Symbols:1:SecurityId"] = "62",
+            ["ExternalApis:WakettApi:Symbols:1:Symbol"] = "CAD/JPY",
+            ["ExternalApis:WakettApi:Symbols:2:SecurityId"] = "65",
+            ["ExternalApis:WakettApi:Symbols:2:Symbol"] = "USD/JPY",
+            ["ExternalApis:WakettApi:Symbols:3:SecurityId"] = "66",
+            ["ExternalApis:WakettApi:Symbols:3:Symbol"] = "EUR/USD",
+            ["ExternalApis:WakettApi:Symbols:4:SecurityId"] = "64",
+            ["ExternalApis:WakettApi:Symbols:4:Symbol"] = "USD/CAD",
+            ["ExternalApis:WakettApi:Symbols:5:SecurityId"] = "136",
+            ["ExternalApis:WakettApi:Symbols:5:Symbol"] = "USD/CHF"
+        });
+
+        var context = new Mock<DapperContext>(configuration);
+        context.Setup(c => c.CreateConnection()).Returns(Mock.Of<IDbConnection>());
+
+        var logger = Mock.Of<ILogger<OrderSender>>();
+        var timeProvider = new TestTimeProvider(now);
+
+        var sender = new TestOrderSender(apiClient, context.Object, logger, configuration, timeProvider, weights);
+
+        await sender.SendOrdersAsync();
+
+        handler.Protected().Verify(
+            "SendAsync",
+            Times.Once(),
+            ItExpr.IsAny<HttpRequestMessage>(),
+            ItExpr.IsAny<CancellationToken>());
+
+        Assert.NotNull(captured);
+        var payload = await captured!.Content.ReadAsStringAsync();
+        using var document = JsonDocument.Parse(payload);
+        var orders = document.RootElement.GetProperty("orders");
+
+        Assert.Equal(3, orders.GetArrayLength());
+
+        var first = orders[0];
+        Assert.Equal("USD/CAD", first.GetProperty("symbol").GetString());
+        Assert.Equal("SELL", first.GetProperty("side").GetString());
+        Assert.Equal("QQB-64", first.GetProperty("code").GetString());
+        Assert.Equal(0.1, first.GetProperty("size").GetProperty("value").GetDouble(), 6);
+
+        var second = orders[1];
+        Assert.Equal("EUR/USD", second.GetProperty("symbol").GetString());
+        Assert.Equal("BUY", second.GetProperty("side").GetString());
+        Assert.Equal("QQB-66", second.GetProperty("code").GetString());
+        Assert.Equal(0.2, second.GetProperty("size").GetProperty("value").GetDouble(), 6);
+
+        var third = orders[2];
+        Assert.Equal("USD/CHF", third.GetProperty("symbol").GetString());
+        Assert.Equal("BUY", third.GetProperty("side").GetString());
+        Assert.Equal("QQB-136", third.GetProperty("code").GetString());
+        Assert.Equal(0.2, third.GetProperty("size").GetProperty("value").GetDouble(), 6);
     }
 
     [Fact]

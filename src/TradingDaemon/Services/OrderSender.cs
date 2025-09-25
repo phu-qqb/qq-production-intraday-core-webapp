@@ -188,37 +188,168 @@ ORDER BY tw.BarTimeUtc DESC, tw.SecurityId";
         IEnumerable<TheoreticalWeightRow> weights,
         IReadOnlyDictionary<int, string> symbolMap)
     {
-        var orders = new List<WakettOrderItem>();
+        var parsedSymbols = symbolMap
+            .Select(pair => SymbolInfo.TryCreate(pair.Key, pair.Value, out var info) ? info : null)
+            .Where(info => info is not null)
+            .Cast<SymbolInfo>()
+            .ToDictionary(info => info.SecurityId);
 
-        foreach (var weight in weights.OrderBy(w => w.SecurityId))
+        if (parsedSymbols.Count == 0)
         {
-            if (!symbolMap.TryGetValue(weight.SecurityId, out var symbol))
-            {
-                continue;
-            }
+            return new List<WakettOrderItem>();
+        }
 
+        var exposures = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var weight in weights)
+        {
             if (weight.Weight == 0m)
             {
                 continue;
             }
 
-            var side = weight.Weight > 0 ? "BUY" : "SELL";
-            var sizeValue = Math.Abs((double)weight.Weight);
-
-            orders.Add(new WakettOrderItem
+            if (!parsedSymbols.TryGetValue(weight.SecurityId, out var symbol))
             {
-                Symbol = symbol,
-                Side = side,
-                Code = $"QQB-{weight.SecurityId}",
+                continue;
+            }
+
+            AddExposure(exposures, symbol.BaseCurrency, weight.Weight);
+            AddExposure(exposures, symbol.QuoteCurrency, -weight.Weight);
+        }
+
+        if (exposures.Count == 0)
+        {
+            return new List<WakettOrderItem>();
+        }
+
+        var usdBasePairs = parsedSymbols.Values
+            .Where(info => string.Equals(info.QuoteCurrency, "USD", StringComparison.OrdinalIgnoreCase))
+            .GroupBy(info => info.BaseCurrency, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                group => group.Key,
+                group => group.OrderBy(info => info.SecurityId).First(),
+                StringComparer.OrdinalIgnoreCase);
+
+        var usdQuotePairs = parsedSymbols.Values
+            .Where(info => string.Equals(info.BaseCurrency, "USD", StringComparison.OrdinalIgnoreCase))
+            .GroupBy(info => info.QuoteCurrency, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                group => group.Key,
+                group => group.OrderBy(info => info.SecurityId).First(),
+                StringComparer.OrdinalIgnoreCase);
+
+        var orderDescriptors = new List<(int SecurityId, string Symbol, decimal Weight)>();
+
+        foreach (var kvp in exposures)
+        {
+            var currency = kvp.Key;
+            var exposure = kvp.Value;
+
+            if (string.Equals(currency, "USD", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (exposure == 0m)
+            {
+                continue;
+            }
+
+            if (usdBasePairs.TryGetValue(currency, out var basePair))
+            {
+                orderDescriptors.Add((basePair.SecurityId, basePair.Symbol, exposure));
+                continue;
+            }
+
+            if (usdQuotePairs.TryGetValue(currency, out var quotePair))
+            {
+                orderDescriptors.Add((quotePair.SecurityId, quotePair.Symbol, -exposure));
+            }
+        }
+
+        return orderDescriptors
+            .Where(order => order.Weight != 0m)
+            .OrderBy(order => order.SecurityId)
+            .Select(order => new WakettOrderItem
+            {
+                Symbol = order.Symbol,
+                Side = order.Weight > 0 ? "BUY" : "SELL",
+                Code = $"QQB-{order.SecurityId}",
                 Size = new WakettOrderSize
                 {
                     Type = "percentage",
-                    Value = sizeValue
+                    Value = Math.Abs((double)order.Weight)
                 }
-            });
+            })
+            .ToList();
+    }
+
+    private static void AddExposure(IDictionary<string, decimal> exposures, string currency, decimal value)
+    {
+        if (value == 0m)
+        {
+            return;
         }
 
-        return orders;
+        if (!exposures.TryGetValue(currency, out var existing))
+        {
+            exposures[currency] = value;
+            return;
+        }
+
+        var updated = existing + value;
+
+        if (updated == 0m)
+        {
+            exposures.Remove(currency);
+        }
+        else
+        {
+            exposures[currency] = updated;
+        }
+    }
+
+    private sealed record SymbolInfo(int SecurityId, string Symbol, string BaseCurrency, string QuoteCurrency)
+    {
+        public static bool TryCreate(int securityId, string? symbol, out SymbolInfo? info)
+        {
+            info = null;
+
+            if (string.IsNullOrWhiteSpace(symbol))
+            {
+                return false;
+            }
+
+            var trimmed = symbol.Trim();
+            var normalized = trimmed.ToUpperInvariant();
+
+            string baseCurrency;
+            string quoteCurrency;
+
+            if (normalized.Contains('/'))
+            {
+                var parts = normalized.Split('/');
+                if (parts.Length != 2 || parts[0].Length != 3 || parts[1].Length != 3)
+                {
+                    return false;
+                }
+
+                baseCurrency = parts[0];
+                quoteCurrency = parts[1];
+            }
+            else if (normalized.Length == 6)
+            {
+                baseCurrency = normalized[..3];
+                quoteCurrency = normalized[3..6];
+            }
+            else
+            {
+                return false;
+            }
+
+            info = new SymbolInfo(securityId, trimmed, baseCurrency, quoteCurrency);
+            return true;
+        }
     }
 
     private double? ResolveAum()
