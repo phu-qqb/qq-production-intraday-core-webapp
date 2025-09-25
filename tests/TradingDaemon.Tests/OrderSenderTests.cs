@@ -56,7 +56,15 @@ public class OrderSenderTests
         var logger = Mock.Of<ILogger<OrderSender>>();
         var timeProvider = new TestTimeProvider(now);
 
-        var sender = new TestOrderSender(apiClient, context.Object, logger, configuration, timeProvider, weights, symbolMap);
+        var sender = new TestOrderSender(
+            apiClient,
+            context.Object,
+            logger,
+            configuration,
+            timeProvider,
+            weights,
+            symbolMap,
+            new OrderSender.ModelScheduleRow { Offset = 60, BarSize = 0 });
 
         await sender.SendOrdersAsync();
 
@@ -71,7 +79,12 @@ public class OrderSenderTests
         using var document = JsonDocument.Parse(payload);
         var root = document.RootElement;
 
-        var expectedOrderTimestampUtc = OrderSender.CalculateOrderTimestamp(barTimeUtc, TimeSpan.FromMinutes(60), "US");
+        var expectedOrderTimestampUtc = OrderSender.CalculateOrderTimestamp(
+            barTimeUtc,
+            TimeSpan.FromMinutes(60),
+            "US",
+            60,
+            0);
         Assert.Equal(OrderSender.FormatTimestamp(expectedOrderTimestampUtc), root.GetProperty("ts").GetString());
         Assert.Equal(2_500_000d, root.GetProperty("aum").GetDouble());
 
@@ -135,7 +148,15 @@ public class OrderSenderTests
         var logger = Mock.Of<ILogger<OrderSender>>();
         var timeProvider = new TestTimeProvider(now);
 
-        var sender = new TestOrderSender(apiClient, context.Object, logger, configuration, timeProvider, weights, symbolMap);
+        var sender = new TestOrderSender(
+            apiClient,
+            context.Object,
+            logger,
+            configuration,
+            timeProvider,
+            weights,
+            symbolMap,
+            new OrderSender.ModelScheduleRow { Offset = 60, BarSize = 0 });
 
         await sender.SendOrdersAsync();
 
@@ -207,7 +228,15 @@ public class OrderSenderTests
             new() { SecurityId = 58, ModelId = 1, BarTimeUtc = staleUtc, ModelRunId = 1, Weight = 0.2m }
         };
 
-        var sender = new TestOrderSender(apiClient, context.Object, logger, configuration, timeProvider, weights, symbolMap);
+        var sender = new TestOrderSender(
+            apiClient,
+            context.Object,
+            logger,
+            configuration,
+            timeProvider,
+            weights,
+            symbolMap,
+            new OrderSender.ModelScheduleRow { Offset = 60, BarSize = 0 });
 
         await sender.SendOrdersAsync();
 
@@ -261,7 +290,15 @@ public class OrderSenderTests
             new() { SecurityId = 58, ModelId = 1, BarTimeUtc = previousDayUtc, ModelRunId = 1, Weight = 0.3m }
         };
 
-        var sender = new TestOrderSender(apiClient, context.Object, logger, configuration, timeProvider, weights, symbolMap);
+        var sender = new TestOrderSender(
+            apiClient,
+            context.Object,
+            logger,
+            configuration,
+            timeProvider,
+            weights,
+            symbolMap,
+            new OrderSender.ModelScheduleRow { Offset = 60, BarSize = 0 });
 
         await sender.SendOrdersAsync();
 
@@ -275,8 +312,55 @@ public class OrderSenderTests
         var payload = await captured!.Content.ReadAsStringAsync();
         using var document = JsonDocument.Parse(payload);
         var root = document.RootElement;
-        var expectedTsUtc = OrderSender.CalculateOrderTimestamp(previousDayUtc, TimeSpan.FromMinutes(60), "US");
+        var expectedTsUtc = OrderSender.CalculateOrderTimestamp(
+            previousDayUtc,
+            TimeSpan.FromMinutes(60),
+            "US",
+            60,
+            0);
         Assert.Equal(OrderSender.FormatTimestamp(expectedTsUtc), root.GetProperty("ts").GetString());
+    }
+
+    [Fact]
+    public void CalculateOrderTimestamp_UsesModelScheduleWithinSession()
+    {
+        var zoneId = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York";
+        var zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
+        var localBar = new DateTime(2024, 1, 2, 10, 0, 0, DateTimeKind.Unspecified);
+        var barTimeUtc = TimeZoneInfo.ConvertTimeToUtc(localBar, zone);
+
+        var result = OrderSender.CalculateOrderTimestamp(
+            barTimeUtc,
+            TimeSpan.FromMinutes(60),
+            "US",
+            15,
+            5);
+
+        var expectedLocal = new DateTime(2024, 1, 2, 10, 5, 0, DateTimeKind.Unspecified);
+        var expectedUtc = TimeZoneInfo.ConvertTimeToUtc(expectedLocal, zone);
+
+        Assert.Equal(expectedUtc, result);
+    }
+
+    [Fact]
+    public void CalculateOrderTimestamp_RollsToNextSessionWhenScheduleExceedsEnd()
+    {
+        var zoneId = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York";
+        var zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
+        var localBar = new DateTime(2024, 1, 2, 15, 50, 0, DateTimeKind.Unspecified);
+        var barTimeUtc = TimeZoneInfo.ConvertTimeToUtc(localBar, zone);
+
+        var result = OrderSender.CalculateOrderTimestamp(
+            barTimeUtc,
+            TimeSpan.FromMinutes(60),
+            "US",
+            15,
+            5);
+
+        var nextSessionLocal = new DateTime(2024, 1, 3, 9, 35, 0, DateTimeKind.Unspecified);
+        var expectedUtc = TimeZoneInfo.ConvertTimeToUtc(nextSessionLocal, zone);
+
+        Assert.Equal(expectedUtc, result);
     }
 
     private static IConfigurationRoot BuildConfiguration(IDictionary<string, string?> values)
@@ -300,6 +384,7 @@ public class OrderSenderTests
     {
         private readonly IReadOnlyList<TheoreticalWeightRow> _weights;
         private readonly IReadOnlyDictionary<int, string> _symbolMap;
+        private readonly ModelScheduleRow? _schedule;
 
         public TestOrderSender(
             WakettApiClient client,
@@ -308,11 +393,13 @@ public class OrderSenderTests
             IConfiguration configuration,
             TimeProvider timeProvider,
             IReadOnlyList<TheoreticalWeightRow> weights,
-            IReadOnlyDictionary<int, string> symbolMap)
+            IReadOnlyDictionary<int, string> symbolMap,
+            ModelScheduleRow? schedule)
             : base(client, context, logger, configuration, timeProvider)
         {
             _weights = weights;
             _symbolMap = symbolMap;
+            _schedule = schedule;
         }
 
         protected override Task<IReadOnlyList<TheoreticalWeightRow>> LoadLatestWeightsAsync(
@@ -324,6 +411,11 @@ public class OrderSenderTests
             IDbConnection connection,
             CancellationToken cancellationToken)
             => Task.FromResult(new Dictionary<int, string>(_symbolMap));
+
+        protected override Task<ModelScheduleRow?> LoadModelScheduleAsync(
+            IDbConnection connection,
+            CancellationToken cancellationToken)
+            => Task.FromResult(_schedule);
     }
 
     private sealed class TestTimeProvider : TimeProvider
