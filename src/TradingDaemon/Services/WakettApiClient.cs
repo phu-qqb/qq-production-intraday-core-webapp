@@ -44,6 +44,8 @@ public class WakettApiClient
     public async Task<WakettOrderResponse?> SendOrdersAsync(WakettOrderRequest request)
     {
         var client = _clientFactory.CreateClient("WakettApi");
+        var jsonBody = JsonSerializer.Serialize(request, _jsonOptions);
+        System.Console.WriteLine($"Sending Wakett order request: {jsonBody}");
         var response = await client.PostAsJsonAsync("orders", request, _jsonOptions);
         response.EnsureSuccessStatusCode();
         var json = await response.Content.ReadAsStringAsync();
