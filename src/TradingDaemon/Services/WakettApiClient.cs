@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Net.Http.Json;
 using System.Linq;
 using System.Globalization;
+using System.Text;
 using TradingDaemon.Models;
 
 namespace TradingDaemon.Services;
@@ -45,8 +46,10 @@ public class WakettApiClient
     {
         var client = _clientFactory.CreateClient("WakettApi");
         var jsonBody = JsonSerializer.Serialize(request, _jsonOptions);
-        System.Console.WriteLine($"Sending Wakett order request: {jsonBody}");
-        var response = await client.PostAsJsonAsync("orders", request, _jsonOptions);
+        var lowerCaseJsonBody = jsonBody.ToLowerInvariant();
+        System.Console.WriteLine($"Sending Wakett order request: {lowerCaseJsonBody}");
+        var content = new StringContent(lowerCaseJsonBody, Encoding.UTF8, "application/json");
+        var response = await client.PostAsync("orders", content);
         response.EnsureSuccessStatusCode();
         var json = await response.Content.ReadAsStringAsync();
         return JsonSerializer.Deserialize<WakettOrderResponse>(json, _jsonOptions);
