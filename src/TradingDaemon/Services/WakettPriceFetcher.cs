@@ -675,6 +675,7 @@ public class WakettPriceFetcher
         var result = new List<(DateTime, decimal)>();
         DateTime? currentBucket = null;
         decimal lastClose = 0;
+        var sessionStartAligned = AlignSessionStart(bounds.Start, minutes);
         foreach (var item in series.OrderBy(s => s.BarTimeUtc))
         {
             var local = TimeZoneInfo.ConvertTimeFromUtc(item.BarTimeUtc, zone);
@@ -683,6 +684,10 @@ public class WakettPriceFetcher
             var end = start.Add(TimeSpan.FromMinutes(minutes - 1));
             if (end < bounds.Start || end > bounds.End) continue;
             var bucket = new DateTime(local.Year, local.Month, local.Day, local.Hour, local.Minute / minutes * minutes, 0);
+            if (bucket.TimeOfDay < sessionStartAligned)
+            {
+                bucket = new DateTime(local.Year, local.Month, local.Day).Add(sessionStartAligned);
+            }
             if (currentBucket != bucket)
             {
                 if (currentBucket.HasValue)
@@ -694,6 +699,22 @@ public class WakettPriceFetcher
         if (currentBucket.HasValue)
             result.Add((TimeZoneInfo.ConvertTimeToUtc(currentBucket.Value.AddMinutes(offset), zone), lastClose));
         return result;
+    }
+
+    private static TimeSpan AlignSessionStart(TimeSpan sessionStart, int minutes)
+    {
+        if (minutes <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(minutes), "Aggregation interval must be positive.");
+        }
+
+        if (sessionStart == TimeSpan.Zero)
+        {
+            return TimeSpan.Zero;
+        }
+
+        var totalMinutes = (int)Math.Ceiling(sessionStart.TotalMinutes / minutes) * minutes;
+        return TimeSpan.FromMinutes(totalMinutes);
     }
 
     private static List<(DateTime TimestampUtc, decimal Close)> Flatten(List<(DateTime TimestampUtc, decimal Close)> raw, TimeZoneInfo zone)

@@ -41,7 +41,7 @@ public class PriceFetcherTests
     }
 
     [Fact]
-    public void RawNMin_Includes9amBarInUSSession()
+    public void RawNMin_FirstUsBarAlignsToNextHour()
     {
         var series = new List<HistClose>
         {
@@ -57,7 +57,8 @@ public class PriceFetcherTests
         var zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
         var times = result.Select(r => TimeZoneInfo.ConvertTimeFromUtc(r.TimestampUtc, zone).TimeOfDay).ToList();
 
-        Assert.Contains(new TimeSpan(9, 0, 0), times);
+        Assert.Contains(new TimeSpan(10, 0, 0), times);
+        Assert.DoesNotContain(new TimeSpan(9, 0, 0), times);
     }
 
     [Fact]
@@ -145,7 +146,7 @@ public class PriceFetcherTests
 
         Assert.DoesNotContain(new TimeSpan(8, 0, 0), times);
         Assert.DoesNotContain(new TimeSpan(16, 0, 0), times);
-        Assert.Contains(new TimeSpan(9, 0, 0), times);
+        Assert.Contains(new TimeSpan(10, 0, 0), times);
         Assert.Contains(new TimeSpan(15, 0, 0), times);
     }
 }
