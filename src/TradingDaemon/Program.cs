@@ -55,6 +55,7 @@ var app = builder.Build();
 app.MapFillEndpoints();
 app.MapPriceEndpoints();
 app.MapWeightEndpoints();
+app.MapOrderEndpoints();
 app.MapTradingEndpoints();
 app.MapReportEndpoints();
 app.MapWakettEndpoints();
