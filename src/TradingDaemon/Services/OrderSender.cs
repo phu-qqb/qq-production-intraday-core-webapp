@@ -64,7 +64,7 @@ public class OrderSender
 
         var latestWeights = latest.Where(w => w.BarTimeUtc == latestBarTimeUtc).ToList();
 
-        var symbolMap = LoadSymbolMap();
+        var symbolMap = await LoadSymbolMapAsync(connection, cancellationToken);
         if (symbolMap.Count == 0)
         {
             _logger.LogWarning("No Wakett symbols configured. Aborting order submission.");
@@ -169,16 +169,33 @@ ORDER BY tw.BarTimeUtc DESC, tw.SecurityId";
         return true;
     }
 
-    private Dictionary<int, string> LoadSymbolMap()
+    protected virtual async Task<Dictionary<int, string>> LoadSymbolMapAsync(
+        IDbConnection connection,
+        CancellationToken cancellationToken)
     {
-        var configured = _configuration
-            .GetSection("ExternalApis:WakettApi:Symbols")
-            .Get<List<WakettSecuritySymbol>>() ?? new List<WakettSecuritySymbol>();
+        const string sql = @"SELECT SecurityId, Symbol
+FROM [Intraday].[core].[Security]
+WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
+
+        var definition = new CommandDefinition(sql, cancellationToken: cancellationToken);
+        var rows = await connection.QueryAsync<SecuritySymbolRow>(definition);
 
         var map = new Dictionary<int, string>();
-        foreach (var symbol in configured)
+        foreach (var row in rows)
         {
-            map[symbol.SecurityId] = symbol.Symbol;
+            if (string.IsNullOrWhiteSpace(row.Symbol))
+            {
+                continue;
+            }
+
+            var sanitized = row.Symbol.Trim().Replace("/", string.Empty).ToUpperInvariant();
+
+            if (sanitized.Length != 6)
+            {
+                continue;
+            }
+
+            map[row.SecurityId] = sanitized;
         }
 
         return map;
@@ -388,5 +405,12 @@ ORDER BY tw.BarTimeUtc DESC, tw.SecurityId";
         public long ModelRunId { get; init; }
 
         public decimal Weight { get; init; }
+    }
+
+    private sealed record SecuritySymbolRow
+    {
+        public int SecurityId { get; init; }
+
+        public string? Symbol { get; init; }
     }
 }
