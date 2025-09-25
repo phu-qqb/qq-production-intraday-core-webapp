@@ -682,12 +682,10 @@ public class WakettPriceFetcher
             if (offset != 0) local = local.AddMinutes(-offset);
             var start = local.TimeOfDay;
             var end = start.Add(TimeSpan.FromMinutes(minutes - 1));
-            if (end < bounds.Start || end > bounds.End) continue;
-            var bucket = new DateTime(local.Year, local.Month, local.Day, local.Hour, local.Minute / minutes * minutes, 0);
-            if (bucket.TimeOfDay < sessionStartAligned)
-            {
-                bucket = new DateTime(local.Year, local.Month, local.Day).Add(sessionStartAligned);
-            }
+
+            if (start < bounds.Start || end > bounds.End) continue;
+            var bucket = AlignToSessionBucket(local, sessionStartAligned, minutes);
+
             if (currentBucket != bucket)
             {
                 if (currentBucket.HasValue)
@@ -700,6 +698,20 @@ public class WakettPriceFetcher
             result.Add((TimeZoneInfo.ConvertTimeToUtc(currentBucket.Value.AddMinutes(offset), zone), lastClose));
         return result;
     }
+
+
+    private static DateTime AlignToSessionBucket(DateTime local, TimeSpan sessionStartAligned, int minutes)
+    {
+        var alignedDayStart = new DateTime(local.Year, local.Month, local.Day).Add(sessionStartAligned);
+        if (local.TimeOfDay <= sessionStartAligned)
+        {
+            return alignedDayStart;
+        }
+
+        var minutesSinceAlignedStart = (int)Math.Floor((local.TimeOfDay - sessionStartAligned).TotalMinutes / minutes) * minutes;
+        return alignedDayStart.AddMinutes(minutesSinceAlignedStart);
+    }
+
 
     private static TimeSpan AlignSessionStart(TimeSpan sessionStart, int minutes)
     {
