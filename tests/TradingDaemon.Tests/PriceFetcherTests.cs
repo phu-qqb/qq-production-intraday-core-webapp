@@ -59,6 +59,7 @@ public class PriceFetcherTests
 
         Assert.Contains(new TimeSpan(10, 0, 0), times);
         Assert.DoesNotContain(new TimeSpan(9, 0, 0), times);
+
     }
 
     [Fact]
@@ -82,6 +83,7 @@ public class PriceFetcherTests
 
         Assert.Equal(new TimeSpan(10, 0, 0), localTimes.First().TimeOfDay);
         Assert.All(localTimes, t => Assert.Equal(0, t.Minute));
+
     }
 
     [Fact]

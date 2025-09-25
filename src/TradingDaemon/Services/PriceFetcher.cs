@@ -147,8 +147,10 @@ public class PriceFetcher
             if (offset != 0) local = local.AddMinutes(-offset);
             var start = local.TimeOfDay;
             var end = start.Add(TimeSpan.FromMinutes(minutes - 1));
+
             if (start < bounds.Start || end > bounds.End) continue;
             var bucket = AlignToSessionBucket(local, sessionStartAligned, minutes);
+
             if (currentBucket != bucket)
             {
                 if (currentBucket.HasValue)
@@ -161,6 +163,7 @@ public class PriceFetcher
             result.Add((TimeZoneInfo.ConvertTimeToUtc(currentBucket.Value.AddMinutes(offset), zone), lastClose));
         return result;
     }
+
 
     private static DateTime AlignToSessionBucket(DateTime local, TimeSpan sessionStartAligned, int minutes)
     {
