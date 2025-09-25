@@ -106,6 +106,64 @@ public class OrderSenderTests
     }
 
     [Fact]
+    public async Task SendOrdersAsync_UsesOverrideAumWhenProvided()
+    {
+        HttpRequestMessage? captured = null;
+        var handler = new Mock<HttpMessageHandler>();
+        handler.Protected().Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+            .Callback<HttpRequestMessage, CancellationToken>((message, _) => captured = message)
+            .ReturnsAsync(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"ts\":\"\",\"orders\":[]}")
+            });
+
+        var client = new HttpClient(handler.Object) { BaseAddress = new Uri("http://wakett") };
+        var factory = Mock.Of<IHttpClientFactory>(f => f.CreateClient("WakettApi") == client);
+        var apiClient = new WakettApiClient(factory);
+
+        var now = new DateTimeOffset(2024, 1, 2, 16, 30, 0, TimeSpan.Zero);
+        var barTimeUtc = now.AddMinutes(-60).UtcDateTime;
+        var weights = new List<OrderSender.TheoreticalWeightRow>
+        {
+            new() { SecurityId = 58, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 10, Weight = 0.15m }
+        };
+
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["ExternalApis:WakettApi:Aum"] = "2500000"
+        });
+
+        var symbolMap = new Dictionary<int, string>
+        {
+            [58] = "EURUSD"
+        };
+
+        var context = new Mock<DapperContext>(configuration);
+        context.Setup(c => c.CreateConnection()).Returns(Mock.Of<IDbConnection>());
+
+        var logger = Mock.Of<ILogger<OrderSender>>();
+        var timeProvider = new TestTimeProvider(now);
+
+        var sender = new TestOrderSender(
+            apiClient,
+            context.Object,
+            logger,
+            configuration,
+            timeProvider,
+            weights,
+            symbolMap,
+            new OrderSender.ModelScheduleRow { Offset = 60, BarSize = 0 });
+
+        await sender.SendOrdersAsync(3_100_000d);
+
+        Assert.NotNull(captured);
+        var payload = await captured!.Content.ReadAsStringAsync();
+        using var document = JsonDocument.Parse(payload);
+        var root = document.RootElement;
+        Assert.Equal(3_100_000d, root.GetProperty("aum").GetDouble());
+    }
+
+    [Fact]
     public async Task SendOrdersAsync_NetsCrossesIntoUsdPairs()
     {
         HttpRequestMessage? captured = null;
