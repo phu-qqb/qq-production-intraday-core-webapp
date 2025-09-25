@@ -542,8 +542,6 @@ public class WakettPriceFetcher
         CancellationToken cancellationToken)
     {
         var recordList = records.ToList();
-        if (recordList.Count == 0)
-            return;
 
         var securityKeys = recordList
             .Select(r => r.SecurityKey)
@@ -563,20 +561,32 @@ public class WakettPriceFetcher
             connection.Open();
         }
 
-        using var transaction = connection.BeginTransaction();
-        var parameters = new
+        IDbTransaction? transaction = null;
+
+        try
         {
-            BarTimeUtc = recordList[0].BarTimeUtc,
-            SecurityIds = securityKeys
-        };
+            if (recordList.Count > 0)
+            {
+                transaction = connection.BeginTransaction();
+                var parameters = new
+                {
+                    BarTimeUtc = recordList[0].BarTimeUtc,
+                    SecurityIds = securityKeys
+                };
 
-        await connection.ExecuteAsync(deleteSql, parameters, transaction);
-        await connection.ExecuteAsync(
-            insertSql,
-            recordList.Select(r => new { SecurityId = r.SecurityKey, r.BarTimeUtc, Close = r.Close }),
-            transaction);
+                await connection.ExecuteAsync(deleteSql, parameters, transaction);
+                await connection.ExecuteAsync(
+                    insertSql,
+                    recordList.Select(r => new { SecurityId = r.SecurityKey, r.BarTimeUtc, Close = r.Close }),
+                    transaction);
 
-        transaction.Commit();
+                transaction.Commit();
+            }
+        }
+        finally
+        {
+            transaction?.Dispose();
+        }
 
         await connection.ExecuteAsync("EXEC mkt.LoadRawFromStage @TimeframeMinute = 60");
         await connection.ExecuteAsync("EXEC mkt.LoadFlatFromMinimal @TimeframeMinute = 60");
