@@ -699,7 +699,6 @@ public class WakettPriceFetcher
         return result;
     }
 
-
     private static DateTime AlignToSessionBucket(DateTime local, TimeSpan sessionStartAligned, int minutes)
     {
         var alignedDayStart = new DateTime(local.Year, local.Month, local.Day).Add(sessionStartAligned);

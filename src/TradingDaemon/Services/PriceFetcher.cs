@@ -177,7 +177,6 @@ public class PriceFetcher
         return alignedDayStart.AddMinutes(minutesSinceAlignedStart);
     }
 
-
     private static TimeSpan AlignSessionStart(TimeSpan sessionStart, int minutes)
     {
         if (minutes <= 0)

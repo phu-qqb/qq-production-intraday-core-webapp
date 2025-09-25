@@ -175,7 +175,11 @@ public class OrderSender
             return TimeZoneInfo.ConvertTimeToUtc(candidate, zone);
         }
 
-        var nextSessionStart = sessionStart.AddDays(1);
+        var nextSessionStart = AlignNextSessionStart(
+            sessionStart,
+            barInterval,
+            offsetMinutes,
+            barSizeMinutes);
         return TimeZoneInfo.ConvertTimeToUtc(nextSessionStart, zone);
     }
 
@@ -216,6 +220,37 @@ public class OrderSender
         }
 
         return nextSession;
+    }
+
+    private static DateTime AlignNextSessionStart(
+        DateTime sessionStart,
+        TimeSpan barInterval,
+        int? offsetMinutes,
+        int? barSizeMinutes)
+    {
+        var nextSessionStart = sessionStart.AddDays(1);
+
+        if (offsetMinutes is > 0)
+        {
+            var baseMinute = Math.Max(0, barSizeMinutes ?? 0);
+            return GetNextScheduledLocal(nextSessionStart, offsetMinutes.Value, baseMinute, strictlyGreater: false);
+        }
+
+        var alignment = barSizeMinutes.GetValueOrDefault((int)Math.Round(barInterval.TotalMinutes));
+        if (alignment <= 0)
+        {
+            return nextSessionStart;
+        }
+
+        var minutesIntoDay = (int)Math.Floor(nextSessionStart.TimeOfDay.TotalMinutes);
+        var remainder = minutesIntoDay % alignment;
+        if (remainder == 0)
+        {
+            return nextSessionStart;
+        }
+
+        var delta = alignment - remainder;
+        return nextSessionStart.AddMinutes(delta);
     }
 
     private static DateTime GetNextScheduledLocal(
