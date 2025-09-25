@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Data;
 using System.Globalization;
 using System.Linq;
@@ -92,7 +93,14 @@ public class OrderSender
             return;
         }
 
-        var orders = BuildOrders(latestWeights, symbolMap);
+        var allowedSymbols = LoadAllowedSymbols();
+        if (allowedSymbols.Count == 0)
+        {
+            _logger.LogWarning("No allowed Wakett symbols configured. Aborting order submission.");
+            return;
+        }
+
+        var orders = BuildOrders(latestWeights, symbolMap, allowedSymbols);
         if (orders.Count == 0)
         {
             _logger.LogInformation("No non-zero weights available for Wakett order submission.");
@@ -503,9 +511,42 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         return map;
     }
 
+    private HashSet<string> LoadAllowedSymbols()
+    {
+        var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var item in EnumerateConfiguredSymbols("ExternalApis:WakettApi:Symbols"))
+        {
+            allowed.Add(item);
+        }
+
+        foreach (var item in EnumerateConfiguredSymbols("ExternalApis:WakettApi:MissingSymbols"))
+        {
+            allowed.Add(item);
+        }
+
+        return allowed;
+    }
+
+    private IEnumerable<string> EnumerateConfiguredSymbols(string section)
+    {
+        var configured = _configuration
+            .GetSection(section)
+            .Get<List<WakettSecuritySymbol>>() ?? new();
+
+        foreach (var symbol in configured)
+        {
+            if (SymbolInfo.TryCreate(symbol.SecurityId, symbol.Symbol, out var info))
+            {
+                yield return info.FormattedSymbol;
+            }
+        }
+    }
+
     private static List<WakettOrderItem> BuildOrders(
         IEnumerable<TheoreticalWeightRow> weights,
-        IReadOnlyDictionary<int, string> symbolMap)
+        IReadOnlyDictionary<int, string> symbolMap,
+        ISet<string> allowedSymbols)
     {
         var parsedSymbols = symbolMap
             .Select(pair => SymbolInfo.TryCreate(pair.Key, pair.Value, out var info) ? info : null)
@@ -586,21 +627,42 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
             }
         }
 
-        return orderDescriptors
-            .Where(order => order.Weight != 0m)
-            .OrderBy(order => order.SecurityId)
-            .Select(order => new WakettOrderItem
+        var result = new List<WakettOrderItem>();
+
+        foreach (var order in orderDescriptors.Where(order => order.Weight != 0m).OrderBy(order => order.SecurityId))
+        {
+            var formatted = order.Info.FormattedSymbol;
+            var side = order.Weight > 0 ? "BUY" : "SELL";
+            var value = Math.Abs((double)order.Weight);
+
+            if (!allowedSymbols.Contains(formatted))
             {
-                Symbol = order.Info.FormattedSymbol,
-                Side = order.Weight > 0 ? "BUY" : "SELL",
+                var reversed = order.Info.ReversedFormattedSymbol;
+                if (allowedSymbols.Contains(reversed))
+                {
+                    formatted = reversed;
+                    side = side == "BUY" ? "SELL" : "BUY";
+                }
+                else
+                {
+                    continue;
+                }
+            }
+
+            result.Add(new WakettOrderItem
+            {
+                Symbol = formatted,
+                Side = side,
                 Code = $"QQB-{order.SecurityId}",
                 Size = new WakettOrderSize
                 {
                     Type = "percentage",
-                    Value = Math.Abs((double)order.Weight)
+                    Value = value
                 }
-            })
-            .ToList();
+            });
+        }
+
+        return result;
     }
 
     private static void AddExposure(IDictionary<string, decimal> exposures, string currency, decimal value)
@@ -631,6 +693,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
     private sealed record SymbolInfo(int SecurityId, string Symbol, string BaseCurrency, string QuoteCurrency)
     {
         public string FormattedSymbol => $"{BaseCurrency}/{QuoteCurrency}";
+        public string ReversedFormattedSymbol => $"{QuoteCurrency}/{BaseCurrency}";
 
         public static bool TryCreate(int securityId, string? symbol, out SymbolInfo? info)
         {
