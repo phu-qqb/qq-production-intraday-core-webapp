@@ -1,3 +1,4 @@
+using System.Data;
 using System.Globalization;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -245,7 +246,7 @@ ORDER BY tw.BarTimeUtc DESC, tw.SecurityId";
     private static TimeZoneInfo CentralEuropeZone => TimeZoneInfo.FindSystemTimeZoneById(
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Central European Standard Time" : "Europe/Berlin");
 
-    internal sealed record TheoreticalWeightRow
+    protected sealed record TheoreticalWeightRow
     {
         public int SecurityId { get; init; }
 
