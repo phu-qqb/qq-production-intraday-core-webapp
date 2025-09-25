@@ -55,7 +55,7 @@ public class OrderSender
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
-    public async Task SendOrdersAsync(CancellationToken cancellationToken = default)
+    public async Task SendOrdersAsync(double? aumOverride = null, CancellationToken cancellationToken = default)
     {
         using var connection = _context.CreateConnection();
         var latest = await LoadLatestWeightsAsync(connection, cancellationToken);
@@ -102,7 +102,7 @@ public class OrderSender
         var request = new WakettOrderRequest
         {
             Ts = FormatTimestamp(orderTimestampUtc),
-            Aum = ResolveAum(),
+            Aum = aumOverride ?? ResolveAum(),
             Orders = orders
         };
 

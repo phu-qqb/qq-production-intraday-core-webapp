@@ -45,9 +45,11 @@ public static class WakettController
             return op;
         });
 
-        app.MapPost("/api/wakett/orders/send", async Task<Ok<WakettOrderSubmissionResponse>> (OrderSender orderSender) =>
+        app.MapPost("/api/wakett/orders/send", async Task<Ok<WakettOrderSubmissionResponse>> (
+            OrderSender orderSender,
+            SendWakettOrdersRequest? request) =>
         {
-            await orderSender.SendOrdersAsync();
+            await orderSender.SendOrdersAsync(request?.Aum);
             return TypedResults.Ok(new WakettOrderSubmissionResponse("OrdersSent"));
         })
         .WithName("SendWakettOrders")
@@ -57,6 +59,24 @@ public static class WakettController
             op.Summary = "Submit orders to Wakett.";
             op.Description = "Triggers the Wakett order sender to translate the latest theoretical weights into Wakett orders a"
                 + "nd submit them through the Wakett trading API.";
+            op.RequestBody = new OpenApiRequestBody
+            {
+                Required = false,
+                Content = new Dictionary<string, OpenApiMediaType>
+                {
+                    ["application/json"] = new OpenApiMediaType
+                    {
+                        Schema = new OpenApiSchema
+                        {
+                            Reference = new OpenApiReference
+                            {
+                                Type = ReferenceType.Schema,
+                                Id = nameof(SendWakettOrdersRequest)
+                            }
+                        }
+                    }
+                }
+            };
             op.Responses["200"] = new OpenApiResponse
             {
                 Description = "The Wakett order sender completed and attempted to submit all orders.",
@@ -81,3 +101,5 @@ public static class WakettController
 }
 
 public sealed record WakettOrderSubmissionResponse(string Status);
+
+public sealed record SendWakettOrdersRequest(double? Aum);
