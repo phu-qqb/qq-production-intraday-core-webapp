@@ -1,3 +1,8 @@
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Http.HttpResults;
+using Microsoft.AspNetCore.OpenApi;
+using Microsoft.OpenApi.Models;
 using TradingDaemon.Services;
 
 namespace TradingDaemon.Controllers;
@@ -6,12 +11,40 @@ public static class TradingController
 {
     public static void MapTradingEndpoints(this IEndpointRouteBuilder app)
     {
-        app.MapPost("/api/trading/run", async (PriceFetcher priceFetcher, WeightCalculator weightCalculator, OrderSender orderSender) =>
+        app.MapPost("/api/trading/run", async Task<Ok<TradingRunResponse>> (PriceFetcher priceFetcher, WeightCalculator weightCalculator, OrderSender orderSender) =>
         {
             await priceFetcher.FetchAndStoreAsync();
             await weightCalculator.CalculateAndStoreAsync();
             await orderSender.SendOrdersAsync();
-            return Results.Ok(new { Status = "Completed" });
+            return TypedResults.Ok(new TradingRunResponse("Completed"));
+        })
+        .WithName("RunTradingPipeline")
+        .Produces<TradingRunResponse>()
+        .WithOpenApi(op =>
+        {
+            op.Summary = "Run the intraday trading pipeline with Wakett order submission.";
+            op.Description = "Fetches FX prices, computes theoretical weights, and submits the resulting orders to Wakett.";
+            op.Responses["200"] = new OpenApiResponse
+            {
+                Description = "The trading workflow completed and Wakett orders were submitted.",
+                Content = new Dictionary<string, OpenApiMediaType>
+                {
+                    ["application/json"] = new OpenApiMediaType
+                    {
+                        Schema = new OpenApiSchema
+                        {
+                            Reference = new OpenApiReference
+                            {
+                                Type = ReferenceType.Schema,
+                                Id = nameof(TradingRunResponse)
+                            }
+                        }
+                    }
+                }
+            };
+            return op;
         });
     }
 }
+
+public sealed record TradingRunResponse(string Status);
