@@ -1,5 +1,6 @@
 using Polly;
 using System.Net;
+using System.Net.Http;
 
 namespace TradingDaemon.Utils;
 
