@@ -7,26 +7,24 @@ using TradingDaemon.Services;
 
 namespace TradingDaemon.Controllers;
 
-public static class TradingController
+public static class OrderController
 {
-    public static void MapTradingEndpoints(this IEndpointRouteBuilder app)
+    public static void MapOrderEndpoints(this IEndpointRouteBuilder app)
     {
-        app.MapPost("/api/trading/run", async Task<Ok<TradingRunResponse>> (PriceFetcher priceFetcher, WeightCalculator weightCalculator, OrderSender orderSender) =>
+        app.MapPost("/api/orders/send", async Task<Ok<OrderSendResponse>> (OrderSender orderSender) =>
         {
-            await priceFetcher.FetchAndStoreAsync();
-            await weightCalculator.CalculateAndStoreAsync();
             await orderSender.SendOrdersAsync();
-            return TypedResults.Ok(new TradingRunResponse("Completed"));
+            return TypedResults.Ok(new OrderSendResponse("OrdersSent"));
         })
-        .WithName("RunTradingPipeline")
-        .Produces<TradingRunResponse>()
+        .WithName("SendOrders")
+        .Produces<OrderSendResponse>()
         .WithOpenApi(op =>
         {
-            op.Summary = "Run the intraday trading pipeline with Wakett order submission.";
-            op.Description = "Fetches FX prices, computes theoretical weights, and submits the resulting orders to Wakett.";
+            op.Summary = "Submit Wakett orders";
+            op.Description = "Loads the latest theoretical weights, converts them into Wakett orders, and submits them through the Wakett API.";
             op.Responses["200"] = new OpenApiResponse
             {
-                Description = "The trading workflow completed and Wakett orders were submitted.",
+                Description = "The order submission workflow completed and Wakett orders were sent.",
                 Content = new Dictionary<string, OpenApiMediaType>
                 {
                     ["application/json"] = new OpenApiMediaType
@@ -36,7 +34,7 @@ public static class TradingController
                             Reference = new OpenApiReference
                             {
                                 Type = ReferenceType.Schema,
-                                Id = nameof(TradingRunResponse)
+                                Id = nameof(OrderSendResponse)
                             }
                         }
                     }
@@ -47,4 +45,4 @@ public static class TradingController
     }
 }
 
-public sealed record TradingRunResponse(string Status);
+public sealed record OrderSendResponse(string Status);

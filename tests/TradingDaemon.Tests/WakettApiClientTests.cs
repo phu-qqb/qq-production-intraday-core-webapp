@@ -55,8 +55,10 @@ public class WakettApiClientTests
     [Fact]
     public async Task SendOrdersAsync_PostsToOrdersEndpoint()
     {
+        HttpRequestMessage? captured = null;
         var handler = new Mock<HttpMessageHandler>();
         handler.Protected().Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+            .Callback<HttpRequestMessage, CancellationToken>((m, _) => captured = m)
             .ReturnsAsync(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"ts\":\"\",\"orders\":[]}") });
         var client = new HttpClient(handler.Object) { BaseAddress = new Uri("http://test") };
         var factory = Mock.Of<IHttpClientFactory>(f => f.CreateClient("WakettApi") == client);
@@ -78,6 +80,19 @@ public class WakettApiClientTests
             Times.Once(),
             ItExpr.Is<HttpRequestMessage>(m => m.Method == HttpMethod.Post && m.RequestUri!.PathAndQuery == "/orders"),
             ItExpr.IsAny<CancellationToken>());
+
+        var body = await captured!.Content.ReadAsStringAsync();
+        Assert.Contains("\"orders\":[{", body);
+        Assert.Contains("\"symbol\":\"AAPL\"", body);
+        Assert.Contains("\"side\":\"BUY\"", body);
+        Assert.Contains("\"code\":\"QQB-1\"", body);
+        Assert.Contains("\"size\":{\"value\":100", body);
+        Assert.Contains("\"type\":\"absolute\"", body);
+        Assert.DoesNotContain("\"Symbol\"", body);
+        Assert.DoesNotContain("\"Side\"", body);
+        Assert.DoesNotContain("\"Code\"", body);
+        Assert.DoesNotContain("\"Value\"", body);
+        Assert.DoesNotContain("\"Type\"", body);
     }
 
     [Fact]
