@@ -142,6 +142,15 @@ public class OrderSender
     internal static string FormatTimestamp(DateTime barTimeUtc)
     {
         var local = TimeZoneInfo.ConvertTimeFromUtc(barTimeUtc, NewYorkZone);
+        local = new DateTime(
+            local.Year,
+            local.Month,
+            local.Day,
+            local.Hour,
+            6,
+            0,
+            0,
+            local.Kind);
         var offset = NewYorkZone.GetUtcOffset(local);
         var sign = offset < TimeSpan.Zero ? "-" : "+";
         var abs = offset.Duration();
