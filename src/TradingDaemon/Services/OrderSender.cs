@@ -109,9 +109,9 @@ public class OrderSender
 
         var request = new WakettOrderRequest
         {
-            Ts = FormatTimestamp(orderTimestampUtc),
-            Aum = aumOverride ?? ResolveAum(),
-            Orders = orders
+            ts = FormatTimestamp(orderTimestampUtc),
+            aum = aumOverride ?? ResolveAum(),
+            orders = orders
         };
 
         var response = await _wakettApiClient.SendOrdersAsync(request);
@@ -120,20 +120,20 @@ public class OrderSender
         {
             foreach (var item in response.Orders)
             {
-                if (item.Error is not null)
+                if (item.error is not null)
                 {
                     _logger.LogError(
                         "Wakett rejected order for {Symbol}: {Code} {Message}.",
-                        item.Symbol,
-                        item.Error.Code,
-                        item.Error.Message);
+                        item.symbol,
+                        item.error.Code,
+                        item.error.Message);
                 }
                 else
                 {
                     _logger.LogInformation(
                         "Wakett accepted order for {Symbol} with side {Side}.",
-                        item.Symbol,
-                        item.Side);
+                        item.symbol,
+                        item.side);
                 }
             }
         }
@@ -651,13 +651,13 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
             result.Add(new WakettOrderItem
             {
-                Symbol = formatted,
-                Side = side,
-                Code = $"QQB-{order.SecurityId}",
-                Size = new WakettOrderSize
+                symbol = formatted,
+                side = side,
+                code = $"QQB-{order.SecurityId}",
+                size = new WakettOrderSize
                 {
-                    Type = "percentage",
-                    Value = value
+                    type = "percentage",
+                    value = value
                 }
             });
         }

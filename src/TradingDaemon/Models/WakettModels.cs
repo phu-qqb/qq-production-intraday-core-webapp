@@ -24,23 +24,23 @@ public class WakettPrice
 
 public class WakettOrderRequest
 {
-    public string? Ts { get; set; }
-    public double? Aum { get; set; }
-    public List<WakettOrderItem> Orders { get; set; } = new();
+    public string? ts { get; set; }
+    public double? aum { get; set; }
+    public List<WakettOrderItem> orders { get; set; } = new();
 }
 
 public class WakettOrderItem
 {
-    public string Symbol { get; set; } = string.Empty;
-    public string Side { get; set; } = string.Empty;
-    public string Code { get; set; } = string.Empty;
-    public WakettOrderSize Size { get; set; } = new();
+    public string symbol { get; set; } = string.Empty;
+    public string side { get; set; } = string.Empty;
+    public string code { get; set; } = string.Empty;
+    public WakettOrderSize size { get; set; } = new();
 }
 
 public class WakettOrderSize
 {
-    public double Value { get; set; }
-    public string Type { get; set; } = string.Empty;
+    public double value { get; set; }
+    public string type { get; set; } = string.Empty;
 }
 
 public class WakettOrderResponse
@@ -51,12 +51,12 @@ public class WakettOrderResponse
 
 public class WakettOrderResult
 {
-    public string Symbol { get; set; } = string.Empty;
-    public string Side { get; set; } = string.Empty;
-    public double? Qt { get; set; }
-    public string Code { get; set; } = string.Empty;
-    public string? OrderID { get; set; }
-    public WakettError? Error { get; set; }
+    public string symbol { get; set; } = string.Empty;
+    public string side { get; set; } = string.Empty;
+    public double? qt { get; set; }
+    public string code { get; set; } = string.Empty;
+    public string? orderID { get; set; }
+    public WakettError? error { get; set; }
 }
 
 public class WakettTradeRequest
