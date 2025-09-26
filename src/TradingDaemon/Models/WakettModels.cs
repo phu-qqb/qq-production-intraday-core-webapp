@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace TradingDaemon.Models;
 
 public class WakettSecuritySymbol
@@ -45,18 +47,47 @@ public class WakettOrderSize
 
 public class WakettOrderResponse
 {
-    public string Ts { get; set; } = string.Empty;
+    [JsonPropertyName("ts")]
+    public string Timestamp { get; set; } = string.Empty;
+
+    [JsonPropertyName("orders")]
     public List<WakettOrderResult> Orders { get; set; } = new();
 }
 
 public class WakettOrderResult
 {
-    public string symbol { get; set; } = string.Empty;
-    public string side { get; set; } = string.Empty;
-    public double? qt { get; set; }
-    public string code { get; set; } = string.Empty;
-    public string? orderID { get; set; }
-    public WakettError? error { get; set; }
+    [JsonPropertyName("symbol")]
+    public string Symbol { get; set; } = string.Empty;
+
+    [JsonPropertyName("side")]
+    public string Side { get; set; } = string.Empty;
+
+    [JsonPropertyName("size")]
+    public double? Size { get; set; }
+
+    [JsonPropertyName("code")]
+    public string Code { get; set; } = string.Empty;
+
+    [JsonPropertyName("orderID")]
+    public string? OrderId { get; set; }
+
+    [JsonPropertyName("trades")]
+    public List<WakettOrderTrade> Trades { get; set; } = new();
+
+    [JsonPropertyName("error")]
+    public WakettError? Error { get; set; }
+}
+
+public class WakettOrderTrade
+{
+    [JsonPropertyName("id")]
+    public string Id { get; set; } = string.Empty;
+
+    [JsonPropertyName("side")]
+    public string Side { get; set; } = string.Empty;
+
+    [JsonPropertyName("qt")]
+    public double Quantity { get; set; }
 }
 
 public class WakettTradeRequest
