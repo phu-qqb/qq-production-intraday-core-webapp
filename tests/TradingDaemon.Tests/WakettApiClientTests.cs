@@ -96,7 +96,7 @@ public class WakettApiClientTests
     }
 
     [Fact]
-    public async Task GetTradesAsync_PostsToTradesEndpoint()
+    public async Task GetTradesAsync_GetsTradesEndpointWithQuery()
     {
         var handler = new Mock<HttpMessageHandler>();
         handler.Protected().Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
@@ -111,7 +111,10 @@ public class WakettApiClientTests
         handler.Protected().Verify(
             "SendAsync",
             Times.Once(),
-            ItExpr.Is<HttpRequestMessage>(m => m.Method == HttpMethod.Post && m.RequestUri!.PathAndQuery == "/trades"),
+            ItExpr.Is<HttpRequestMessage>(m =>
+                m.Method == HttpMethod.Get
+                && m.RequestUri!.PathAndQuery == "/trades?account=ACC&from=20240101&to=20240101&strategy=QQB"
+                && m.Content == null),
             ItExpr.IsAny<CancellationToken>());
     }
 }
