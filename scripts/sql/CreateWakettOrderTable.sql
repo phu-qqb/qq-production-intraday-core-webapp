@@ -1,16 +1,26 @@
 /*
     Creates the table used to persist Wakett order submissions.
-    Execute inside the Intraday database context.
+    Execute inside the Wakett database context.
 */
+
 IF NOT EXISTS (
     SELECT 1
     FROM sys.schemas s
     INNER JOIN sys.tables t ON s.schema_id = t.schema_id
-    WHERE s.name = N'model'
-      AND t.name = N'WakettOrder'
+    WHERE s.name = N'wakett'
+      AND t.name = N'Order'
 )
 BEGIN
-    CREATE TABLE [model].[WakettOrder]
+    IF NOT EXISTS (
+        SELECT 1
+        FROM sys.schemas
+        WHERE name = N'wakett'
+    )
+    BEGIN
+        EXEC ('CREATE SCHEMA [wakett] AUTHORIZATION dbo;');
+    END;
+
+    CREATE TABLE [wakett].[Order]
     (
         WakettOrderId       BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
         ModelId             INT                  NOT NULL,
@@ -28,8 +38,8 @@ BEGIN
     );
 
     CREATE INDEX IX_WakettOrder_ScheduledTimestamp
-        ON [model].[WakettOrder] (ScheduledTimestamp);
+        ON [wakett].[Order] (ScheduledTimestamp);
 
     CREATE INDEX IX_WakettOrder_OrderCode
-        ON [model].[WakettOrder] (OrderCode);
+        ON [wakett].[Order] (OrderCode);
 END;

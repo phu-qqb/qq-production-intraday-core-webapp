@@ -210,7 +210,7 @@ public class OrderSender
                 requestLookup[key] = order;
             }
 
-            const string insertSql = @"INSERT INTO [Intraday].[model].[WakettOrder]
+            const string insertSql = @"INSERT INTO [wakett].[Order]
 (
     ModelId,
     OrderCode,
