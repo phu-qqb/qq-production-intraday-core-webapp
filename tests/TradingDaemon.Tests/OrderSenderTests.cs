@@ -510,6 +510,25 @@ public class OrderSenderTests
         Assert.Equal(expectedUtc, result);
     }
 
+    [Fact]
+    public void FormatTimestamp_TopOfHourBarsAdvanceToNextHour()
+    {
+        var zoneId = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York";
+        var zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
+        var localBar = new DateTime(2024, 2, 5, 9, 0, 0, DateTimeKind.Unspecified);
+        var barTimeUtc = TimeZoneInfo.ConvertTimeToUtc(localBar, zone);
+
+        var formatted = OrderSender.FormatTimestamp(barTimeUtc);
+
+        var expectedLocal = localBar.AddHours(1);
+        var offset = zone.GetUtcOffset(expectedLocal);
+        var sign = offset < TimeSpan.Zero ? "-" : "+";
+        var abs = offset.Duration();
+        var expected = $"{expectedLocal:yyyy-MM-dd HH:mm:ss.fff}{sign}{abs.Hours:00}{abs.Minutes:00}";
+
+        Assert.Equal(expected, formatted);
+    }
+
     private static IConfigurationRoot BuildConfiguration(IDictionary<string, string?> values)
     {
         var defaults = new Dictionary<string, string?>

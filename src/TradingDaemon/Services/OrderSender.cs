@@ -300,15 +300,32 @@ VALUES
     internal static string FormatTimestamp(DateTime barTimeUtc)
     {
         var local = TimeZoneInfo.ConvertTimeFromUtc(barTimeUtc, NewYorkZone);
-        local = new DateTime(
-            local.Year,
-            local.Month,
-            local.Day,
-            local.Hour,
-            6,
-            0,
-            0,
-            local.Kind);
+
+        if (local.Minute == 0 && local.Second == 0 && local.Millisecond == 0)
+        {
+            local = local.AddHours(1);
+            local = new DateTime(
+                local.Year,
+                local.Month,
+                local.Day,
+                local.Hour,
+                0,
+                0,
+                local.Kind);
+        }
+        else
+        {
+            local = new DateTime(
+                local.Year,
+                local.Month,
+                local.Day,
+                local.Hour,
+                6,
+                0,
+                0,
+                local.Kind);
+        }
+
         var offset = NewYorkZone.GetUtcOffset(local);
         var sign = offset < TimeSpan.Zero ? "-" : "+";
         var abs = offset.Duration();
