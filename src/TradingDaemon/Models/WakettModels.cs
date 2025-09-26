@@ -95,7 +95,9 @@ public class WakettTradeRequest
     public string Account { get; set; } = string.Empty;
     public string From { get; set; } = string.Empty;
     public string To { get; set; } = string.Empty;
-    public string Strategy { get; set; } = string.Empty;
+
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Strategy { get; set; }
 }
 
 public class WakettTradeResponse
@@ -107,16 +109,104 @@ public class WakettTradeResponse
 
 public class WakettTrade
 {
-    public string Portfolio { get; set; } = string.Empty;
-    public string Broker { get; set; } = string.Empty;
-    public string StrategyID { get; set; } = string.Empty;
-    public string Symbol { get; set; } = string.Empty;
-    public string Side { get; set; } = string.Empty;
-    public double Price { get; set; }
-    public double OrderSize { get; set; }
-    public double ExecuteSize { get; set; }
-    public double ExecutePrice { get; set; }
-    public string Event { get; set; } = string.Empty;
+    [JsonPropertyName("portfolioID")]
+    public string? PortfolioId { get; set; }
+
+    [JsonPropertyName("portfolio")]
+    public string? Portfolio { get; set; }
+
+    [JsonPropertyName("alias")]
+    public string? Alias { get; set; }
+
+    [JsonPropertyName("broker")]
+    public string? Broker { get; set; }
+
+    [JsonPropertyName("strategyID")]
+    public string? StrategyId { get; set; }
+
+    [JsonPropertyName("symbolID")]
+    public string? SymbolId { get; set; }
+
+    [JsonPropertyName("symbol")]
+    public string? Symbol { get; set; }
+
+    [JsonPropertyName("instrumentID")]
+    public string? InstrumentId { get; set; }
+
+    [JsonPropertyName("ref")]
+    public string? Reference { get; set; }
+
+    [JsonPropertyName("id")]
+    public int? CoreOrderId { get; set; }
+
+    [JsonPropertyName("sub")]
+    public int? SubOrderId { get; set; }
+
+    [JsonPropertyName("label")]
+    public string? Label { get; set; }
+
+    [JsonPropertyName("side")]
+    public string? Side { get; set; }
+
+    [JsonPropertyName("price")]
+    public double? Price { get; set; }
+
+    [JsonPropertyName("orderID")]
+    public string? OrderId { get; set; }
+
+    [JsonPropertyName("orderTS")]
+    public string? OrderTimestamp { get; set; }
+
+    [JsonPropertyName("orderSize")]
+    public double? OrderSize { get; set; }
+
+    [JsonPropertyName("orderChannel")]
+    public string? OrderChannel { get; set; }
+
+    [JsonPropertyName("providerID")]
+    public string? ProviderId { get; set; }
+
+    [JsonPropertyName("providerTS")]
+    public string? ProviderTimestamp { get; set; }
+
+    [JsonPropertyName("executeID")]
+    public string? ExecuteId { get; set; }
+
+    [JsonPropertyName("executeTS")]
+    public string? ExecuteTimestamp { get; set; }
+
+    [JsonPropertyName("entitySize")]
+    public double? EntitySize { get; set; }
+
+    [JsonPropertyName("executeSize")]
+    public double? ExecuteSize { get; set; }
+
+    [JsonPropertyName("executePrice")]
+    public double? ExecutePrice { get; set; }
+
+    [JsonPropertyName("tradets")]
+    public string? TradeTimestamp { get; set; }
+
+    [JsonPropertyName("event")]
+    public string? Event { get; set; }
+
+    [JsonPropertyName("user")]
+    public string? User { get; set; }
+
+    [JsonPropertyName("code")]
+    public string? Code { get; set; }
+
+    [JsonPropertyName("type")]
+    public string? Type { get; set; }
+
+    [JsonPropertyName("quote")]
+    public double? Quote { get; set; }
+
+    [JsonPropertyName("amount")]
+    public double? Amount { get; set; }
+
+    [JsonPropertyName("rate")]
+    public double? Rate { get; set; }
 }
 
 public class WakettError

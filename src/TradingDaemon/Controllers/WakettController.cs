@@ -1,7 +1,9 @@
 using System.Collections.Generic;
 using Microsoft.AspNetCore.Http.HttpResults;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.OpenApi;
 using Microsoft.OpenApi.Models;
+using TradingDaemon.Models;
 using TradingDaemon.Services;
 
 namespace TradingDaemon.Controllers;
@@ -97,7 +99,98 @@ public static class WakettController
             };
             return op;
         });
+
+        app.MapPost("/api/wakett/fills/fetch", async Task<Results<BadRequest<ProblemDetails>, Ok<WakettFillUploadResponse>>>(
+            WakettTradeFetcher tradeFetcher,
+            FetchWakettFillsRequest request,
+            CancellationToken cancellationToken) =>
+        {
+            try
+            {
+                var result = await tradeFetcher.FetchAndStoreAsync(request, cancellationToken);
+                return TypedResults.Ok(result);
+            }
+            catch (ArgumentException ex)
+            {
+                return TypedResults.BadRequest(CreateProblem("InvalidRequest", ex.Message));
+            }
+            catch (WakettTradeFetcherException ex)
+            {
+                return TypedResults.BadRequest(CreateProblem(ex.Status, ex.Message));
+            }
+        })
+        .WithName("FetchWakettFills")
+        .Produces<WakettFillUploadResponse>()
+        .ProducesProblem(StatusCodes.Status400BadRequest)
+        .WithOpenApi(op =>
+        {
+            op.Summary = "Fetch Wakett executions and persist them as fills.";
+            op.Description = "Calls the Wakett /trades endpoint for the specified account and date window (5pm NY cut), then upserts each execution into the [wakett].[Fill] table.";
+            op.RequestBody = new OpenApiRequestBody
+            {
+                Required = true,
+                Content = new Dictionary<string, OpenApiMediaType>
+                {
+                    ["application/json"] = new OpenApiMediaType
+                    {
+                        Schema = new OpenApiSchema
+                        {
+                            Reference = new OpenApiReference
+                            {
+                                Type = ReferenceType.Schema,
+                                Id = nameof(FetchWakettFillsRequest)
+                            }
+                        }
+                    }
+                }
+            };
+            op.Responses[StatusCodes.Status200OK.ToString()] = new OpenApiResponse
+            {
+                Description = "Summary of the Wakett executions that were written to the wakett.Fill table.",
+                Content = new Dictionary<string, OpenApiMediaType>
+                {
+                    ["application/json"] = new OpenApiMediaType
+                    {
+                        Schema = new OpenApiSchema
+                        {
+                            Reference = new OpenApiReference
+                            {
+                                Type = ReferenceType.Schema,
+                                Id = nameof(WakettFillUploadResponse)
+                            }
+                        }
+                    }
+                }
+            };
+
+            op.Responses[StatusCodes.Status400BadRequest.ToString()] = new OpenApiResponse
+            {
+                Description = "The request parameters were invalid or the Wakett API returned an error.",
+                Content = new Dictionary<string, OpenApiMediaType>
+                {
+                    ["application/problem+json"] = new OpenApiMediaType
+                    {
+                        Schema = new OpenApiSchema
+                        {
+                            Reference = new OpenApiReference
+                            {
+                                Type = ReferenceType.Schema,
+                                Id = nameof(ProblemDetails)
+                            }
+                        }
+                    }
+                }
+            };
+            return op;
+        });
     }
+
+    private static ProblemDetails CreateProblem(string title, string detail)
+        => new()
+        {
+            Title = title,
+            Detail = detail
+        };
 }
 
 public sealed record WakettOrderSubmissionResponse(string Status);
