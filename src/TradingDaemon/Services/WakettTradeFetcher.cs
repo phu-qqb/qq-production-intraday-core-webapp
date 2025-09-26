@@ -270,7 +270,7 @@ OUTPUT $action;";
         {
             Account = normalized.Account,
             From = normalized.FromString,
-            To = normalized.ToString,
+            To = normalized.ToAString,
             Strategy = normalized.Strategy
         };
 
@@ -302,7 +302,7 @@ OUTPUT $action;";
             return new WakettFillUploadResponse(
                 normalized.Account,
                 normalized.FromString,
-                normalized.ToString,
+                normalized.ToAString,
                 normalized.Strategy,
                 response.Status,
                 response.Message,
@@ -369,12 +369,12 @@ OUTPUT $action;";
             inserted,
             updated,
             normalized.FromString,
-            normalized.ToString);
+            normalized.ToAString);
 
         return new WakettFillUploadResponse(
             normalized.Account,
             normalized.FromString,
-            normalized.ToString,
+            normalized.ToAString,
             normalized.Strategy,
             response.Status,
             response.Message,
@@ -415,7 +415,7 @@ OUTPUT $action;";
             executeId,
             normalized.Account,
             normalized.FromString,
-            normalized.ToString,
+            normalized.ToAString,
             normalized.Strategy,
             TrimOrNull(trade.PortfolioId),
             TrimOrNull(trade.Portfolio),
@@ -560,7 +560,7 @@ OUTPUT $action;";
         DateOnly From,
         DateOnly To,
         string FromString,
-        string ToString,
+        string ToAString,
         string? Strategy);
 }
 
