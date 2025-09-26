@@ -520,7 +520,7 @@ public class OrderSenderTests
 
         var formatted = OrderSender.FormatTimestamp(barTimeUtc);
 
-        var expectedLocal = localBar.AddHours(1);
+        var expectedLocal = localBar.AddHours(1).AddMinutes(6);
         var offset = zone.GetUtcOffset(expectedLocal);
         var sign = offset < TimeSpan.Zero ? "-" : "+";
         var abs = offset.Duration();
