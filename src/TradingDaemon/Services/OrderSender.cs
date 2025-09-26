@@ -3,6 +3,8 @@ using System.Data;
 using System.Globalization;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text.Json;
+using System.Text.Json.Serialization;
 using Dapper;
 using Microsoft.Extensions.Configuration;
 using TradingDaemon.Data;
@@ -35,6 +37,11 @@ public class OrderSender
     };
 
     private const int TargetModelId = 1;
+
+    private static readonly JsonSerializerOptions OrderTradeJsonOptions = new(JsonSerializerDefaults.Web)
+    {
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    };
 
     private readonly WakettApiClient _wakettApiClient;
     private readonly DapperContext _context;
@@ -85,6 +92,7 @@ public class OrderSender
             session,
             schedule?.Offset,
             schedule?.BarSize);
+        var orderCode = BuildOrderCode(TargetModelId, orderTimestampUtc);
 
         var symbolMap = await LoadSymbolMapAsync(connection, cancellationToken);
         if (symbolMap.Count == 0)
@@ -100,7 +108,7 @@ public class OrderSender
             return;
         }
 
-        var orders = BuildOrders(latestWeights, symbolMap, allowedSymbols);
+        var orders = BuildOrders(latestWeights, symbolMap, allowedSymbols, orderCode);
         if (orders.Count == 0)
         {
             _logger.LogInformation("No non-zero weights available for Wakett order submission.");
@@ -114,28 +122,178 @@ public class OrderSender
             orders = orders
         };
 
+        var submissionTimeUtc = _timeProvider.GetUtcNow().UtcDateTime;
         var response = await _wakettApiClient.SendOrdersAsync(request);
+        var receivedAtUtc = _timeProvider.GetUtcNow().UtcDateTime;
 
         if (response?.Orders is { Count: > 0 })
         {
             foreach (var item in response.Orders)
             {
-                if (item.error is not null)
+                if (item.Error is not null)
                 {
                     _logger.LogError(
-                        "Wakett rejected order for {Symbol}: {Code} {Message}.",
-                        item.symbol,
-                        item.error.Code,
-                        item.error.Message);
+                        "Wakett rejected order {OrderCode} for {Symbol}: {Code} {Message}.",
+                        string.IsNullOrWhiteSpace(item.Code) ? orderCode : item.Code,
+                        item.Symbol,
+                        item.Error.Code,
+                        item.Error.Message);
                 }
                 else
                 {
                     _logger.LogInformation(
-                        "Wakett accepted order for {Symbol} with side {Side}.",
-                        item.symbol,
-                        item.side);
+                        "Wakett accepted order {OrderCode} for {Symbol} with side {Side} and {TradeCount} trade(s).",
+                        string.IsNullOrWhiteSpace(item.Code) ? orderCode : item.Code,
+                        item.Symbol,
+                        item.Side,
+                        item.Trades?.Count ?? 0);
                 }
             }
+        }
+        else if (response is null)
+        {
+            _logger.LogWarning("Wakett order submission returned no response body.");
+        }
+
+        await PersistOrderResponseAsync(
+            connection,
+            request,
+            response,
+            orderCode,
+            orderTimestampUtc,
+            submissionTimeUtc,
+            receivedAtUtc,
+            cancellationToken);
+    }
+
+    internal static string BuildOrderCode(int modelId, DateTime orderTimestampUtc)
+    {
+        var utc = DateTime.SpecifyKind(orderTimestampUtc, DateTimeKind.Utc);
+        var local = TimeZoneInfo.ConvertTimeFromUtc(utc, NewYorkZone);
+        return $"QQB-{modelId:000}-{local:yyyyMMddHHmm}";
+    }
+
+    private async Task PersistOrderResponseAsync(
+        IDbConnection connection,
+        WakettOrderRequest request,
+        WakettOrderResponse? response,
+        string defaultOrderCode,
+        DateTime orderTimestampUtc,
+        DateTime submissionTimeUtc,
+        DateTime receivedAtUtc,
+        CancellationToken cancellationToken)
+    {
+        if (response is not { Orders.Count: > 0 })
+        {
+            return;
+        }
+
+        try
+        {
+            var scheduledTimestamp = TryParseResponseTimestamp(response.Timestamp, out var parsedTimestamp)
+                ? parsedTimestamp
+                : new DateTimeOffset(DateTime.SpecifyKind(orderTimestampUtc, DateTimeKind.Utc));
+
+            var submittedUtc = DateTime.SpecifyKind(submissionTimeUtc, DateTimeKind.Utc);
+            var receivedUtc = DateTime.SpecifyKind(receivedAtUtc, DateTimeKind.Utc);
+            var aumValue = request.aum.HasValue ? (decimal?)request.aum.Value : null;
+
+            var requestLookup = new Dictionary<string, WakettOrderItem>(StringComparer.OrdinalIgnoreCase);
+            foreach (var order in request.orders)
+            {
+                if (string.IsNullOrWhiteSpace(order.symbol))
+                {
+                    continue;
+                }
+
+                var key = order.symbol.Trim().ToUpperInvariant();
+                requestLookup[key] = order;
+            }
+
+            const string insertSql = @"INSERT INTO [Intraday].[model].[WakettOrder]
+(
+    ModelId,
+    OrderCode,
+    ScheduledTimestamp,
+    SubmittedAtUtc,
+    ReceivedAtUtc,
+    Symbol,
+    Side,
+    SizeValue,
+    Aum,
+    ErrorCode,
+    ErrorMessage,
+    TradesJson
+)
+VALUES
+(
+    @ModelId,
+    @OrderCode,
+    @ScheduledTimestamp,
+    @SubmittedAtUtc,
+    @ReceivedAtUtc,
+    @Symbol,
+    @Side,
+    @SizeValue,
+    @Aum,
+    @ErrorCode,
+    @ErrorMessage,
+    @TradesJson
+);";
+
+            foreach (var order in response.Orders)
+            {
+                var symbolKey = (order.Symbol ?? string.Empty).Trim().ToUpperInvariant();
+                requestLookup.TryGetValue(symbolKey, out var requestItem);
+
+                var symbol = !string.IsNullOrWhiteSpace(order.Symbol)
+                    ? order.Symbol.Trim().ToUpperInvariant()
+                    : requestItem?.symbol?.Trim().ToUpperInvariant();
+
+                if (string.IsNullOrWhiteSpace(symbol))
+                {
+                    continue;
+                }
+
+                var sideValue = !string.IsNullOrWhiteSpace(order.Side)
+                    ? order.Side.Trim().ToUpperInvariant()
+                    : requestItem?.side?.Trim().ToUpperInvariant() ?? string.Empty;
+
+                var sizeValue = order.Size.HasValue
+                    ? (decimal?)order.Size.Value
+                    : requestItem?.size is not null ? (decimal?)requestItem.size.value : null;
+
+                var tradesJson = order.Trades is { Count: > 0 }
+                    ? JsonSerializer.Serialize(order.Trades, OrderTradeJsonOptions)
+                    : null;
+
+                var parameters = new
+                {
+                    ModelId = TargetModelId,
+                    OrderCode = string.IsNullOrWhiteSpace(order.Code) ? defaultOrderCode : order.Code.Trim(),
+                    ScheduledTimestamp = scheduledTimestamp,
+                    SubmittedAtUtc = submittedUtc,
+                    ReceivedAtUtc = receivedUtc,
+                    Symbol = symbol,
+                    Side = sideValue,
+                    SizeValue = sizeValue,
+                    Aum = aumValue,
+                    ErrorCode = order.Error?.Code,
+                    ErrorMessage = order.Error?.Message,
+                    TradesJson = tradesJson
+                };
+
+                var definition = new CommandDefinition(insertSql, parameters, cancellationToken: cancellationToken);
+                await connection.ExecuteAsync(definition);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to persist Wakett order response results.");
         }
     }
 
@@ -156,6 +314,52 @@ public class OrderSender
         var abs = offset.Duration();
         var offsetString = $"{sign}{abs.Hours:00}{abs.Minutes:00}";
         return $"{local:yyyy-MM-dd HH:mm:ss.fff}{offsetString}";
+    }
+
+    private static bool TryParseResponseTimestamp(string? value, out DateTimeOffset parsedTimestamp)
+    {
+        parsedTimestamp = default;
+
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return false;
+        }
+
+        var normalized = NormalizeWakettTimestamp(value.Trim());
+        var formats = new[]
+        {
+            "yyyy-MM-dd HH:mm:ss.fffzzz",
+            "yyyy-MM-dd HH:mm:sszzz"
+        };
+
+        foreach (var format in formats)
+        {
+            if (DateTimeOffset.TryParseExact(
+                    normalized,
+                    format,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.None,
+                    out parsedTimestamp))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static string NormalizeWakettTimestamp(string value)
+    {
+        if (value.Length >= 5)
+        {
+            var signIndex = value.Length - 5;
+            if ((value[signIndex] == '+' || value[signIndex] == '-') && value[^3] != ':')
+            {
+                return value.Insert(value.Length - 2, ":");
+            }
+        }
+
+        return value;
     }
 
     internal static DateTime CalculateOrderTimestamp(
@@ -555,7 +759,8 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
     private static List<WakettOrderItem> BuildOrders(
         IEnumerable<TheoreticalWeightRow> weights,
         IReadOnlyDictionary<int, string> symbolMap,
-        ISet<string> allowedSymbols)
+        ISet<string> allowedSymbols,
+        string orderCode)
     {
         var parsedSymbols = symbolMap
             .Select(pair => SymbolInfo.TryCreate(pair.Key, pair.Value, out var info) ? info : null)
@@ -662,7 +867,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
             {
                 symbol = formatted,
                 side = side,
-                code = $"QQB-{order.SecurityId}",
+                code = orderCode,
                 size = new WakettOrderSize
                 {
                     type = "percentage",
