@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Linq;
 using System.Globalization;
 using System.Text;
+using System.Collections.Generic;
 using TradingDaemon.Models;
 
 namespace TradingDaemon.Services;
@@ -62,7 +63,24 @@ public class WakettApiClient
     public async Task<WakettTradeResponse?> GetTradesAsync(WakettTradeRequest request)
     {
         var client = _clientFactory.CreateClient("WakettApi");
-        var response = await client.PostAsJsonAsync("trades", request, _jsonOptions);
+
+        var queryParameters = new List<KeyValuePair<string, string>>
+        {
+            new(nameof(WakettTradeRequest.Account), request.Account),
+            new(nameof(WakettTradeRequest.From), request.From),
+            new(nameof(WakettTradeRequest.To), request.To)
+        };
+
+        if (!string.IsNullOrWhiteSpace(request.Strategy))
+        {
+            queryParameters.Add(new(nameof(WakettTradeRequest.Strategy), request.Strategy));
+        }
+
+        static string Escape(string value) => Uri.EscapeDataString(value);
+
+        var queryString = string.Join("&", queryParameters.Select(p => $"{Escape(p.Key)}={Escape(p.Value)}"));
+
+        var response = await client.GetAsync($"trades?{queryString}");
         response.EnsureSuccessStatusCode();
         var json = await response.Content.ReadAsStringAsync();
         return JsonSerializer.Deserialize<WakettTradeResponse>(json, _jsonOptions);
