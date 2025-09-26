@@ -113,7 +113,9 @@ public class WakettApiClientTests
             Times.Once(),
             ItExpr.Is<HttpRequestMessage>(m =>
                 m.Method == HttpMethod.Get
-                && m.RequestUri!.PathAndQuery == "/trades?account=ACC&from=20240101&to=20240101&strategy=QQB"
+
+                && m.RequestUri!.PathAndQuery == "/trades?Account=ACC&From=20240101&To=20240101&Strategy=QQB"
+
                 && m.Content == null),
             ItExpr.IsAny<CancellationToken>());
     }

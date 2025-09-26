@@ -66,14 +66,18 @@ public class WakettApiClient
 
         var queryParameters = new List<KeyValuePair<string, string>>
         {
-            new("account", request.Account),
-            new("from", request.From),
-            new("to", request.To)
+
+            new(nameof(WakettTradeRequest.Account), request.Account),
+            new(nameof(WakettTradeRequest.From), request.From),
+            new(nameof(WakettTradeRequest.To), request.To)
+
         };
 
         if (!string.IsNullOrWhiteSpace(request.Strategy))
         {
-            queryParameters.Add(new("strategy", request.Strategy));
+
+            queryParameters.Add(new(nameof(WakettTradeRequest.Strategy), request.Strategy));
+
         }
 
         static string Escape(string value) => Uri.EscapeDataString(value);
