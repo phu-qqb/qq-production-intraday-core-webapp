@@ -96,10 +96,12 @@ public class WakettApiClientTests
     }
 
     [Fact]
-    public async Task GetTradesAsync_GetsTradesEndpointWithQuery()
+    public async Task GetTradesAsync_PostsTradesEndpointWithBody()
     {
+        HttpRequestMessage? captured = null;
         var handler = new Mock<HttpMessageHandler>();
         handler.Protected().Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+            .Callback<HttpRequestMessage, CancellationToken>((m, _) => captured = m)
             .ReturnsAsync(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"status\":\"OK\",\"message\":\"\",\"data\":[]}") });
         var client = new HttpClient(handler.Object) { BaseAddress = new Uri("http://test") };
         var factory = Mock.Of<IHttpClientFactory>(f => f.CreateClient("WakettApi") == client);
@@ -112,11 +114,19 @@ public class WakettApiClientTests
             "SendAsync",
             Times.Once(),
             ItExpr.Is<HttpRequestMessage>(m =>
-                m.Method == HttpMethod.Get
-
-                && m.RequestUri!.PathAndQuery == "/trades?Account=ACC&From=20240101&To=20240101&Strategy=QQB"
-
-                && m.Content == null),
+                m.Method == HttpMethod.Post
+                && m.RequestUri!.PathAndQuery == "/trades"
+                && m.Content != null),
             ItExpr.IsAny<CancellationToken>());
+
+        var body = await captured!.Content!.ReadAsStringAsync();
+        Assert.Contains("\"account\":\"ACC\"", body);
+        Assert.Contains("\"from\":\"20240101\"", body);
+        Assert.Contains("\"to\":\"20240101\"", body);
+        Assert.Contains("\"strategy\":\"QQB\"", body);
+        Assert.DoesNotContain("\"Account\"", body);
+        Assert.DoesNotContain("\"From\"", body);
+        Assert.DoesNotContain("\"To\"", body);
+        Assert.DoesNotContain("\"Strategy\"", body);
     }
 }

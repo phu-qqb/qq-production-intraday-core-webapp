@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Net.Http.Json;
 using System.Linq;
 using System.Globalization;
@@ -16,6 +17,13 @@ public class WakettApiClient
     {
         PropertyNamingPolicy = LowerCaseNamingPolicy.Instance,
         DictionaryKeyPolicy = LowerCaseNamingPolicy.Instance
+    };
+
+    private static readonly JsonSerializerOptions TradeRequestJsonOptions = new()
+    {
+        PropertyNamingPolicy = LowerCaseNamingPolicy.Instance,
+        DictionaryKeyPolicy = LowerCaseNamingPolicy.Instance,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
 
     public WakettApiClient(IHttpClientFactory clientFactory)
@@ -64,27 +72,10 @@ public class WakettApiClient
     {
         var client = _clientFactory.CreateClient("WakettApi");
 
-        var queryParameters = new List<KeyValuePair<string, string>>
-        {
+        var jsonBody = JsonSerializer.Serialize(request, TradeRequestJsonOptions);
+        var content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
 
-            new(nameof(WakettTradeRequest.Account), request.Account),
-            new(nameof(WakettTradeRequest.From), request.From),
-            new(nameof(WakettTradeRequest.To), request.To)
-
-        };
-
-        if (!string.IsNullOrWhiteSpace(request.Strategy))
-        {
-
-            queryParameters.Add(new(nameof(WakettTradeRequest.Strategy), request.Strategy));
-
-        }
-
-        static string Escape(string value) => Uri.EscapeDataString(value);
-
-        var queryString = string.Join("&", queryParameters.Select(p => $"{Escape(p.Key)}={Escape(p.Value)}"));
-
-        var response = await client.GetAsync($"trades?{queryString}");
+        var response = await client.PostAsync("trades", content);
         response.EnsureSuccessStatusCode();
         var json = await response.Content.ReadAsStringAsync();
         return JsonSerializer.Deserialize<WakettTradeResponse>(json, _jsonOptions);
