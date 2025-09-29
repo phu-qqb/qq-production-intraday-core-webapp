@@ -69,7 +69,7 @@ public class WakettApiClientTests
             Aum = 1_000_000,
             Orders = new List<WakettOrderItem>
             {
-                new() { Symbol = "AAPL", Side = "BUY", Code = "QQB-1", Size = new WakettOrderSize{ Value = 100, Type = "absolute"} }
+                new() { Symbol = "AAPL", Side = "BUY", Code = "QQB-123-202401011200", Size = new WakettOrderSize{ Value = 100, Type = "absolute"} }
             }
         };
 
@@ -85,7 +85,7 @@ public class WakettApiClientTests
         Assert.Contains("\"orders\":[{", body);
         Assert.Contains("\"symbol\":\"AAPL\"", body);
         Assert.Contains("\"side\":\"BUY\"", body);
-        Assert.Contains("\"code\":\"QQB-1\"", body);
+        Assert.Contains("\"code\":\"QQB-123-202401011200\"", body);
         Assert.Contains("\"size\":{\"value\":100", body);
         Assert.Contains("\"type\":\"absolute\"", body);
         Assert.DoesNotContain("\"Symbol\"", body);
