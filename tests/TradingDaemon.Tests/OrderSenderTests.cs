@@ -94,14 +94,14 @@ public class OrderSenderTests
         var first = orders[0];
         Assert.Equal("EUR/USD", first.GetProperty("symbol").GetString());
         Assert.Equal("BUY", first.GetProperty("side").GetString());
-        Assert.Equal("QQB-58", first.GetProperty("code").GetString());
+        Assert.Equal(OrderSender.BuildOrderCode(58, expectedOrderTimestampUtc), first.GetProperty("code").GetString());
         Assert.Equal("percentage", first.GetProperty("size").GetProperty("type").GetString());
         Assert.Equal(0.1, first.GetProperty("size").GetProperty("value").GetDouble(), 6);
 
         var second = orders[1];
         Assert.Equal("USD/CHF", second.GetProperty("symbol").GetString());
         Assert.Equal("SELL", second.GetProperty("side").GetString());
-        Assert.Equal("QQB-136", second.GetProperty("code").GetString());
+        Assert.Equal(OrderSender.BuildOrderCode(136, expectedOrderTimestampUtc), second.GetProperty("code").GetString());
         Assert.Equal(0.05, second.GetProperty("size").GetProperty("value").GetDouble(), 6);
     }
 
@@ -229,24 +229,31 @@ public class OrderSenderTests
         using var document = JsonDocument.Parse(payload);
         var orders = document.RootElement.GetProperty("orders");
 
+        var expectedOrderTimestampUtc = OrderSender.CalculateOrderTimestamp(
+            barTimeUtc,
+            TimeSpan.FromMinutes(60),
+            "US",
+            60,
+            0);
+
         Assert.Equal(3, orders.GetArrayLength());
 
         var first = orders[0];
         Assert.Equal("USD/CAD", first.GetProperty("symbol").GetString());
         Assert.Equal("SELL", first.GetProperty("side").GetString());
-        Assert.Equal("QQB-64", first.GetProperty("code").GetString());
+        Assert.Equal(OrderSender.BuildOrderCode(64, expectedOrderTimestampUtc), first.GetProperty("code").GetString());
         Assert.Equal(0.1, first.GetProperty("size").GetProperty("value").GetDouble(), 6);
 
         var second = orders[1];
         Assert.Equal("EUR/USD", second.GetProperty("symbol").GetString());
         Assert.Equal("BUY", second.GetProperty("side").GetString());
-        Assert.Equal("QQB-66", second.GetProperty("code").GetString());
+        Assert.Equal(OrderSender.BuildOrderCode(66, expectedOrderTimestampUtc), second.GetProperty("code").GetString());
         Assert.Equal(0.2, second.GetProperty("size").GetProperty("value").GetDouble(), 6);
 
         var third = orders[2];
         Assert.Equal("USD/CHF", third.GetProperty("symbol").GetString());
         Assert.Equal("BUY", third.GetProperty("side").GetString());
-        Assert.Equal("QQB-136", third.GetProperty("code").GetString());
+        Assert.Equal(OrderSender.BuildOrderCode(136, expectedOrderTimestampUtc), third.GetProperty("code").GetString());
         Assert.Equal(0.2, third.GetProperty("size").GetProperty("value").GetDouble(), 6);
     }
 
@@ -309,12 +316,19 @@ public class OrderSenderTests
         using var document = JsonDocument.Parse(payload);
         var orders = document.RootElement.GetProperty("orders");
 
+        var expectedOrderTimestampUtc = OrderSender.CalculateOrderTimestamp(
+            barTimeUtc,
+            TimeSpan.FromMinutes(60),
+            "US",
+            60,
+            0);
+
         Assert.Equal(1, orders.GetArrayLength());
 
         var first = orders[0];
         Assert.Equal("USD/CHF", first.GetProperty("symbol").GetString());
         Assert.Equal("SELL", first.GetProperty("side").GetString());
-        Assert.Equal("QQB-200", first.GetProperty("code").GetString());
+        Assert.Equal(OrderSender.BuildOrderCode(200, expectedOrderTimestampUtc), first.GetProperty("code").GetString());
         Assert.Equal(0.2, first.GetProperty("size").GetProperty("value").GetDouble(), 6);
     }
 
