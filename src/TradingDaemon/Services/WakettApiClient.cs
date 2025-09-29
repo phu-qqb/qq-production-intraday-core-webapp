@@ -75,6 +75,14 @@ public class WakettApiClient
         var jsonBody = JsonSerializer.Serialize(request, TradeRequestJsonOptions);
         var content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
 
+
+        var requestUri = client.BaseAddress != null
+            ? new Uri(client.BaseAddress, "trades")
+            : new Uri("trades", UriKind.Relative);
+
+        System.Console.WriteLine($"Posting Wakett trades request to {requestUri}");
+
+
         var response = await client.PostAsync("trades", content);
         response.EnsureSuccessStatusCode();
         var json = await response.Content.ReadAsStringAsync();
