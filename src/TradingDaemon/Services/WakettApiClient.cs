@@ -70,7 +70,7 @@ public class WakettApiClient
 
     public async Task<WakettTradeResponse?> GetTradesAsync(WakettTradeRequest request)
     {
-        var client = _clientFactory.CreateClient("WakettApi");
+        var client = _clientFactory.CreateClient("WakettTradeApi");
 
         var jsonBody = JsonSerializer.Serialize(request, TradeRequestJsonOptions);
         var content = new StringContent(jsonBody, Encoding.UTF8, "application/json");

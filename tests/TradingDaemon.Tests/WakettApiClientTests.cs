@@ -17,8 +17,10 @@ public class WakettApiClientTests
             .Callback<HttpRequestMessage, CancellationToken>((m, _) => captured = m)
             .ReturnsAsync(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"ts\":\"\",\"prices\":[]}") });
         var client = new HttpClient(handler.Object) { BaseAddress = new Uri("http://test") };
-        var factory = Mock.Of<IHttpClientFactory>(f => f.CreateClient("WakettApi") == client);
-        var api = new WakettApiClient(factory);
+        var factory = new Mock<IHttpClientFactory>();
+        factory.Setup(f => f.CreateClient("WakettApi")).Returns(client);
+        factory.Setup(f => f.CreateClient("WakettTradeApi")).Returns(client);
+        var api = new WakettApiClient(factory.Object);
 
         await api.GetPricesAsync(new[] { new WakettSecuritySymbol { SecurityId = 1, Symbol = "AAPL" } });
 
@@ -42,8 +44,10 @@ public class WakettApiClientTests
             .Callback<HttpRequestMessage, CancellationToken>((m, _) => captured = m)
             .ReturnsAsync(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"ts\":\"\",\"prices\":[]}") });
         var client = new HttpClient(handler.Object) { BaseAddress = new Uri("http://test") };
-        var factory = Mock.Of<IHttpClientFactory>(f => f.CreateClient("WakettApi") == client);
-        var api = new WakettApiClient(factory);
+        var factory = new Mock<IHttpClientFactory>();
+        factory.Setup(f => f.CreateClient("WakettApi")).Returns(client);
+        factory.Setup(f => f.CreateClient("WakettTradeApi")).Returns(client);
+        var api = new WakettApiClient(factory.Object);
 
         var ts = new DateTimeOffset(2024, 1, 1, 12, 6, 0, TimeSpan.FromHours(1));
         await api.GetPricesAsync(new[] { new WakettSecuritySymbol { SecurityId = 1, Symbol = "AAPL" } }, ts);
@@ -61,8 +65,10 @@ public class WakettApiClientTests
             .Callback<HttpRequestMessage, CancellationToken>((m, _) => captured = m)
             .ReturnsAsync(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"ts\":\"\",\"orders\":[]}") });
         var client = new HttpClient(handler.Object) { BaseAddress = new Uri("http://test") };
-        var factory = Mock.Of<IHttpClientFactory>(f => f.CreateClient("WakettApi") == client);
-        var api = new WakettApiClient(factory);
+        var factory = new Mock<IHttpClientFactory>();
+        factory.Setup(f => f.CreateClient("WakettApi")).Returns(client);
+        factory.Setup(f => f.CreateClient("WakettTradeApi")).Returns(client);
+        var api = new WakettApiClient(factory.Object);
 
         var request = new WakettOrderRequest
         {
@@ -104,8 +110,10 @@ public class WakettApiClientTests
             .Callback<HttpRequestMessage, CancellationToken>((m, _) => captured = m)
             .ReturnsAsync(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"status\":\"OK\",\"message\":\"\",\"data\":[]}") });
         var client = new HttpClient(handler.Object) { BaseAddress = new Uri("http://test") };
-        var factory = Mock.Of<IHttpClientFactory>(f => f.CreateClient("WakettApi") == client);
-        var api = new WakettApiClient(factory);
+        var factory = new Mock<IHttpClientFactory>();
+        factory.Setup(f => f.CreateClient("WakettApi")).Returns(client);
+        factory.Setup(f => f.CreateClient("WakettTradeApi")).Returns(client);
+        var api = new WakettApiClient(factory.Object);
 
         var request = new WakettTradeRequest { Account = "ACC", From = "20240101", To = "20240101", Strategy = "QQB" };
         await api.GetTradesAsync(request);
