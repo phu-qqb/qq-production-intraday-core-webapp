@@ -263,14 +263,14 @@ OUTPUT $action;";
             "Requesting Wakett fills for account {Account} from {From} to {To} (strategy: {Strategy}).",
             normalized.Account,
             normalized.FromString,
-            normalized.ToString,
+            normalized.ToStringValue,
             normalized.Strategy ?? "<all>");
 
         var tradeRequest = new WakettTradeRequest
         {
             Account = normalized.Account,
             From = normalized.FromString,
-            To = normalized.ToAString,
+            To = normalized.ToStringValue,
             Strategy = normalized.Strategy
         };
 
@@ -297,12 +297,12 @@ OUTPUT $action;";
                 "The Wakett trading API returned no executions for account {Account} between {From} and {To}.",
                 normalized.Account,
                 normalized.FromString,
-                normalized.ToString);
+                normalized.ToStringValue);
 
             return new WakettFillUploadResponse(
                 normalized.Account,
                 normalized.FromString,
-                normalized.ToAString,
+                normalized.ToStringValue,
                 normalized.Strategy,
                 response.Status,
                 response.Message,
@@ -369,12 +369,12 @@ OUTPUT $action;";
             inserted,
             updated,
             normalized.FromString,
-            normalized.ToAString);
+            normalized.ToStringValue);
 
         return new WakettFillUploadResponse(
             normalized.Account,
             normalized.FromString,
-            normalized.ToAString,
+            normalized.ToStringValue,
             normalized.Strategy,
             response.Status,
             response.Message,
@@ -415,7 +415,7 @@ OUTPUT $action;";
             executeId,
             normalized.Account,
             normalized.FromString,
-            normalized.ToAString,
+            normalized.ToStringValue,
             normalized.Strategy,
             TrimOrNull(trade.PortfolioId),
             TrimOrNull(trade.Portfolio),
@@ -560,7 +560,7 @@ OUTPUT $action;";
         DateOnly From,
         DateOnly To,
         string FromString,
-        string ToAString,
+        string ToStringValue,
         string? Strategy);
 }
 
