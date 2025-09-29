@@ -441,21 +441,15 @@ public class WakettPriceFetcher
             return Array.Empty<DateTime>();
 
         var nowUtc = DateTime.UtcNow;
-        var endHourUtc = new DateTime(
-            nowUtc.Year,
-            nowUtc.Month,
-            nowUtc.Day,
-            nowUtc.Hour,
-            0,
-            0,
-            DateTimeKind.Utc);
-        var startHourUtc = endHourUtc.AddHours(-23);
-
-        var expectedTimestamps = new List<DateTime>(capacity: 24);
-        for (var i = 0; i < 24; i++)
+        var normalizedNowUtc = NormalizeToHourUtc(nowUtc);
+        var expectedTimestamps = BuildExpectedBarHours(normalizedNowUtc, 24);
+        if (expectedTimestamps.Count == 0)
         {
-            expectedTimestamps.Add(startHourUtc.AddHours(i));
+            return Array.Empty<DateTime>();
         }
+
+        var startHourUtc = expectedTimestamps[0];
+        var endHourUtc = expectedTimestamps[^1];
 
         const string sql = @"SELECT SecurityId, BarTimeUtc FROM [Intraday].[mkt].[PriceBar] WHERE TimeframeMinute = 60 AND SecurityId IN @SecurityIds AND BarTimeUtc BETWEEN @StartUtc AND @EndUtc";
 
@@ -506,6 +500,49 @@ public class WakettPriceFetcher
 
         return missing;
     }
+
+    internal static IReadOnlyList<DateTime> BuildExpectedBarHours(DateTime endHourUtc, int count)
+    {
+        if (count <= 0)
+        {
+            return Array.Empty<DateTime>();
+        }
+
+        var normalizedEnd = NormalizeToHourUtc(endHourUtc);
+        var result = new List<DateTime>(count);
+
+        var current = normalizedEnd;
+        while (result.Count < count)
+        {
+            if (!IsWeekend(current))
+            {
+                result.Add(current);
+            }
+
+            current = current.AddHours(-1);
+        }
+
+        result.Reverse();
+        return result;
+    }
+
+    private static DateTime NormalizeToHourUtc(DateTime value)
+    {
+        var utc = value.Kind == DateTimeKind.Utc
+            ? value
+            : DateTime.SpecifyKind(value, DateTimeKind.Utc);
+
+        return new DateTime(
+            utc.Year,
+            utc.Month,
+            utc.Day,
+            utc.Hour,
+            0,
+            0,
+            DateTimeKind.Utc);
+    }
+
+    private static bool IsWeekend(DateTime value) => value.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday;
 
     private async Task<Dictionary<int, CurrencyPair>> LoadSecurityPairsAsync(
         IEnumerable<int> securityIds,
