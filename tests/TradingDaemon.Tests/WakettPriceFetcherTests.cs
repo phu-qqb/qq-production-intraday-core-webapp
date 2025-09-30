@@ -142,18 +142,18 @@ public class WakettPriceFetcherTests
     [Fact]
     public void DetermineTimestampUtc_FallsBackToRequest()
     {
-        var requestTs = new DateTimeOffset(2024, 3, 1, 12, 0, 0, TimeSpan.Zero);
+        var requestTs = new DateTimeOffset(2024, 3, 1, 12, 6, 0, TimeSpan.Zero);
         var fallback = new DateTime(2024, 3, 1, 10, 0, 0, DateTimeKind.Utc);
 
         var result = WakettPriceFetcher.DetermineTimestampUtc(null, requestTs, fallback);
 
-        Assert.Equal(new DateTime(2024, 3, 1, 12, 0, 0, DateTimeKind.Utc), result);
+        Assert.Equal(new DateTime(2024, 3, 1, 12, 6, 0, DateTimeKind.Utc), result);
     }
 
     [Fact]
     public void DetermineTimestampUtc_UsesFallbackWhenNoTimestamp()
     {
-        var fallback = new DateTime(2024, 3, 1, 10, 0, 0, DateTimeKind.Utc);
+        var fallback = new DateTime(2024, 3, 1, 12, 6, 0, DateTimeKind.Utc);
 
         var result = WakettPriceFetcher.DetermineTimestampUtc("not-a-date", null, fallback);
 

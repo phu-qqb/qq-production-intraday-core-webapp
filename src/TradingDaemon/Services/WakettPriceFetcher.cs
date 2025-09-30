@@ -56,7 +56,9 @@ public class WakettPriceFetcher
 
         foreach (var barTimeUtc in missingBars.OrderBy(t => t))
         {
-            var requestTimestamp = new DateTimeOffset(barTimeUtc, TimeSpan.Zero).AddMinutes(6);
+            var baseTimestamp = new DateTimeOffset(barTimeUtc, TimeSpan.Zero);
+            var requestTimestamp = baseTimestamp.AddMinutes(8);
+            var expectedBarTimestamp = baseTimestamp.AddMinutes(6);
             _logger.LogInformation(
                 "Requesting Wakett prices for timestamp {TimestampUtc}.",
                 requestTimestamp.UtcDateTime);
@@ -71,7 +73,10 @@ public class WakettPriceFetcher
                 continue;
             }
 
-            var timestampUtc = DetermineTimestampUtc(response?.Ts, requestTimestamp, barTimeUtc);
+            var timestampUtc = DetermineTimestampUtc(
+                response?.Ts,
+                expectedBarTimestamp,
+                expectedBarTimestamp.UtcDateTime);
             _logger.LogInformation("Using timestamp {TimestampUtc} for Wakett price upload.", timestampUtc);
 
             var uploadItems = new Dictionary<int, WakettPriceUploadItem>();
