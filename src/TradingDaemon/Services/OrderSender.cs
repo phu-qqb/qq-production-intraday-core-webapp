@@ -113,12 +113,40 @@ public class OrderSender
             return;
         }
 
+        var aum = aumOverride ?? ResolveAum();
+
+        var tradingLimits = await LoadTradingLimitsAsync(connection, cancellationToken);
+        if (tradingLimits is not null)
+        {
+            var breaches = EvaluateTradingLimitBreaches(tradingLimits, builtOrders, aum);
+            if (breaches.Count > 0)
+            {
+                foreach (var breach in breaches)
+                {
+                    _logger.LogWarning(
+                        "Trading limit {LimitType} breached: observed {ObservedValue} vs limit {LimitValue}. {Details}",
+                        breach.LimitType,
+                        breach.ObservedValue,
+                        breach.LimitValue,
+                        breach.Message);
+                }
+
+                await LogTradingLimitBreachesAsync(
+                    connection,
+                    breaches,
+                    builtOrders,
+                    aum,
+                    cancellationToken);
+                return;
+            }
+        }
+
         var orders = builtOrders.Select(order => order.Order).ToList();
 
         var request = new WakettOrderRequest
         {
             ts = FormatTimestamp(orderTimestampUtc),
-            aum = aumOverride ?? ResolveAum(),
+            aum = aum,
             orders = orders
         };
 
@@ -307,6 +335,85 @@ VALUES
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to persist Wakett order response results.");
+        }
+    }
+
+    protected virtual async Task LogTradingLimitBreachesAsync(
+        IDbConnection connection,
+        IReadOnlyList<TradingLimitBreachResult> breaches,
+        IReadOnlyList<(int SecurityId, WakettOrderItem Order)> orders,
+        double? aum,
+        CancellationToken cancellationToken)
+    {
+        if (breaches.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var orderSnapshots = orders
+                .Select(order => new TradingLimitOrderSnapshot(
+                    order.SecurityId,
+                    order.Order.symbol ?? string.Empty,
+                    order.Order.side ?? string.Empty,
+                    order.Order.size?.type ?? string.Empty,
+                    order.Order.size?.value ?? 0d))
+                .ToList();
+
+            var ordersJson = orderSnapshots.Count > 0
+                ? JsonSerializer.Serialize(orderSnapshots, OrderTradeJsonOptions)
+                : null;
+
+            var aumValue = aum.HasValue ? (decimal?)aum.Value : null;
+
+            const string insertSql = @"INSERT INTO [wakett].[TradingLimitBreachReport]
+(
+    ModelId,
+    LimitType,
+    LimitValue,
+    ObservedValue,
+    Details,
+    OrdersJson,
+    Aum
+)
+VALUES
+(
+    @ModelId,
+    @LimitType,
+    @LimitValue,
+    @ObservedValue,
+    @Details,
+    @OrdersJson,
+    @Aum
+);";
+
+            foreach (var breach in breaches)
+            {
+                var definition = new CommandDefinition(
+                    insertSql,
+                    new
+                    {
+                        ModelId = TargetModelId,
+                        breach.LimitType,
+                        breach.LimitValue,
+                        breach.ObservedValue,
+                        Details = breach.Message,
+                        OrdersJson = ordersJson,
+                        Aum = aumValue
+                    },
+                    cancellationToken: cancellationToken);
+
+                await connection.ExecuteAsync(definition);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to log trading limit breach report.");
         }
     }
 
@@ -685,6 +792,31 @@ ORDER BY ModelId";
         return row;
     }
 
+    protected virtual async Task<TradingLimitRow?> LoadTradingLimitsAsync(
+        IDbConnection connection,
+        CancellationToken cancellationToken)
+    {
+        const string sql = @"SELECT TOP (1)
+    TradingLimitId,
+    ModelId,
+    SingleTradeGrossLimit,
+    PortfolioGrossLimit,
+    PortfolioNetLimit,
+    SingleTradeTurnoverLimit,
+    TotalTurnoverLimit
+FROM [wakett].[TradingLimit]
+WHERE ModelId = @ModelId
+ORDER BY TradingLimitId DESC;";
+
+        var definition = new CommandDefinition(
+            sql,
+            new { ModelId = TargetModelId },
+            cancellationToken: cancellationToken);
+
+        var row = await connection.QueryFirstOrDefaultAsync<TradingLimitRow>(definition);
+        return row;
+    }
+
     private bool IsBarRecentEnough(DateTime barTimeUtc, DateTime utcNow)
     {
         var zone = CentralEuropeZone;
@@ -900,6 +1032,180 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         return result;
     }
 
+    private static IReadOnlyList<TradingLimitBreachResult> EvaluateTradingLimitBreaches(
+        TradingLimitRow limits,
+        IReadOnlyList<(int SecurityId, WakettOrderItem Order)> builtOrders,
+        double? aum)
+    {
+        if (builtOrders.Count == 0)
+        {
+            return Array.Empty<TradingLimitBreachResult>();
+        }
+
+        var metrics = new List<TradingOrderMetric>();
+
+        foreach (var entry in builtOrders)
+        {
+            if (entry.Order.size is null)
+            {
+                continue;
+            }
+
+            var symbol = entry.Order.symbol?.Trim() ?? string.Empty;
+            var side = entry.Order.side?.Trim() ?? string.Empty;
+            var signedSize = (decimal)entry.Order.size.value;
+
+            if (string.Equals(side, "SELL", StringComparison.OrdinalIgnoreCase))
+            {
+                signedSize = -signedSize;
+            }
+
+            metrics.Add(new TradingOrderMetric(entry.SecurityId, symbol, side, signedSize));
+        }
+
+        if (metrics.Count == 0)
+        {
+            return Array.Empty<TradingLimitBreachResult>();
+        }
+
+        var breaches = new List<TradingLimitBreachResult>();
+        var aumDecimal = aum.HasValue ? (decimal?)aum.Value : null;
+
+        decimal ComputeTurnover(decimal size) => aumDecimal.HasValue ? size * aumDecimal.Value : size;
+
+        TradingOrderMetric FindLargest(Func<TradingOrderMetric, decimal> selector)
+        {
+            var candidate = metrics[0];
+            var candidateValue = selector(candidate);
+
+            for (var i = 1; i < metrics.Count; i++)
+            {
+                var metric = metrics[i];
+                var value = selector(metric);
+                if (value > candidateValue)
+                {
+                    candidate = metric;
+                    candidateValue = value;
+                }
+            }
+
+            return candidate;
+        }
+
+        if (limits.SingleTradeGrossLimit is decimal singleGrossLimit)
+        {
+            var worst = FindLargest(metric => metric.AbsoluteSize);
+            var observed = worst.AbsoluteSize;
+            if (observed > singleGrossLimit)
+            {
+                var message = string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Order for {0} exceeds single trade gross limit ({1} > {2}).",
+                    worst.Symbol,
+                    observed,
+                    singleGrossLimit);
+                breaches.Add(new TradingLimitBreachResult(
+                    "SingleTradeGrossLimit",
+                    singleGrossLimit,
+                    observed,
+                    message));
+            }
+        }
+
+        if (limits.PortfolioGrossLimit is decimal portfolioGrossLimit)
+        {
+            var observed = metrics.Sum(metric => metric.AbsoluteSize);
+            if (observed > portfolioGrossLimit)
+            {
+                var message = string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Total gross exposure {0} exceeds portfolio gross limit {1}.",
+                    observed,
+                    portfolioGrossLimit);
+                breaches.Add(new TradingLimitBreachResult(
+                    "PortfolioGrossLimit",
+                    portfolioGrossLimit,
+                    observed,
+                    message));
+            }
+        }
+
+        if (limits.PortfolioNetLimit is decimal portfolioNetLimit)
+        {
+            var observed = Math.Abs(metrics.Sum(metric => metric.SignedSize));
+            if (observed > portfolioNetLimit)
+            {
+                var message = string.Format(
+                    CultureInfo.InvariantCulture,
+                    "Net exposure {0} exceeds portfolio net limit {1}.",
+                    observed,
+                    portfolioNetLimit);
+                breaches.Add(new TradingLimitBreachResult(
+                    "PortfolioNetLimit",
+                    portfolioNetLimit,
+                    observed,
+                    message));
+            }
+        }
+
+        if (limits.SingleTradeTurnoverLimit is decimal singleTradeTurnoverLimit)
+        {
+            var worstTurnover = FindLargest(metric => ComputeTurnover(metric.AbsoluteSize));
+            var observed = ComputeTurnover(worstTurnover.AbsoluteSize);
+            if (observed > singleTradeTurnoverLimit)
+            {
+                var message = aumDecimal.HasValue
+                    ? string.Format(
+                        CultureInfo.InvariantCulture,
+                        "Order for {0} exceeds single trade turnover limit ({1} > {2}) using AUM {3}.",
+                        worstTurnover.Symbol,
+                        observed,
+                        singleTradeTurnoverLimit,
+                        aumDecimal.Value)
+                    : string.Format(
+                        CultureInfo.InvariantCulture,
+                        "Order for {0} exceeds single trade turnover limit ({1} > {2}).",
+                        worstTurnover.Symbol,
+                        observed,
+                        singleTradeTurnoverLimit);
+
+                breaches.Add(new TradingLimitBreachResult(
+                    "SingleTradeTurnoverLimit",
+                    singleTradeTurnoverLimit,
+                    observed,
+                    message));
+            }
+        }
+
+        if (limits.TotalTurnoverLimit is decimal totalTurnoverLimit)
+        {
+            var observed = metrics.Sum(metric => ComputeTurnover(metric.AbsoluteSize));
+            if (observed > totalTurnoverLimit)
+            {
+                var message = aumDecimal.HasValue
+                    ? string.Format(
+                        CultureInfo.InvariantCulture,
+                        "Total turnover {0} exceeds limit {1} using AUM {2}.",
+                        observed,
+                        totalTurnoverLimit,
+                        aumDecimal.Value)
+                    : string.Format(
+                        CultureInfo.InvariantCulture,
+                        "Total turnover {0} exceeds limit {1}.",
+                        observed,
+                        totalTurnoverLimit);
+
+                breaches.Add(new TradingLimitBreachResult(
+                    "TotalTurnoverLimit",
+                    totalTurnoverLimit,
+                    observed,
+                    message));
+            }
+        }
+
+        return breaches;
+    }
+
     private static string? ResolveOrderCode(
         string? responseCode,
         string? responseSymbol,
@@ -1017,6 +1323,32 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
     private static TimeZoneInfo CentralEuropeZone => TimeZoneInfo.FindSystemTimeZoneById(
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Central European Standard Time" : "Europe/Berlin");
+
+    private sealed record TradingLimitOrderSnapshot(int SecurityId, string Symbol, string Side, string SizeType, double SizeValue);
+
+    private readonly record struct TradingOrderMetric(int SecurityId, string Symbol, string Side, decimal SignedSize)
+    {
+        public decimal AbsoluteSize => Math.Abs(SignedSize);
+    }
+
+    protected sealed record TradingLimitBreachResult(string LimitType, decimal LimitValue, decimal ObservedValue, string Message);
+
+    protected sealed record TradingLimitRow
+    {
+        public int TradingLimitId { get; init; }
+
+        public int ModelId { get; init; }
+
+        public decimal? SingleTradeGrossLimit { get; init; }
+
+        public decimal? PortfolioGrossLimit { get; init; }
+
+        public decimal? PortfolioNetLimit { get; init; }
+
+        public decimal? SingleTradeTurnoverLimit { get; init; }
+
+        public decimal? TotalTurnoverLimit { get; init; }
+    }
 
     protected sealed record TheoreticalWeightRow
     {
