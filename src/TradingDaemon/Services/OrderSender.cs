@@ -1111,7 +1111,32 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         var breaches = new List<TradingLimitBreachResult>();
         var aumDecimal = aum.HasValue ? (decimal?)aum.Value : null;
 
-        decimal ComputeTurnover(decimal size) => aumDecimal.HasValue ? size * aumDecimal.Value : size;
+        string FormatTurnoverMessage(
+            string prefix,
+            decimal observedWeight,
+            decimal limitWeight,
+            decimal? aumValue)
+        {
+            if (aumValue.HasValue)
+            {
+                var notional = observedWeight * aumValue.Value;
+                return string.Format(
+                    CultureInfo.InvariantCulture,
+                    "{0} ({1} > {2}). Equivalent notional {3} using AUM {4}.",
+                    prefix,
+                    observedWeight,
+                    limitWeight,
+                    notional,
+                    aumValue.Value);
+            }
+
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "{0} ({1} > {2}).",
+                prefix,
+                observedWeight,
+                limitWeight);
+        }
 
         TradingOrderMetric FindLargest(Func<TradingOrderMetric, decimal> selector)
         {
@@ -1190,55 +1215,42 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
         if (limits.SingleTradeTurnoverLimit is decimal singleTradeTurnoverLimit)
         {
-            var worstTurnover = FindLargest(metric => ComputeTurnover(metric.AbsoluteSize));
-            var observed = ComputeTurnover(worstTurnover.AbsoluteSize);
-            if (observed > singleTradeTurnoverLimit)
+            var worstTurnover = FindLargest(metric => metric.AbsoluteSize);
+            var observedWeight = worstTurnover.AbsoluteSize;
+            if (observedWeight > singleTradeTurnoverLimit)
             {
-                var message = aumDecimal.HasValue
-                    ? string.Format(
+                var message = FormatTurnoverMessage(
+                    string.Format(
                         CultureInfo.InvariantCulture,
-                        "Order for {0} exceeds single trade turnover limit ({1} > {2}) using AUM {3}.",
-                        worstTurnover.Symbol,
-                        observed,
-                        singleTradeTurnoverLimit,
-                        aumDecimal.Value)
-                    : string.Format(
-                        CultureInfo.InvariantCulture,
-                        "Order for {0} exceeds single trade turnover limit ({1} > {2}).",
-                        worstTurnover.Symbol,
-                        observed,
-                        singleTradeTurnoverLimit);
+                        "Order for {0} exceeds single trade turnover weight limit",
+                        worstTurnover.Symbol),
+                    observedWeight,
+                    singleTradeTurnoverLimit,
+                    aumDecimal);
 
                 breaches.Add(new TradingLimitBreachResult(
                     "SingleTradeTurnoverLimit",
                     singleTradeTurnoverLimit,
-                    observed,
+                    observedWeight,
                     message));
             }
         }
 
         if (limits.TotalTurnoverLimit is decimal totalTurnoverLimit)
         {
-            var observed = metrics.Sum(metric => ComputeTurnover(metric.AbsoluteSize));
-            if (observed > totalTurnoverLimit)
+            var observedWeight = metrics.Sum(metric => metric.AbsoluteSize);
+            if (observedWeight > totalTurnoverLimit)
             {
-                var message = aumDecimal.HasValue
-                    ? string.Format(
-                        CultureInfo.InvariantCulture,
-                        "Total turnover {0} exceeds limit {1} using AUM {2}.",
-                        observed,
-                        totalTurnoverLimit,
-                        aumDecimal.Value)
-                    : string.Format(
-                        CultureInfo.InvariantCulture,
-                        "Total turnover {0} exceeds limit {1}.",
-                        observed,
-                        totalTurnoverLimit);
+                var message = FormatTurnoverMessage(
+                    "Total turnover weight exceeds limit",
+                    observedWeight,
+                    totalTurnoverLimit,
+                    aumDecimal);
 
                 breaches.Add(new TradingLimitBreachResult(
                     "TotalTurnoverLimit",
                     totalTurnoverLimit,
-                    observed,
+                    observedWeight,
                     message));
             }
         }
