@@ -24,6 +24,11 @@ public class WakettPriceFetcher
     private readonly IConfiguration _config;
     private readonly ILogger<WakettPriceFetcher> _logger;
 
+    private int PriceMinuteOffset => Math.Clamp(
+        _config.GetValue<int?>("ExternalApis:WakettApi:PriceMinuteOffset") ?? 6,
+        0,
+        59);
+
     public WakettPriceFetcher(
         WakettApiClient client,
         DapperContext context,
@@ -58,8 +63,9 @@ public class WakettPriceFetcher
         {
 
             var baseTimestamp = new DateTimeOffset(barTimeUtc, TimeSpan.Zero);
-            var requestTimestamp = baseTimestamp.AddMinutes(6);
-            var expectedBarTimestamp = baseTimestamp.AddMinutes(6);
+            var minuteOffset = PriceMinuteOffset;
+            var requestTimestamp = baseTimestamp.AddMinutes(minuteOffset);
+            var expectedBarTimestamp = baseTimestamp.AddMinutes(minuteOffset);
 
             _logger.LogInformation(
                 "Requesting Wakett prices for timestamp {TimestampUtc}.",
@@ -673,7 +679,8 @@ public class WakettPriceFetcher
             foreach (var grp in existing.GroupBy(r => r.SecurityId))
             {
                 var ordered = grp.OrderBy(r => r.BarTimeUtc).ToList();
-                var rawEu = RawNMin(ordered, 60, "EU", 0);
+                var minuteOffset = PriceMinuteOffset;
+                var rawEu = RawNMin(ordered, 60, "EU", minuteOffset);
                 var flatEu = Flatten(rawEu, SessionBounds["EU"].Zone)
                     .Select(r => new FlatPrice
                     {
@@ -684,7 +691,7 @@ public class WakettPriceFetcher
                     });
                 flatRecords.AddRange(flatEu);
 
-                var rawUs = RawNMin(ordered, 60, "US", 0);
+                var rawUs = RawNMin(ordered, 60, "US", minuteOffset);
                 var flatUs = Flatten(rawUs, SessionBounds["US"].Zone)
                     .Select(r => new FlatPrice
                     {
