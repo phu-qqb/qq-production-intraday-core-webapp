@@ -9,6 +9,7 @@ using Microsoft.Extensions.Logging;
 using Moq;
 using Moq.Protected;
 using TradingDaemon.Data;
+using TradingDaemon.Models;
 using TradingDaemon.Services;
 using Xunit;
 
@@ -103,6 +104,66 @@ public class OrderSenderTests
         Assert.Equal("SELL", second.GetProperty("side").GetString());
         Assert.Equal(OrderSender.BuildOrderCode(136, expectedOrderTimestampUtc), second.GetProperty("code").GetString());
         Assert.Equal(0.05, second.GetProperty("size").GetProperty("value").GetDouble(), 6);
+    }
+
+    [Fact]
+    public async Task SendOrdersAsync_DoesNotSendWhenTradingLimitBreached()
+    {
+        var handler = new Mock<HttpMessageHandler>(MockBehavior.Strict);
+        var client = new HttpClient(handler.Object) { BaseAddress = new Uri("http://wakett") };
+        var factory = Mock.Of<IHttpClientFactory>(f => f.CreateClient("WakettApi") == client);
+        var apiClient = new WakettApiClient(factory);
+
+        var now = new DateTimeOffset(2024, 1, 2, 16, 30, 0, TimeSpan.Zero);
+        var barTimeUtc = now.AddMinutes(-60).UtcDateTime;
+        var weights = new List<OrderSender.TheoreticalWeightRow>
+        {
+            new() { SecurityId = 58, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 10, Weight = 0.15m },
+            new() { SecurityId = 61, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 10, Weight = -0.05m }
+        };
+
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["ExternalApis:WakettApi:Aum"] = "2500000"
+        });
+
+        var symbolMap = new Dictionary<int, string>
+        {
+            [58] = "EURUSD",
+            [61] = "EURCHF",
+            [136] = "USDCHF"
+        };
+
+        var context = new Mock<DapperContext>(configuration);
+        context.Setup(c => c.CreateConnection()).Returns(Mock.Of<IDbConnection>());
+
+        var logger = Mock.Of<ILogger<OrderSender>>();
+        var timeProvider = new TestTimeProvider(now);
+
+        var tradingLimit = TestOrderSender.CreateTradingLimit(singleTradeGross: 0.05m);
+
+        var sender = new TestOrderSender(
+            apiClient,
+            context.Object,
+            logger,
+            configuration,
+            timeProvider,
+            weights,
+            symbolMap,
+            new OrderSender.ModelScheduleRow { Offset = 60, BarSize = 0 },
+            tradingLimit);
+
+        await sender.SendOrdersAsync();
+
+        handler.Protected().Verify(
+            "SendAsync",
+            Times.Never(),
+            ItExpr.IsAny<HttpRequestMessage>(),
+            ItExpr.IsAny<CancellationToken>());
+
+        Assert.Single(sender.LoggedBreaches);
+        var breach = sender.LoggedBreaches[0];
+        Assert.Equal("SingleTradeGrossLimit", breach.LimitType);
     }
 
     [Fact]
@@ -579,6 +640,8 @@ public class OrderSenderTests
         private readonly IReadOnlyList<TheoreticalWeightRow> _weights;
         private readonly IReadOnlyDictionary<int, string> _symbolMap;
         private readonly ModelScheduleRow? _schedule;
+        private readonly TradingLimitRow? _tradingLimit;
+        private readonly List<TradingLimitBreachResult> _loggedBreaches = new();
 
         public TestOrderSender(
             WakettApiClient client,
@@ -588,13 +651,33 @@ public class OrderSenderTests
             TimeProvider timeProvider,
             IReadOnlyList<TheoreticalWeightRow> weights,
             IReadOnlyDictionary<int, string> symbolMap,
-            ModelScheduleRow? schedule)
+            ModelScheduleRow? schedule,
+            TradingLimitRow? tradingLimit = null)
             : base(client, context, logger, configuration, timeProvider)
         {
             _weights = weights;
             _symbolMap = symbolMap;
             _schedule = schedule;
+            _tradingLimit = tradingLimit;
         }
+
+        public IReadOnlyList<TradingLimitBreachResult> LoggedBreaches => _loggedBreaches;
+
+        public static TradingLimitRow CreateTradingLimit(
+            decimal? singleTradeGross = null,
+            decimal? portfolioGross = null,
+            decimal? portfolioNet = null,
+            decimal? singleTradeTurnover = null,
+            decimal? totalTurnover = null)
+            => new()
+            {
+                ModelId = 1,
+                SingleTradeGrossLimit = singleTradeGross,
+                PortfolioGrossLimit = portfolioGross,
+                PortfolioNetLimit = portfolioNet,
+                SingleTradeTurnoverLimit = singleTradeTurnover,
+                TotalTurnoverLimit = totalTurnover
+            };
 
         protected override Task<IReadOnlyList<TheoreticalWeightRow>> LoadLatestWeightsAsync(
             IDbConnection connection,
@@ -610,6 +693,22 @@ public class OrderSenderTests
             IDbConnection connection,
             CancellationToken cancellationToken)
             => Task.FromResult(_schedule);
+
+        protected override Task<TradingLimitRow?> LoadTradingLimitsAsync(
+            IDbConnection connection,
+            CancellationToken cancellationToken)
+            => Task.FromResult(_tradingLimit);
+
+        protected override Task LogTradingLimitBreachesAsync(
+            IDbConnection connection,
+            IReadOnlyList<TradingLimitBreachResult> breaches,
+            IReadOnlyList<(int SecurityId, WakettOrderItem Order)> orders,
+            double? aum,
+            CancellationToken cancellationToken)
+        {
+            _loggedBreaches.AddRange(breaches);
+            return Task.CompletedTask;
+        }
     }
 
     private sealed class TestTimeProvider : TimeProvider
