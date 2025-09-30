@@ -6,11 +6,10 @@ namespace TradingDaemon.Services;
 
 internal static class PriceProcessingProcedures
 {
-    private const string LoadRawFromStageSql =
-        "EXEC mkt.LoadRawFromStage @TimeframeMinute = @TimeframeMinute";
 
-    private const string LoadFlatFromMinimalSql =
-        "EXEC mkt.LoadFlatFromMinimal @TimeframeMinute = @TimeframeMinute";
+    private const string LoadRawFromStageProc = "mkt.LoadRawFromStage";
+    private const string LoadFlatFromMinimalProc = "mkt.LoadFlatFromMinimal";
+
 
     public static Task LoadRawFromStageAsync(
         IDbConnection connection,
@@ -18,9 +17,11 @@ internal static class PriceProcessingProcedures
         CancellationToken cancellationToken = default)
     {
         var command = new CommandDefinition(
-            LoadRawFromStageSql,
+
+            LoadRawFromStageProc,
             new { TimeframeMinute = timeframeMinute },
-            commandType: CommandType.Text,
+            commandType: CommandType.StoredProcedure,
+
             cancellationToken: cancellationToken);
 
         return connection.ExecuteAsync(command);
@@ -32,9 +33,11 @@ internal static class PriceProcessingProcedures
         CancellationToken cancellationToken = default)
     {
         var command = new CommandDefinition(
-            LoadFlatFromMinimalSql,
+
+            LoadFlatFromMinimalProc,
             new { TimeframeMinute = timeframeMinute },
-            commandType: CommandType.Text,
+            commandType: CommandType.StoredProcedure,
+
             cancellationToken: cancellationToken);
 
         return connection.ExecuteAsync(command);
