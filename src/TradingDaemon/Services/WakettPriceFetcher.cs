@@ -23,7 +23,6 @@ public class WakettPriceFetcher
     private readonly DapperContext _context;
     private readonly IConfiguration _config;
     private readonly ILogger<WakettPriceFetcher> _logger;
-
     private int PriceMinuteOffset => Math.Clamp(
         _config.GetValue<int?>("ExternalApis:WakettApi:PriceMinuteOffset") ?? 6,
         0,
@@ -59,6 +58,8 @@ public class WakettPriceFetcher
         var securityPairs = await LoadSecurityPairsAsync(allSecurityIds, cancellationToken);
         WakettPriceUploadResult? lastResult = null;
 
+        var nowUtc = DateTimeOffset.UtcNow;
+
         foreach (var barTimeUtc in missingBars.OrderBy(t => t))
         {
 
@@ -66,6 +67,14 @@ public class WakettPriceFetcher
             var minuteOffset = PriceMinuteOffset;
             var requestTimestamp = baseTimestamp.AddMinutes(minuteOffset);
             var expectedBarTimestamp = baseTimestamp.AddMinutes(minuteOffset);
+
+            if (requestTimestamp > nowUtc)
+            {
+                _logger.LogInformation(
+                    "Skipping Wakett price request for timestamp {TimestampUtc} because it is ahead of the allowed window.",
+                    requestTimestamp.UtcDateTime);
+                continue;
+            }
 
             _logger.LogInformation(
                 "Requesting Wakett prices for timestamp {TimestampUtc}.",
