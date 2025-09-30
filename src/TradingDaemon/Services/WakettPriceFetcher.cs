@@ -167,6 +167,11 @@ public class WakettPriceFetcher
         _logger.LogWarning(
             "Detected {Count} missing Wakett price bar(s) within the last 24 trading hours.",
             missingBars.Count);
+        _logger.LogWarning(
+            "Missing bar timestamps (UTC): {BarTimes}",
+            string.Join(", ", missingBars
+                .OrderBy(t => t)
+                .Select(t => t.ToString("yyyy-MM-dd HH:mm"))));
         return false;
     }
 
