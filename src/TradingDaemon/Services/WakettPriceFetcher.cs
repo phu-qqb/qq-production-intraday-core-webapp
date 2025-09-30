@@ -685,9 +685,10 @@ public class WakettPriceFetcher
         {
             await PriceProcessingProcedures.LoadRawFromStageAsync(connection, 60, cancellationToken);
 
-            const string selectRaw =
-                "SELECT SecurityId, BarTimeUtc, [Close] FROM [Intraday].[mkt].[PriceBar] WHERE TimeframeMinute = 60 AND SecurityId IN @SecurityIds";
-            var existing = (await connection.QueryAsync<HistClose>(selectRaw, new { SecurityIds = securityKeys }))
+            var minuteOffset = PriceMinuteOffset;
+            var selectRaw =
+                "SELECT SecurityId, BarTimeUtc, [Close] FROM [Intraday].[mkt].[PriceBar] WHERE TimeframeMinute = 60 AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset";
+            var existing = (await connection.QueryAsync<HistClose>(selectRaw, new { SecurityIds = securityKeys, MinuteOffset = minuteOffset }))
                 .GroupBy(r => (r.SecurityId, r.BarTimeUtc))
                 .Select(g => g.Last())
                 .ToList();
@@ -696,7 +697,6 @@ public class WakettPriceFetcher
             foreach (var grp in existing.GroupBy(r => r.SecurityId))
             {
                 var ordered = grp.OrderBy(r => r.BarTimeUtc).ToList();
-                var minuteOffset = PriceMinuteOffset;
                 var rawEu = RawNMin(ordered, 60, "EU", minuteOffset);
                 var flatEu = Flatten(rawEu, SessionBounds["EU"].Zone)
                     .Select(r => new FlatPrice
