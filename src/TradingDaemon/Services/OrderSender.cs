@@ -3,6 +3,7 @@ using System.Data;
 using System.Globalization;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Dapper;
@@ -406,6 +407,8 @@ VALUES
 
                 await connection.ExecuteAsync(definition);
             }
+
+            ShowBreachWarning(breaches);
         }
         catch (OperationCanceledException)
         {
@@ -414,6 +417,43 @@ VALUES
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to log trading limit breach report.");
+        }
+    }
+
+    private void ShowBreachWarning(IReadOnlyList<TradingLimitBreachResult> breaches)
+    {
+        if (!OperatingSystem.IsWindows() || breaches.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var builder = new StringBuilder();
+            builder.AppendLine("Trading limit breach detected. Orders were not sent.");
+
+            foreach (var breach in breaches)
+            {
+                builder.Append("• ");
+                builder.Append(breach.LimitType);
+                builder.Append(": observed ");
+                builder.Append(breach.ObservedValue.ToString("0.######", CultureInfo.InvariantCulture));
+                builder.Append(" vs limit ");
+                builder.AppendLine(breach.LimitValue.ToString("0.######", CultureInfo.InvariantCulture));
+                if (!string.IsNullOrWhiteSpace(breach.Message))
+                {
+                    builder.AppendLine(breach.Message);
+                }
+            }
+
+            var message = builder.ToString();
+            var type = Type.GetType("System.Windows.Forms.MessageBox, System.Windows.Forms");
+            type?.GetMethod("Show", new[] { typeof(string), typeof(string) })?
+                .Invoke(null, new object[] { message, "Trading Limit Breach" });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to display trading limit breach warning.");
         }
     }
 
