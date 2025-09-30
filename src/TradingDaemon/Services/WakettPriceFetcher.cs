@@ -56,7 +56,7 @@ public class WakettPriceFetcher
 
         foreach (var barTimeUtc in missingBars.OrderBy(t => t))
         {
-            var requestTimestamp = new DateTimeOffset(barTimeUtc, TimeSpan.Zero).AddMinutes(6);
+            var requestTimestamp = new DateTimeOffset(barTimeUtc, TimeSpan.Zero).AddMinutes(8);
             _logger.LogInformation(
                 "Requesting Wakett prices for timestamp {TimestampUtc}.",
                 requestTimestamp.UtcDateTime);
@@ -263,32 +263,15 @@ public class WakettPriceFetcher
                 DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
                 out var parsed))
         {
-            return AdjustTimestampForDebugging(parsed.UtcDateTime);
+            return parsed.UtcDateTime;
         }
 
         if (requestedTimestamp.HasValue)
         {
-            return AdjustTimestampForDebugging(requestedTimestamp.Value.UtcDateTime);
+            return requestedTimestamp.Value.UtcDateTime;
         }
 
-        return AdjustTimestampForDebugging(fallbackUtc);
-    }
-
-    private static DateTime AdjustTimestampForDebugging(DateTime timestampUtc)
-    {
-        if (timestampUtc.Minute == 6)
-        {
-            return new DateTime(
-                timestampUtc.Year,
-                timestampUtc.Month,
-                timestampUtc.Day,
-                timestampUtc.Hour,
-                0,
-                0,
-                DateTimeKind.Utc);
-        }
-
-        return timestampUtc;
+        return fallbackUtc;
     }
 
     internal static string NormalizeSymbol(string symbol)
