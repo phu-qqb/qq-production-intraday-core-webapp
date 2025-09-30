@@ -58,7 +58,7 @@ public class WakettPriceFetcher
         {
 
             var baseTimestamp = new DateTimeOffset(barTimeUtc, TimeSpan.Zero);
-            var requestTimestamp = baseTimestamp.AddMinutes(8);
+            var requestTimestamp = baseTimestamp.AddMinutes(6);
             var expectedBarTimestamp = baseTimestamp.AddMinutes(6);
 
             _logger.LogInformation(
