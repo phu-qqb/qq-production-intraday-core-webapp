@@ -2,6 +2,7 @@ using System;
 using System.Globalization;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -22,6 +23,7 @@ public sealed class WakettAutomationService : BackgroundService
     private readonly ILogger<WakettAutomationService> _logger;
     private readonly WakettAutomationOptions _options;
     private readonly TimeProvider _timeProvider;
+    private readonly IConfiguration _configuration;
 
     public WakettAutomationService(
         WakettPriceFetcher priceFetcher,
@@ -31,6 +33,7 @@ public sealed class WakettAutomationService : BackgroundService
         IHostApplicationLifetime applicationLifetime,
         IOptions<WakettAutomationOptions> options,
         ILogger<WakettAutomationService> logger,
+        IConfiguration configuration,
         TimeProvider? timeProvider = null)
     {
         _priceFetcher = priceFetcher;
@@ -40,6 +43,7 @@ public sealed class WakettAutomationService : BackgroundService
         _applicationLifetime = applicationLifetime;
         _logger = logger;
         _options = options?.Value ?? new WakettAutomationOptions();
+        _configuration = configuration;
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
@@ -158,12 +162,31 @@ public sealed class WakettAutomationService : BackgroundService
 
         try
         {
-            await _orderSender.SendOrdersAsync(cancellationToken: stoppingToken);
+            await _orderSender.SendOrdersAsync(ResolveAutomationAum(), stoppingToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogError(ex, "Wakett order submission failed.");
         }
+    }
+
+    private double? ResolveAutomationAum()
+    {
+        var configured = Environment.GetEnvironmentVariable("WAKETT_AUM")
+            ?? _configuration["ExternalApis:WakettApi:Aum"];
+
+        if (string.IsNullOrWhiteSpace(configured))
+        {
+            return null;
+        }
+
+        if (double.TryParse(configured, NumberStyles.Any, CultureInfo.InvariantCulture, out var parsed))
+        {
+            return parsed;
+        }
+
+        _logger.LogWarning("Unable to parse Wakett AUM value '{Value}'.", configured);
+        return null;
     }
 
     private async Task RunFillCheckAsync(CancellationToken stoppingToken)
