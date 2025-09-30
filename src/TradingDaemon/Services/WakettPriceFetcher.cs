@@ -39,24 +39,10 @@ public class WakettPriceFetcher
     public async Task<WakettPriceUploadResult?> FetchAndStoreAsync(
         CancellationToken cancellationToken = default)
     {
-        var baseSymbols = _config
-            .GetSection("ExternalApis:WakettApi:Symbols")
-            .Get<List<WakettSecuritySymbol>>() ?? new();
-        if (baseSymbols.Count == 0)
+        if (!TryLoadConfiguredSymbols(out var baseSymbols, out var missingSymbols, out var allSecurityIds))
         {
-            _logger.LogWarning("No Wakett symbols configured. Aborting price fetch.");
             return null;
         }
-
-        var missingSymbols = _config
-            .GetSection("ExternalApis:WakettApi:MissingSymbols")
-            .Get<List<WakettSecuritySymbol>>() ?? new();
-
-        var allSecurityIds = baseSymbols
-            .Concat(missingSymbols)
-            .Select(s => s.SecurityId)
-            .Distinct()
-            .ToArray();
 
         var missingBars = await FindMissingBarTimestampsAsync(allSecurityIds, cancellationToken);
         if (missingBars.Count == 0)
@@ -155,6 +141,26 @@ public class WakettPriceFetcher
         }
 
         return lastResult;
+    }
+
+    public async Task<bool> AreRecentPricesCompleteAsync(CancellationToken cancellationToken = default)
+    {
+        if (!TryLoadConfiguredSymbols(out _, out _, out var securityIds))
+        {
+            return false;
+        }
+
+        var missingBars = await FindMissingBarTimestampsAsync(securityIds, cancellationToken);
+        if (missingBars.Count == 0)
+        {
+            _logger.LogInformation("All Wakett prices are present for the last 24 trading hours.");
+            return true;
+        }
+
+        _logger.LogWarning(
+            "Detected {Count} missing Wakett price bar(s) within the last 24 trading hours.",
+            missingBars.Count);
+        return false;
     }
 
     internal static IReadOnlyList<ComputedRate> BuildComputedRates(
@@ -431,6 +437,36 @@ public class WakettPriceFetcher
             graph[pair.Quote] = inverse;
         }
         inverse[pair.Base] = 1m / rate;
+    }
+
+    private bool TryLoadConfiguredSymbols(
+        out IReadOnlyList<WakettSecuritySymbol> baseSymbols,
+        out IReadOnlyList<WakettSecuritySymbol> missingSymbols,
+        out int[] allSecurityIds)
+    {
+        baseSymbols = _config
+            .GetSection("ExternalApis:WakettApi:Symbols")
+            .Get<List<WakettSecuritySymbol>>() ?? new();
+
+        if (baseSymbols.Count == 0)
+        {
+            _logger.LogWarning("No Wakett symbols configured. Aborting Wakett price processing.");
+            missingSymbols = Array.Empty<WakettSecuritySymbol>();
+            allSecurityIds = Array.Empty<int>();
+            return false;
+        }
+
+        missingSymbols = _config
+            .GetSection("ExternalApis:WakettApi:MissingSymbols")
+            .Get<List<WakettSecuritySymbol>>() ?? new();
+
+        allSecurityIds = baseSymbols
+            .Concat(missingSymbols)
+            .Select(s => s.SecurityId)
+            .Distinct()
+            .ToArray();
+
+        return true;
     }
 
     private async Task<IReadOnlyList<DateTime>> FindMissingBarTimestampsAsync(

@@ -3,6 +3,7 @@ using TradingDaemon.Controllers;
 using TradingDaemon.Data;
 using TradingDaemon.Logging;
 using TradingDaemon.Services;
+using TradingDaemon.Models;
 using TradingDaemon.Utils;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -48,6 +49,9 @@ builder.Services.AddTransient<ReportRunner>();
 builder.Services.AddTransient<WakettApiClient>();
 builder.Services.AddTransient<WakettPriceFetcher>();
 builder.Services.AddTransient<WakettTradeFetcher>();
+
+builder.Services.Configure<WakettAutomationOptions>(builder.Configuration.GetSection("Automation:Wakett"));
+builder.Services.AddHostedService<WakettAutomationService>();
 
 
 builder.Services.AddEndpointsApiExplorer();
