@@ -660,7 +660,7 @@ public class WakettPriceFetcher
 
         if (recordList.Count > 0)
         {
-            await connection.ExecuteAsync("EXEC mkt.LoadRawFromStage @TimeframeMinute = 60");
+            await PriceProcessingProcedures.LoadRawFromStageAsync(connection, 60, cancellationToken);
 
             const string selectRaw =
                 "SELECT SecurityId, BarTimeUtc, [Close] FROM [Intraday].[mkt].[PriceBar] WHERE TimeframeMinute = 60 AND SecurityId IN @SecurityIds";
@@ -723,7 +723,7 @@ public class WakettPriceFetcher
                 }
             }
 
-            await connection.ExecuteAsync("EXEC mkt.LoadFlatFromMinimal @TimeframeMinute = 60");
+            await PriceProcessingProcedures.LoadFlatFromMinimalAsync(connection, 60, cancellationToken);
         }
     }
 
