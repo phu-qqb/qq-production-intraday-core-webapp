@@ -56,9 +56,11 @@ public class WakettPriceFetcher
 
         foreach (var barTimeUtc in missingBars.OrderBy(t => t))
         {
+
             var baseTimestamp = new DateTimeOffset(barTimeUtc, TimeSpan.Zero);
             var requestTimestamp = baseTimestamp.AddMinutes(8);
             var expectedBarTimestamp = baseTimestamp.AddMinutes(6);
+
             _logger.LogInformation(
                 "Requesting Wakett prices for timestamp {TimestampUtc}.",
                 requestTimestamp.UtcDateTime);
