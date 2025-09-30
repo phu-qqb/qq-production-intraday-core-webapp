@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using Microsoft.Extensions.Logging;
@@ -157,5 +158,18 @@ public class WakettPriceFetcherTests
         var result = WakettPriceFetcher.DetermineTimestampUtc("not-a-date", null, fallback);
 
         Assert.Equal(fallback, result);
+    }
+
+    [Fact]
+    public void BuildExpectedBarHours_SkipsWeekendHours()
+    {
+        var endHour = new DateTime(2024, 3, 4, 12, 0, 0, DateTimeKind.Utc); // Monday
+
+        var hours = WakettPriceFetcher.BuildExpectedBarHours(endHour, 24);
+
+        Assert.Equal(24, hours.Count);
+        Assert.Equal(new DateTime(2024, 3, 1, 13, 0, 0, DateTimeKind.Utc), hours[0]);
+        Assert.Equal(endHour, hours[^1]);
+        Assert.DoesNotContain(hours, h => h.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday);
     }
 }

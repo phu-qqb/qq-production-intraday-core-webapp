@@ -1,8 +1,10 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Net.Http.Json;
 using System.Linq;
 using System.Globalization;
 using System.Text;
+using System.Collections.Generic;
 using TradingDaemon.Models;
 
 namespace TradingDaemon.Services;
@@ -15,6 +17,13 @@ public class WakettApiClient
     {
         PropertyNamingPolicy = LowerCaseNamingPolicy.Instance,
         DictionaryKeyPolicy = LowerCaseNamingPolicy.Instance
+    };
+
+    private static readonly JsonSerializerOptions TradeRequestJsonOptions = new()
+    {
+        PropertyNamingPolicy = LowerCaseNamingPolicy.Instance,
+        DictionaryKeyPolicy = LowerCaseNamingPolicy.Instance,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
 
     public WakettApiClient(IHttpClientFactory clientFactory)
@@ -61,8 +70,20 @@ public class WakettApiClient
 
     public async Task<WakettTradeResponse?> GetTradesAsync(WakettTradeRequest request)
     {
-        var client = _clientFactory.CreateClient("WakettApi");
-        var response = await client.PostAsJsonAsync("trades", request, _jsonOptions);
+        var client = _clientFactory.CreateClient("WakettTradeApi");
+
+        var jsonBody = JsonSerializer.Serialize(request, TradeRequestJsonOptions);
+        var content = new StringContent(jsonBody, Encoding.UTF8, "application/json");
+
+
+        var requestUri = client.BaseAddress != null
+            ? new Uri(client.BaseAddress, "trades")
+            : new Uri("trades", UriKind.Relative);
+
+        System.Console.WriteLine($"Posting Wakett trades request to {requestUri}");
+
+
+        var response = await client.PostAsync("trades", content);
         response.EnsureSuccessStatusCode();
         var json = await response.Content.ReadAsStringAsync();
         return JsonSerializer.Deserialize<WakettTradeResponse>(json, _jsonOptions);

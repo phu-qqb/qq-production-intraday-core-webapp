@@ -27,6 +27,18 @@ builder.Services.AddHttpClient("WakettApi", client =>
     client.BaseAddress = new Uri(builder.Configuration["ExternalApis:WakettApi:BaseUrl"] ?? "");
 }).AddPolicyHandler(RetryPolicyFactory.GetPolicy());
 
+builder.Services.AddHttpClient("WakettTradeApi", client =>
+{
+    var tradeBaseUrl = builder.Configuration["ExternalApis:WakettApi:TradeBaseUrl"]
+        ?? builder.Configuration["ExternalApis:WakettApi:BaseUrl"]
+        ?? string.Empty;
+
+    if (!string.IsNullOrWhiteSpace(tradeBaseUrl))
+    {
+        client.BaseAddress = new Uri(tradeBaseUrl);
+    }
+}).AddPolicyHandler(RetryPolicyFactory.GetPolicy());
+
 builder.Services.AddTransient<PriceFetcher>();
 builder.Services.AddTransient<WeightCalculator>();
 builder.Services.AddTransient<OrderSender>();
@@ -35,6 +47,7 @@ builder.Services.AddTransient<ReportRunner>();
 
 builder.Services.AddTransient<WakettApiClient>();
 builder.Services.AddTransient<WakettPriceFetcher>();
+builder.Services.AddTransient<WakettTradeFetcher>();
 
 
 builder.Services.AddEndpointsApiExplorer();
