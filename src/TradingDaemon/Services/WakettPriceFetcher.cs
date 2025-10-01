@@ -502,10 +502,13 @@ public class WakettPriceFetcher
             return Array.Empty<DateTime>();
         }
 
+        var minuteOffset = PriceMinuteOffset;
         var startHourUtc = expectedTimestamps[0];
         var endHourUtc = expectedTimestamps[^1];
+        var startUtc = startHourUtc.AddMinutes(minuteOffset);
+        var endUtc = endHourUtc.AddMinutes(minuteOffset);
 
-        const string sql = @"SELECT SecurityId, BarTimeUtc FROM [Intraday].[mkt].[PriceBar] WHERE TimeframeMinute = 60 AND SecurityId IN @SecurityIds AND BarTimeUtc BETWEEN @StartUtc AND @EndUtc";
+        const string sql = @"SELECT SecurityId, BarTimeUtc FROM [Intraday].[mkt].[PriceBar] WHERE TimeframeMinute = 60 AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset AND BarTimeUtc BETWEEN @StartUtc AND @EndUtc";
 
         using var connection = _context.CreateConnection();
         if (connection is DbConnection dbConnection)
@@ -518,8 +521,14 @@ public class WakettPriceFetcher
         }
 
         var rows = await connection.QueryAsync<(int SecurityId, DateTime BarTimeUtc)>(
-            sql,
-            new { SecurityIds = securityIds.ToArray(), StartUtc = startHourUtc, EndUtc = endHourUtc });
+        sql,
+        new
+        {
+            SecurityIds = securityIds.ToArray(),
+            StartUtc = startUtc,
+            EndUtc = endUtc,
+            MinuteOffset = minuteOffset
+        });
 
         var existing = new Dictionary<DateTime, HashSet<int>>();
         foreach (var row in rows)
