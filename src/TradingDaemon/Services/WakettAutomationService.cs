@@ -295,6 +295,7 @@ public sealed class WakettAutomationService : BackgroundService
     private DateTime GetNextFillCheckAfter(DateTime lastFillUtc)
     {
         var interval = Math.Max(1, _options.FillIntervalMinutes);
+
         var lastFillLocal = TimeZoneInfo.ConvertTimeFromUtc(lastFillUtc, NewYorkTimeZone);
 
         var baseMinute = lastFillLocal.Minute - (lastFillLocal.Minute % interval);
@@ -314,12 +315,14 @@ public sealed class WakettAutomationService : BackgroundService
         var candidateUtc = TimeZoneInfo.ConvertTimeToUtc(scheduledLocal, NewYorkTimeZone);
 
         if (!IsWithinSession(candidateUtc))
+
         {
             var nextSession = GetNextSessionStartUtc(lastFillUtc);
             return GetFirstFillCheckUtc(nextSession);
         }
 
         return candidateUtc;
+
     }
 
     private DateTime GetFirstFillCheckUtc(DateTime sessionStartUtc)

@@ -16,7 +16,9 @@ public sealed class WakettAutomationServiceTests
             OperatingSystem.IsWindows() ? "Eastern Standard Time" : "America/New_York");
 
     [Fact]
+
     public void GetNextFillCheckAfter_AlignsToIntervalBoundaries()
+
     {
         var service = CreateService();
         var method = typeof(WakettAutomationService).GetMethod(
@@ -29,6 +31,7 @@ public sealed class WakettAutomationServiceTests
         var nextFillUtc = (DateTime)method.Invoke(service, new object[] { lastFillUtc })!;
         var nextFillLocal = TimeZoneInfo.ConvertTimeFromUtc(nextFillUtc, NewYorkTimeZone);
 
+
         Assert.Equal(new DateTime(2024, 5, 1, 10, 10, 0), nextFillLocal);
 
         lastFillLocal = new DateTime(2024, 5, 1, 10, 10, 30);
@@ -38,6 +41,7 @@ public sealed class WakettAutomationServiceTests
         nextFillLocal = TimeZoneInfo.ConvertTimeFromUtc(nextFillUtc, NewYorkTimeZone);
 
         Assert.Equal(new DateTime(2024, 5, 1, 10, 20, 0), nextFillLocal);
+
     }
 
     [Fact]
