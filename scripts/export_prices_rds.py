@@ -23,10 +23,10 @@ OUT: dict[str, pathlib.Path]
 
 # Session boundaries defined in New York time (handles daylight saving)
 SESSION_HOURS_NY = {
-    "US": (time(9, 30), time(15, 59)),
-    "EU": (time(2, 0), time(8, 59)),
-    "EUUS": (time(2, 0), time(11, 59)),
-    "ALL": (time(2, 0), time(15, 59)),
+    "US": (time(9, 30), time(16, 5)),
+    "EU": (time(2, 0), time(9, 5)),
+    "EUUS": (time(2, 0), time(12, 5)),
+    "ALL": (time(2, 0), time(16, 5)),
 }
 
 
@@ -138,7 +138,8 @@ def read_price_bars(
     sql = (
         "SELECT BarTimeUtc AS timestamp, [Close] AS [close] "
         "FROM Intraday.mkt.PriceBar "
-        "WHERE SecurityId = :sid AND TimeframeMinute = :tf"
+        "WHERE SecurityId = :sid AND TimeframeMinute = :tf "
+        "AND DATEPART(MINUTE, BarTimeUtc) = 6"
     )
     if start:
         sql += " AND BarTimeUtc >= :start"
@@ -167,7 +168,8 @@ def read_flat_bars(
     sql = (
         "SELECT BarTimeUtc AS timestamp, [Close] AS [close] "
         "FROM Intraday.mkt.FlatBar "
-        "WHERE SecurityId = :sid AND TimeframeMinute = :tf"
+        "WHERE SecurityId = :sid AND TimeframeMinute = :tf "
+        "AND DATEPART(MINUTE, BarTimeUtc) = 6"
     )
     if start:
         sql += " AND BarTimeUtc >= :start"
