@@ -1,8 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Net.Http;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Moq;
+using TradingDaemon.Data;
 using TradingDaemon.Models;
 using TradingDaemon.Services;
 using Xunit;
@@ -171,5 +175,66 @@ public class WakettPriceFetcherTests
         Assert.Equal(new DateTime(2024, 3, 1, 13, 0, 0, DateTimeKind.Utc), hours[0]);
         Assert.Equal(endHour, hours[^1]);
         Assert.DoesNotContain(hours, h => h.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday);
+    }
+
+    [Fact]
+    public void PriceMinuteOffset_PrefersAutomationOptions()
+    {
+        var config = BuildConfiguration();
+        var options = Options.Create(new WakettAutomationOptions { WorkflowMinuteOffset = 8 });
+
+        var fetcher = CreateFetcher(config, options);
+        var offset = GetPriceMinuteOffset(fetcher);
+
+        Assert.Equal(8, offset);
+    }
+
+    [Fact]
+    public void PriceMinuteOffset_FallsBackToConfigurationWhenAutomationOptionsMissing()
+    {
+        var config = BuildConfiguration();
+
+        var fetcher = CreateFetcher(config, null);
+        var offset = GetPriceMinuteOffset(fetcher);
+
+        Assert.Equal(6, offset);
+    }
+
+    private static WakettPriceFetcher CreateFetcher(
+        IConfiguration config,
+        IOptions<WakettAutomationOptions>? automationOptions)
+    {
+        var httpClientFactory = Mock.Of<IHttpClientFactory>();
+        var apiClient = new WakettApiClient(httpClientFactory);
+        var context = new DapperContext(config);
+
+        return new WakettPriceFetcher(
+            apiClient,
+            context,
+            config,
+            Mock.Of<ILogger<WakettPriceFetcher>>(),
+            automationOptions);
+    }
+
+    private static IConfiguration BuildConfiguration()
+    {
+        var values = new Dictionary<string, string?>
+        {
+            ["ExternalApis:WakettApi:PriceMinuteOffset"] = "6",
+            ["ConnectionStrings:DefaultConnection"] = "Server=.;Database=Test;Trusted_Connection=True;"
+        };
+
+        return new ConfigurationBuilder()
+            .AddInMemoryCollection(values)
+            .Build();
+    }
+
+    private static int GetPriceMinuteOffset(WakettPriceFetcher fetcher)
+    {
+        var property = typeof(WakettPriceFetcher).GetProperty(
+            "PriceMinuteOffset",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+
+        return (int)property.GetValue(fetcher)!;
     }
 }

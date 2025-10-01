@@ -28,11 +28,23 @@ public class WakettPriceFetcher
     private readonly WakettAutomationOptions? _automationOptions;
 
 
-    private int PriceMinuteOffset => Math.Clamp(
-        _config.GetValue<int?>("ExternalApis:WakettApi:PriceMinuteOffset")
-            ?? 6,
-        0,
-        59);
+    private int PriceMinuteOffset
+    {
+        get
+        {
+            var automationOffset = _automationOptions?.WorkflowMinuteOffset;
+            if (automationOffset.HasValue)
+            {
+                return Math.Clamp(automationOffset.Value, 0, 59);
+            }
+
+            return Math.Clamp(
+                _config.GetValue<int?>("ExternalApis:WakettApi:PriceMinuteOffset")
+                    ?? 6,
+                0,
+                59);
+        }
+    }
 
     public WakettPriceFetcher(
         WakettApiClient client,
