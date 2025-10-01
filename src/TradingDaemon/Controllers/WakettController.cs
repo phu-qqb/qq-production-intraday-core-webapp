@@ -125,7 +125,7 @@ public static class WakettController
         .WithOpenApi(op =>
         {
             op.Summary = "Fetch Wakett executions and persist them as fills.";
-            op.Description = "Calls the Wakett /trades endpoint for the specified account and date window (5pm NY cut), then upserts each execution into the [wakett].[Fill] table.";
+            op.Description = "Calls the Wakett /trades endpoint for the specified account and date window (5pm NY cut), then upserts each execution into the [wakett].[Fill] table. Example request body: { \"account\": \"subacc4\", \"from\": \"20250101\", \"to\": \"20250101\" } (replace the dates with the current trading day).";
             op.RequestBody = new OpenApiRequestBody
             {
                 Required = true,

@@ -61,8 +61,14 @@ public sealed class WakettAutomationService : BackgroundService
         }
 
         var sessionActive = false;
-        var nextWorkflowUtc = GetNextWorkflowRunUtc(_timeProvider.GetUtcNow().UtcDateTime);
-        var nextFillUtc = GetNextFillCheckUtc(_timeProvider.GetUtcNow().UtcDateTime);
+        var initialReferenceUtc = _timeProvider.GetUtcNow().UtcDateTime;
+        var nextWorkflowUtc = GetNextWorkflowRunUtc(initialReferenceUtc);
+        var nextFillUtc = GetNextFillCheckUtc(initialReferenceUtc);
+
+        _logger.LogInformation(
+            "Initial Wakett automation schedule set: next workflow at {WorkflowUtc:o}, next fill check at {FillUtc:o}.",
+            nextWorkflowUtc,
+            nextFillUtc);
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -74,10 +80,17 @@ public sealed class WakettAutomationService : BackgroundService
                 if (!sessionActive)
                 {
                     sessionActive = true;
+                    _logger.LogInformation(
+                        "Entering Wakett session window at {NowUtc:o}; triggering immediate fill check.",
+                        nowUtc);
                     await RunFillCheckAsync(stoppingToken);
                     nextWorkflowUtc = GetNextWorkflowRunUtc(nowUtc);
                     var fillCompletedUtc = _timeProvider.GetUtcNow().UtcDateTime;
                     nextFillUtc = GetNextFillCheckAfter(fillCompletedUtc);
+                    _logger.LogInformation(
+                        "Next scheduled Wakett workflow at {WorkflowUtc:o}; next fill check at {FillUtc:o}.",
+                        nextWorkflowUtc,
+                        nextFillUtc);
                 }
 
                 if (nowUtc >= nextWorkflowUtc)
@@ -92,6 +105,9 @@ public sealed class WakettAutomationService : BackgroundService
                     }
 
                     nextWorkflowUtc = GetNextWorkflowRunUtc(_timeProvider.GetUtcNow().UtcDateTime.AddSeconds(1));
+                    _logger.LogDebug(
+                        "Rescheduled next Wakett workflow run for {WorkflowUtc:o}.",
+                        nextWorkflowUtc);
                 }
 
                 if (nowUtc >= nextFillUtc)
@@ -99,6 +115,9 @@ public sealed class WakettAutomationService : BackgroundService
                     await RunFillCheckAsync(stoppingToken);
                     var fillCompletedUtc = _timeProvider.GetUtcNow().UtcDateTime;
                     nextFillUtc = GetNextFillCheckAfter(fillCompletedUtc);
+                    _logger.LogInformation(
+                        "Next Wakett fill check scheduled for {FillUtc:o}.",
+                        nextFillUtc);
                 }
 
                 var nextEvent = nextWorkflowUtc < nextFillUtc ? nextWorkflowUtc : nextFillUtc;
@@ -117,6 +136,14 @@ public sealed class WakettAutomationService : BackgroundService
                 var nextSessionStart = GetNextSessionStartUtc(nowUtc);
                 nextWorkflowUtc = GetFirstWorkflowRunUtc(nextSessionStart);
                 nextFillUtc = GetFirstFillCheckUtc(nextSessionStart);
+                _logger.LogInformation(
+                    "Outside Wakett session window at {NowUtc:o}; next session starts at {SessionStartUtc:o}.",
+                    nowUtc,
+                    nextSessionStart);
+                _logger.LogInformation(
+                    "Next workflow scheduled for {WorkflowUtc:o} with fill check at {FillUtc:o} once the session begins.",
+                    nextWorkflowUtc,
+                    nextFillUtc);
                 await DelayUntilAsync(nextSessionStart, stoppingToken);
             }
         }
@@ -195,7 +222,8 @@ public sealed class WakettAutomationService : BackgroundService
     {
         if (string.IsNullOrWhiteSpace(_options.FillAccount))
         {
-            _logger.LogDebug("Skipping Wakett fill check because no account is configured.");
+            _logger.LogWarning(
+                "Skipping Wakett fill check because Automation:Wakett:FillAccount is not configured.");
             return;
         }
 
@@ -210,6 +238,13 @@ public sealed class WakettAutomationService : BackgroundService
             To = dateString,
             Strategy = _options.FillStrategy
         };
+
+        _logger.LogInformation(
+            "Requesting Wakett fills via automation for account {Account} covering {From} to {To} (strategy: {Strategy}).",
+            request.Account,
+            request.From,
+            request.To,
+            request.Strategy ?? "<all>");
 
         try
         {
