@@ -76,7 +76,8 @@ public sealed class WakettAutomationService : BackgroundService
                     sessionActive = true;
                     await RunFillCheckAsync(stoppingToken);
                     nextWorkflowUtc = GetNextWorkflowRunUtc(nowUtc);
-                    nextFillUtc = GetNextFillCheckUtc(_timeProvider.GetUtcNow().UtcDateTime.AddSeconds(1));
+                    var fillCompletedUtc = _timeProvider.GetUtcNow().UtcDateTime;
+                    nextFillUtc = GetNextFillCheckAfter(fillCompletedUtc);
                 }
 
                 if (nowUtc >= nextWorkflowUtc)
@@ -96,7 +97,8 @@ public sealed class WakettAutomationService : BackgroundService
                 if (nowUtc >= nextFillUtc)
                 {
                     await RunFillCheckAsync(stoppingToken);
-                    nextFillUtc = GetNextFillCheckUtc(_timeProvider.GetUtcNow().UtcDateTime.AddSeconds(1));
+                    var fillCompletedUtc = _timeProvider.GetUtcNow().UtcDateTime;
+                    nextFillUtc = GetNextFillCheckAfter(fillCompletedUtc);
                 }
 
                 var nextEvent = nextWorkflowUtc < nextFillUtc ? nextWorkflowUtc : nextFillUtc;
@@ -274,21 +276,7 @@ public sealed class WakettAutomationService : BackgroundService
             return GetFirstFillCheckUtc(nextSession);
         }
 
-        var interval = Math.Max(1, _options.FillIntervalMinutes);
-        var local = TimeZoneInfo.ConvertTimeFromUtc(referenceUtc, NewYorkTimeZone);
-        var endLocal = GetSessionEndLocal(local);
-        var minute = local.Minute;
-        var remainder = minute % interval;
-        var delta = remainder == 0 && local.Second == 0 ? interval : interval - remainder;
-        var candidate = new DateTime(local.Year, local.Month, local.Day, local.Hour, minute, 0).AddMinutes(delta);
-
-        if (candidate > endLocal)
-        {
-            var nextSession = GetNextSessionStartUtc(referenceUtc);
-            return GetFirstFillCheckUtc(nextSession);
-        }
-
-        return TimeZoneInfo.ConvertTimeToUtc(candidate, NewYorkTimeZone);
+        return GetNextFillCheckAfter(referenceUtc);
     }
 
     private DateTime GetFirstWorkflowRunUtc(DateTime sessionStartUtc)
@@ -302,6 +290,36 @@ public sealed class WakettAutomationService : BackgroundService
         }
 
         return TimeZoneInfo.ConvertTimeToUtc(firstLocal, NewYorkTimeZone);
+    }
+
+    private DateTime GetNextFillCheckAfter(DateTime lastFillUtc)
+    {
+        var interval = Math.Max(1, _options.FillIntervalMinutes);
+        var lastFillLocal = TimeZoneInfo.ConvertTimeFromUtc(lastFillUtc, NewYorkTimeZone);
+
+        var baseMinute = lastFillLocal.Minute - (lastFillLocal.Minute % interval);
+        var scheduledLocal = new DateTime(
+            lastFillLocal.Year,
+            lastFillLocal.Month,
+            lastFillLocal.Day,
+            lastFillLocal.Hour,
+            baseMinute,
+            0);
+
+        if (scheduledLocal <= lastFillLocal)
+        {
+            scheduledLocal = scheduledLocal.AddMinutes(interval);
+        }
+
+        var candidateUtc = TimeZoneInfo.ConvertTimeToUtc(scheduledLocal, NewYorkTimeZone);
+
+        if (!IsWithinSession(candidateUtc))
+        {
+            var nextSession = GetNextSessionStartUtc(lastFillUtc);
+            return GetFirstFillCheckUtc(nextSession);
+        }
+
+        return candidateUtc;
     }
 
     private DateTime GetFirstFillCheckUtc(DateTime sessionStartUtc)
