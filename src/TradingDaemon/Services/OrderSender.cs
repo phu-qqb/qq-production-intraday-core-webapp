@@ -114,6 +114,22 @@ public class OrderSender
             return;
         }
 
+        var scheduledTimestamp = ResolveScheduledTimestamp(orderTimestampUtc);
+        var existingOrderSymbols = await LoadExistingOrderSymbolsAsync(
+            connection,
+            scheduledTimestamp,
+            builtOrders,
+            cancellationToken);
+
+        if (existingOrderSymbols.Count > 0)
+        {
+            _logger.LogInformation(
+                "Skipping Wakett order submission for scheduled timestamp {ScheduledTimestamp} because existing orders were found for symbol(s): {Symbols}.",
+                scheduledTimestamp,
+                string.Join(", ", existingOrderSymbols));
+            return;
+        }
+
         var aum = aumOverride ?? ResolveAum();
 
         var tradingLimits = await LoadTradingLimitsAsync(connection, cancellationToken);
@@ -337,6 +353,66 @@ VALUES
         {
             _logger.LogError(ex, "Failed to persist Wakett order response results.");
         }
+    }
+
+    protected virtual async Task<IReadOnlyCollection<string>> LoadExistingOrderSymbolsAsync(
+        IDbConnection connection,
+        DateTimeOffset scheduledTimestamp,
+        IEnumerable<(int SecurityId, WakettOrderItem Order)> builtOrders,
+        CancellationToken cancellationToken)
+    {
+        var symbols = builtOrders
+            .Select(order => order.Order.symbol)
+            .Where(symbol => !string.IsNullOrWhiteSpace(symbol))
+            .Select(symbol => symbol!.Trim().ToUpperInvariant())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        if (symbols.Length == 0)
+        {
+            return Array.Empty<string>();
+        }
+
+        const string selectSql = @"SELECT Symbol FROM [wakett].[Order]
+WHERE ModelId = @ModelId AND ScheduledTimestamp = @ScheduledTimestamp AND Symbol IN @Symbols;";
+
+        try
+        {
+            var definition = new CommandDefinition(
+                selectSql,
+                new
+                {
+                    ModelId = TargetModelId,
+                    ScheduledTimestamp = scheduledTimestamp,
+                    Symbols = symbols
+                },
+                cancellationToken: cancellationToken);
+
+            var existing = await connection.QueryAsync<string>(definition);
+
+            return existing
+                .Where(symbol => !string.IsNullOrWhiteSpace(symbol))
+                .Select(symbol => symbol.Trim().ToUpperInvariant())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to load existing Wakett order symbols.");
+            return Array.Empty<string>();
+        }
+    }
+
+    private static DateTimeOffset ResolveScheduledTimestamp(DateTime orderTimestampUtc)
+    {
+        var formattedTimestamp = FormatTimestamp(orderTimestampUtc);
+        return TryParseResponseTimestamp(formattedTimestamp, out var parsedTimestamp)
+            ? parsedTimestamp
+            : new DateTimeOffset(DateTime.SpecifyKind(orderTimestampUtc, DateTimeKind.Utc));
     }
 
     protected virtual async Task LogTradingLimitBreachesAsync(

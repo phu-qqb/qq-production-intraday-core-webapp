@@ -106,6 +106,60 @@ public class OrderSenderTests
     }
 
     [Fact]
+    public async Task SendOrdersAsync_DoesNotSendWhenOrdersAlreadyExist()
+    {
+        var handler = new Mock<HttpMessageHandler>(MockBehavior.Strict);
+        var client = new HttpClient(handler.Object) { BaseAddress = new Uri("http://wakett") };
+        var factory = Mock.Of<IHttpClientFactory>(f => f.CreateClient("WakettApi") == client);
+        var apiClient = new WakettApiClient(factory);
+
+        var now = new DateTimeOffset(2024, 1, 2, 16, 30, 0, TimeSpan.Zero);
+        var barTimeUtc = now.AddMinutes(-60).UtcDateTime;
+        var weights = new List<OrderSender.TheoreticalWeightRow>
+        {
+            new() { SecurityId = 58, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 10, Weight = 0.15m },
+            new() { SecurityId = 61, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 10, Weight = -0.05m }
+        };
+
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["ExternalApis:WakettApi:Aum"] = "2500000"
+        });
+
+        var symbolMap = new Dictionary<int, string>
+        {
+            [58] = "EURUSD",
+            [61] = "EURCHF",
+            [136] = "USDCHF"
+        };
+
+        var context = new Mock<DapperContext>(configuration);
+        context.Setup(c => c.CreateConnection()).Returns(Mock.Of<IDbConnection>());
+
+        var logger = Mock.Of<ILogger<OrderSender>>();
+        var timeProvider = new TestTimeProvider(now);
+
+        var sender = new TestOrderSender(
+            apiClient,
+            context.Object,
+            logger,
+            configuration,
+            timeProvider,
+            weights,
+            symbolMap,
+            new OrderSender.ModelScheduleRow { Offset = 60, BarSize = 0 },
+            existingOrderSymbols: new[] { "EUR/USD" });
+
+        await sender.SendOrdersAsync();
+
+        handler.Protected().Verify(
+            "SendAsync",
+            Times.Never(),
+            ItExpr.IsAny<HttpRequestMessage>(),
+            ItExpr.IsAny<CancellationToken>());
+    }
+
+    [Fact]
     public async Task SendOrdersAsync_DoesNotSendWhenTradingLimitBreached()
     {
         var handler = new Mock<HttpMessageHandler>(MockBehavior.Strict);
@@ -718,6 +772,7 @@ public class OrderSenderTests
         private readonly ModelScheduleRow? _schedule;
         private readonly TradingLimitRow? _tradingLimit;
         private readonly List<TradingLimitBreachResult> _loggedBreaches = new();
+        private readonly IReadOnlyCollection<string> _existingOrderSymbols;
 
         public TestOrderSender(
             WakettApiClient client,
@@ -728,13 +783,15 @@ public class OrderSenderTests
             IReadOnlyList<TheoreticalWeightRow> weights,
             IReadOnlyDictionary<int, string> symbolMap,
             ModelScheduleRow? schedule,
-            TradingLimitRow? tradingLimit = null)
+            TradingLimitRow? tradingLimit = null,
+            IReadOnlyCollection<string>? existingOrderSymbols = null)
             : base(client, context, logger, configuration, timeProvider)
         {
             _weights = weights;
             _symbolMap = symbolMap;
             _schedule = schedule;
             _tradingLimit = tradingLimit;
+            _existingOrderSymbols = existingOrderSymbols ?? Array.Empty<string>();
         }
 
         public IReadOnlyList<TradingLimitBreachResult> LoggedBreaches => _loggedBreaches;
@@ -785,6 +842,13 @@ public class OrderSenderTests
             _loggedBreaches.AddRange(breaches);
             return Task.CompletedTask;
         }
+
+        protected override Task<IReadOnlyCollection<string>> LoadExistingOrderSymbolsAsync(
+            IDbConnection connection,
+            DateTimeOffset scheduledTimestamp,
+            IEnumerable<(int SecurityId, WakettOrderItem Order)> builtOrders,
+            CancellationToken cancellationToken)
+            => Task.FromResult(_existingOrderSymbols);
     }
 
     private sealed class TestTimeProvider : TimeProvider
