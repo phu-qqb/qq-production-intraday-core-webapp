@@ -73,7 +73,11 @@ public class TradingJob : IJob
 
     private static bool ShouldSendReport(IJobExecutionContext context)
     {
-        var scheduled = context.ScheduledFireTimeUtc ?? context.FireTimeUtc ?? DateTimeOffset.UtcNow;
+
+        var scheduled = context.ScheduledFireTimeUtc
+            ?? (DateTimeOffset?)context.FireTimeUtc
+            ?? DateTimeOffset.UtcNow;
+
         return scheduled.Minute == 0;
     }
 }
