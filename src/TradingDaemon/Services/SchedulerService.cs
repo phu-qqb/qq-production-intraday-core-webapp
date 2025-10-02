@@ -1,3 +1,4 @@
+using System;
 using Quartz;
 
 namespace TradingDaemon.Services;
@@ -40,20 +41,39 @@ public class TradingJob : IJob
     private readonly WeightCalculator _weightCalculator;
     private readonly OrderSender _orderSender;
     private readonly PnlReportService _pnlReportService;
+    private readonly IEmailNotificationService _emailNotificationService;
 
-    public TradingJob(PriceFetcher priceFetcher, WeightCalculator weightCalculator, OrderSender orderSender, PnlReportService pnlReportService)
+    public TradingJob(
+        PriceFetcher priceFetcher,
+        WeightCalculator weightCalculator,
+        OrderSender orderSender,
+        PnlReportService pnlReportService,
+        IEmailNotificationService emailNotificationService)
     {
         _priceFetcher = priceFetcher;
         _weightCalculator = weightCalculator;
         _orderSender = orderSender;
         _pnlReportService = pnlReportService;
+        _emailNotificationService = emailNotificationService;
     }
 
     public async Task Execute(IJobExecutionContext context)
     {
         await _priceFetcher.FetchAndStoreAsync();
-        await _pnlReportService.ComputeAndStoreCurrentDayPnlAsync(cancellationToken: context.CancellationToken);
+        var report = await _pnlReportService.ComputeAndStoreCurrentDayPnlAsync(cancellationToken: context.CancellationToken);
+
+        if (ShouldSendReport(context))
+        {
+            await _emailNotificationService.SendPnLReportAsync(report, context.CancellationToken);
+        }
+
         await _weightCalculator.CalculateAndStoreAsync();
         await _orderSender.SendOrdersAsync();
+    }
+
+    private static bool ShouldSendReport(IJobExecutionContext context)
+    {
+        var scheduled = context.ScheduledFireTimeUtc ?? context.FireTimeUtc ?? DateTimeOffset.UtcNow;
+        return scheduled.Minute == 0;
     }
 }
