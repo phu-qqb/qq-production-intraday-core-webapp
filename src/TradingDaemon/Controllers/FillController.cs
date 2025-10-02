@@ -1,4 +1,5 @@
 using Dapper;
+using Microsoft.Extensions.Logging;
 using TradingDaemon.Data;
 using TradingDaemon.Models;
 using TradingDaemon.Services;
@@ -19,14 +20,16 @@ public static class FillController
             return Results.Created($"/api/fills/{fill.Id}", fill);
         });
 
+
         app.MapGet("/api/pnl", async (DateTime date, DapperContext context, IEmailNotificationService emailNotificationService, ILogger<FillController> logger) =>
+
         {
             using var connection = context.CreateConnection();
             var fillsSql = "SELECT * FROM fills WHERE DATE(timestamp) = @Date";
-            Console.WriteLine($"Executing SQL: {fillsSql}");
+            logger.LogInformation("Executing SQL: {Sql}", fillsSql);
             var fills = await connection.QueryAsync<Fill>(fillsSql, new { Date = date.Date });
             var weightsSql = "SELECT * FROM weights WHERE DATE(asof) = @Date";
-            Console.WriteLine($"Executing SQL: {weightsSql}");
+            logger.LogInformation("Executing SQL: {Sql}", weightsSql);
             var weights = await connection.QueryAsync<Weight>(weightsSql, new { Date = date.Date });
 
             var pnl = (from f in fills
@@ -46,4 +49,8 @@ public static class FillController
             return Results.Ok(new { Date = date.Date, PnL = pnl });
         });
     }
+}
+
+internal sealed class FillEndpointsLogger
+{
 }
