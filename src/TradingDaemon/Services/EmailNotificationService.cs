@@ -27,8 +27,15 @@ public class EmailNotificationService : IEmailNotificationService, IDisposable
         var regionName = configuration["AWS:Region"] ?? Environment.GetEnvironmentVariable("AWS_REGION") ?? "eu-west-2";
         _sesClient = new AmazonSimpleEmailServiceClient(RegionEndpoint.GetBySystemName(regionName));
 
-        _fromAddress = configuration["Email:From"] ?? "intraday_bot@quantumqb.com";
-        var recipients = configuration.GetSection("Email:Recipients").Get<string[]>() ?? Array.Empty<string>();
+        _fromAddress = configuration["Email:From"]
+            ?? configuration["Automation:Email:From"]
+            ?? "intraday_bot@quantumqb.com";
+
+        var recipients = configuration.GetSection("Email:Recipients").Get<string[]>();
+        if (recipients is null || recipients.Length == 0)
+        {
+            recipients = configuration.GetSection("Automation:Email:Recipients").Get<string[]>() ?? Array.Empty<string>();
+        }
         _recipients = Array.AsReadOnly(recipients);
 
         if (_recipients.Count == 0)
