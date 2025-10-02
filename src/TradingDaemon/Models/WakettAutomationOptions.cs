@@ -3,7 +3,7 @@ namespace TradingDaemon.Models;
 public sealed class WakettAutomationOptions
 {
 
-    public int WorkflowMinuteOffset { get; set; } = 8;
+    public int WorkflowMinuteOffset { get; set; } = 59;
 
 
     public int FillIntervalMinutes { get; set; } = 10;
