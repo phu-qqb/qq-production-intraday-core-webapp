@@ -20,7 +20,10 @@ public static class EmailController
             catch (Exception ex)
             {
                 logger.LogError(ex, "Failed to send test email");
-                return TypedResults.Problem("Failed to send test email.", statusCode: StatusCodes.Status500InternalServerError);
+                return TypedResults.Problem(
+                    title: "Failed to send test email.",
+                    detail: ex.Message,
+                    statusCode: StatusCodes.Status500InternalServerError);
             }
         })
         .WithName("SendTestEmail")
