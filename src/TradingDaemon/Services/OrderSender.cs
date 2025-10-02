@@ -3,6 +3,7 @@ using System.Data;
 using System.Globalization;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Dapper;
@@ -110,6 +111,22 @@ public class OrderSender
         if (builtOrders.Count == 0)
         {
             _logger.LogInformation("No non-zero weights available for Wakett order submission.");
+            return;
+        }
+
+        var scheduledTimestamp = ResolveScheduledTimestamp(orderTimestampUtc);
+        var existingOrderSymbols = await LoadExistingOrderSymbolsAsync(
+            connection,
+            scheduledTimestamp,
+            builtOrders,
+            cancellationToken);
+
+        if (existingOrderSymbols.Count > 0)
+        {
+            _logger.LogInformation(
+                "Skipping Wakett order submission for scheduled timestamp {ScheduledTimestamp} because existing orders were found for symbol(s): {Symbols}.",
+                scheduledTimestamp,
+                string.Join(", ", existingOrderSymbols));
             return;
         }
 
@@ -338,6 +355,66 @@ VALUES
         }
     }
 
+    protected virtual async Task<IReadOnlyCollection<string>> LoadExistingOrderSymbolsAsync(
+        IDbConnection connection,
+        DateTimeOffset scheduledTimestamp,
+        IEnumerable<(int SecurityId, WakettOrderItem Order)> builtOrders,
+        CancellationToken cancellationToken)
+    {
+        var symbols = builtOrders
+            .Select(order => order.Order.symbol)
+            .Where(symbol => !string.IsNullOrWhiteSpace(symbol))
+            .Select(symbol => symbol!.Trim().ToUpperInvariant())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        if (symbols.Length == 0)
+        {
+            return Array.Empty<string>();
+        }
+
+        const string selectSql = @"SELECT Symbol FROM [wakett].[Order]
+WHERE ModelId = @ModelId AND ScheduledTimestamp = @ScheduledTimestamp AND Symbol IN @Symbols;";
+
+        try
+        {
+            var definition = new CommandDefinition(
+                selectSql,
+                new
+                {
+                    ModelId = TargetModelId,
+                    ScheduledTimestamp = scheduledTimestamp,
+                    Symbols = symbols
+                },
+                cancellationToken: cancellationToken);
+
+            var existing = await connection.QueryAsync<string>(definition);
+
+            return existing
+                .Where(symbol => !string.IsNullOrWhiteSpace(symbol))
+                .Select(symbol => symbol.Trim().ToUpperInvariant())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to load existing Wakett order symbols.");
+            return Array.Empty<string>();
+        }
+    }
+
+    private static DateTimeOffset ResolveScheduledTimestamp(DateTime orderTimestampUtc)
+    {
+        var formattedTimestamp = FormatTimestamp(orderTimestampUtc);
+        return TryParseResponseTimestamp(formattedTimestamp, out var parsedTimestamp)
+            ? parsedTimestamp
+            : new DateTimeOffset(DateTime.SpecifyKind(orderTimestampUtc, DateTimeKind.Utc));
+    }
+
     protected virtual async Task LogTradingLimitBreachesAsync(
         IDbConnection connection,
         IReadOnlyList<TradingLimitBreachResult> breaches,
@@ -406,6 +483,8 @@ VALUES
 
                 await connection.ExecuteAsync(definition);
             }
+
+            ShowBreachWarning(breaches);
         }
         catch (OperationCanceledException)
         {
@@ -414,6 +493,43 @@ VALUES
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to log trading limit breach report.");
+        }
+    }
+
+    private void ShowBreachWarning(IReadOnlyList<TradingLimitBreachResult> breaches)
+    {
+        if (!OperatingSystem.IsWindows() || breaches.Count == 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var builder = new StringBuilder();
+            builder.AppendLine("Trading limit breach detected. Orders were not sent.");
+
+            foreach (var breach in breaches)
+            {
+                builder.Append("• ");
+                builder.Append(breach.LimitType);
+                builder.Append(": observed ");
+                builder.Append(breach.ObservedValue.ToString("0.######", CultureInfo.InvariantCulture));
+                builder.Append(" vs limit ");
+                builder.AppendLine(breach.LimitValue.ToString("0.######", CultureInfo.InvariantCulture));
+                if (!string.IsNullOrWhiteSpace(breach.Message))
+                {
+                    builder.AppendLine(breach.Message);
+                }
+            }
+
+            var message = builder.ToString();
+            var type = Type.GetType("System.Windows.Forms.MessageBox, System.Windows.Forms");
+            type?.GetMethod("Show", new[] { typeof(string), typeof(string) })?
+                .Invoke(null, new object[] { message, "Trading Limit Breach" });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to display trading limit breach warning.");
         }
     }
 
@@ -1071,7 +1187,32 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         var breaches = new List<TradingLimitBreachResult>();
         var aumDecimal = aum.HasValue ? (decimal?)aum.Value : null;
 
-        decimal ComputeTurnover(decimal size) => aumDecimal.HasValue ? size * aumDecimal.Value : size;
+        string FormatTurnoverMessage(
+            string prefix,
+            decimal observedWeight,
+            decimal limitWeight,
+            decimal? aumValue)
+        {
+            if (aumValue.HasValue)
+            {
+                var notional = observedWeight * aumValue.Value;
+                return string.Format(
+                    CultureInfo.InvariantCulture,
+                    "{0} ({1} > {2}). Equivalent notional {3} using AUM {4}.",
+                    prefix,
+                    observedWeight,
+                    limitWeight,
+                    notional,
+                    aumValue.Value);
+            }
+
+            return string.Format(
+                CultureInfo.InvariantCulture,
+                "{0} ({1} > {2}).",
+                prefix,
+                observedWeight,
+                limitWeight);
+        }
 
         TradingOrderMetric FindLargest(Func<TradingOrderMetric, decimal> selector)
         {
@@ -1150,55 +1291,42 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
         if (limits.SingleTradeTurnoverLimit is decimal singleTradeTurnoverLimit)
         {
-            var worstTurnover = FindLargest(metric => ComputeTurnover(metric.AbsoluteSize));
-            var observed = ComputeTurnover(worstTurnover.AbsoluteSize);
-            if (observed > singleTradeTurnoverLimit)
+            var worstTurnover = FindLargest(metric => metric.AbsoluteSize);
+            var observedWeight = worstTurnover.AbsoluteSize;
+            if (observedWeight > singleTradeTurnoverLimit)
             {
-                var message = aumDecimal.HasValue
-                    ? string.Format(
+                var message = FormatTurnoverMessage(
+                    string.Format(
                         CultureInfo.InvariantCulture,
-                        "Order for {0} exceeds single trade turnover limit ({1} > {2}) using AUM {3}.",
-                        worstTurnover.Symbol,
-                        observed,
-                        singleTradeTurnoverLimit,
-                        aumDecimal.Value)
-                    : string.Format(
-                        CultureInfo.InvariantCulture,
-                        "Order for {0} exceeds single trade turnover limit ({1} > {2}).",
-                        worstTurnover.Symbol,
-                        observed,
-                        singleTradeTurnoverLimit);
+                        "Order for {0} exceeds single trade turnover weight limit",
+                        worstTurnover.Symbol),
+                    observedWeight,
+                    singleTradeTurnoverLimit,
+                    aumDecimal);
 
                 breaches.Add(new TradingLimitBreachResult(
                     "SingleTradeTurnoverLimit",
                     singleTradeTurnoverLimit,
-                    observed,
+                    observedWeight,
                     message));
             }
         }
 
         if (limits.TotalTurnoverLimit is decimal totalTurnoverLimit)
         {
-            var observed = metrics.Sum(metric => ComputeTurnover(metric.AbsoluteSize));
-            if (observed > totalTurnoverLimit)
+            var observedWeight = metrics.Sum(metric => metric.AbsoluteSize);
+            if (observedWeight > totalTurnoverLimit)
             {
-                var message = aumDecimal.HasValue
-                    ? string.Format(
-                        CultureInfo.InvariantCulture,
-                        "Total turnover {0} exceeds limit {1} using AUM {2}.",
-                        observed,
-                        totalTurnoverLimit,
-                        aumDecimal.Value)
-                    : string.Format(
-                        CultureInfo.InvariantCulture,
-                        "Total turnover {0} exceeds limit {1}.",
-                        observed,
-                        totalTurnoverLimit);
+                var message = FormatTurnoverMessage(
+                    "Total turnover weight exceeds limit",
+                    observedWeight,
+                    totalTurnoverLimit,
+                    aumDecimal);
 
                 breaches.Add(new TradingLimitBreachResult(
                     "TotalTurnoverLimit",
                     totalTurnoverLimit,
-                    observed,
+                    observedWeight,
                     message));
             }
         }
