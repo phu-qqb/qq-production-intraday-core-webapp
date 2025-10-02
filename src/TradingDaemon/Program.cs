@@ -43,6 +43,7 @@ builder.Services.AddHttpClient("WakettTradeApi", client =>
 builder.Services.AddTransient<PriceFetcher>();
 builder.Services.AddTransient<WeightCalculator>();
 builder.Services.AddTransient<OrderSender>();
+builder.Services.AddTransient<PnlReportService>();
 
 builder.Services.AddTransient<ReportRunner>();
 
