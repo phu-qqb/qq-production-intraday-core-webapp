@@ -81,5 +81,6 @@ app.MapOrderEndpoints();
 app.MapTradingEndpoints();
 app.MapReportEndpoints();
 app.MapWakettEndpoints();
+app.MapEmailEndpoints();
 
 app.Run();
