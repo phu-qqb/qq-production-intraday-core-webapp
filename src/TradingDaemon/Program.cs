@@ -51,8 +51,12 @@ builder.Services.AddTransient<WakettApiClient>();
 builder.Services.AddTransient<WakettPriceFetcher>();
 builder.Services.AddTransient<WakettTradeFetcher>();
 
+
 builder.Services.Configure<WakettAutomationOptions>(builder.Configuration.GetSection("Automation:Wakett"));
 builder.Services.AddHostedService<WakettAutomationService>();
+
+builder.Services.AddSingleton<IEmailNotificationService, EmailNotificationService>();
+
 
 
 builder.Services.AddEndpointsApiExplorer();
