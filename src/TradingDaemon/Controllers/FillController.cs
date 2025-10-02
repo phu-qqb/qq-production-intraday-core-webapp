@@ -2,6 +2,7 @@ using Dapper;
 using Microsoft.Extensions.Logging;
 using TradingDaemon.Data;
 using TradingDaemon.Models;
+using TradingDaemon.Services;
 
 namespace TradingDaemon.Controllers;
 
@@ -19,7 +20,9 @@ public static class FillController
             return Results.Created($"/api/fills/{fill.Id}", fill);
         });
 
-        app.MapGet("/api/pnl", async (DateTime date, DapperContext context, ILogger<FillEndpointsLogger> logger) =>
+
+        app.MapGet("/api/pnl", async (DateTime date, DapperContext context, IEmailNotificationService emailNotificationService, ILogger<FillController> logger) =>
+
         {
             using var connection = context.CreateConnection();
             var fillsSql = "SELECT * FROM fills WHERE DATE(timestamp) = @Date";
@@ -32,6 +35,16 @@ public static class FillController
             var pnl = (from f in fills
                        join w in weights on f.Symbol equals w.Symbol
                        select f.Quantity * (w.Value - f.Price)).Sum();
+
+            try
+            {
+                await emailNotificationService.SendPnLReportAsync(date.Date, pnl);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "Failed to send PnL email notification");
+                return Results.Problem("Failed to send PnL email notification.", statusCode: StatusCodes.Status500InternalServerError);
+            }
 
             return Results.Ok(new { Date = date.Date, PnL = pnl });
         });
