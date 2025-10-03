@@ -1,3 +1,4 @@
+using Quartz;
 using Quartz.Impl;
 using Quartz.Spi;
 using Serilog;
@@ -61,7 +62,7 @@ builder.Services.AddHostedService<WakettAutomationService>();
 
 builder.Services.AddSingleton<IEmailNotificationService, EmailNotificationService>();
 builder.Services.Configure<SchedulerOptions>(builder.Configuration.GetSection("Quartz"));
-builder.Services.AddSingleton<ISchedulerFactory, StdSchedulerFactory>();
+builder.Services.AddSingleton<ISchedulerFactory>(_ => new StdSchedulerFactory());
 builder.Services.AddSingleton<IJobFactory, DependencyInjectionJobFactory>();
 builder.Services.AddHostedService<SchedulerService>();
 
