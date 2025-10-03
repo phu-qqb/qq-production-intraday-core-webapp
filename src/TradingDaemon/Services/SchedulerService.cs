@@ -64,7 +64,12 @@ public class SchedulerService : IHostedService
         {
             return TimeZoneInfo.FindSystemTimeZoneById(timeZoneId);
         }
-        catch ((TimeZoneNotFoundException or InvalidTimeZoneException) ex) when (TryResolveAlternate(timeZoneId, out var timeZone))
+        catch (TimeZoneNotFoundException ex) when (TryResolveAlternate(timeZoneId, out var timeZone))
+        {
+            _logger.LogWarning(ex, "Falling back to alternate time zone ID {Fallback} for configured ID {Configured}", timeZone.Id, timeZoneId);
+            return timeZone;
+        }
+        catch (InvalidTimeZoneException ex) when (TryResolveAlternate(timeZoneId, out var timeZone))
         {
             _logger.LogWarning(ex, "Falling back to alternate time zone ID {Fallback} for configured ID {Configured}", timeZone.Id, timeZoneId);
             return timeZone;
