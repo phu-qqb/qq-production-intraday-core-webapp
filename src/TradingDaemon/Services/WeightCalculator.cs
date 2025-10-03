@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Runtime.InteropServices;
 using System.Data;
 using Dapper;
 using TradingDaemon.Data;
@@ -15,6 +16,15 @@ public class WeightCalculator
     private readonly DapperContext _context;
     private readonly IConfiguration _config;
     private readonly ILogger<WeightCalculator> _logger;
+
+    private static readonly IReadOnlyDictionary<string, SessionInfo> SessionBounds =
+        new Dictionary<string, SessionInfo>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["US"] = new SessionInfo(ResolveTimeZone("Eastern Standard Time", "America/New_York"),
+                TimeSpan.Parse("09:00"), TimeSpan.Parse("15:59")),
+            ["EU"] = new SessionInfo(ResolveTimeZone("Eastern Standard Time", "America/New_York"),
+                TimeSpan.Parse("02:00"), TimeSpan.Parse("08:59"))
+        };
 
     public WeightCalculator(DapperContext context, IConfiguration config, ILogger<WeightCalculator> logger)
     {
@@ -29,6 +39,8 @@ public class WeightCalculator
         var scriptPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../scripts/export_prices_rds.py"));
 
         var modelTimeframes = new Dictionary<int, int>();
+        var modelSessions = new Dictionary<int, string>(StringComparer.OrdinalIgnoreCase);
+        var priceOffset = _config.GetValue<int?>("ExternalApis:WakettApi:PriceMinuteOffset") ?? 0;
 
         foreach (var model in _config.GetSection("Programmes").GetChildren())
         {
@@ -41,6 +53,10 @@ public class WeightCalculator
             var timeFrameInt = int.TryParse(timeFrame, out var tfVal) ? tfVal : 60;
 
             modelTimeframes[modelId] = timeFrameInt;
+            if (!string.IsNullOrWhiteSpace(tradingSession))
+            {
+                modelSessions[modelId] = tradingSession.Trim();
+            }
 
             var scriptArgs = string.IsNullOrEmpty(universe)
                 ? scriptPath
@@ -176,19 +192,7 @@ END";
                         rows.Add(new WeightRow(barTimeUtc, weightArr));
                     }
 
-                    foreach (var group in rows.GroupBy(r => r.BarTimeUtc.Date))
-                    {
-                        var ordered = group.OrderBy(r => r.BarTimeUtc).ToList();
-                        if (ordered.Count >= 2)
-                        {
-                            var secondLast = ordered[^2];
-                            for (var i = 0; i < secondLast.Weights.Length; i++)
-                            {
-                                if (secondLast.Weights[i].HasValue)
-                                    secondLast.Weights[i] = 0m;
-                            }
-                        }
-                    }
+                    ZeroPenultimateRows(rows, modelSessions.GetValueOrDefault(modelId), timeFrameInt, priceOffset);
 
                     foreach (var row in rows)
                     {
@@ -269,6 +273,166 @@ END";
 
         await RunModelReportsAsync(modelTimeframes);
     }
+
+    private void ZeroPenultimateRows(List<WeightRow> rows, string? sessionKey, int timeframeMinutes, int offsetMinutes)
+    {
+        if (rows.Count == 0)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(sessionKey) || !SessionBounds.TryGetValue(sessionKey.Trim(), out var session))
+        {
+            ZeroPenultimateByCalendarDay(rows);
+            return;
+        }
+
+        var alignedStart = AlignSessionStart(session.Start, timeframeMinutes);
+        var groups = rows
+            .GroupBy(r => GetSessionStartLocal(r.BarTimeUtc, session, alignedStart, offsetMinutes));
+
+        foreach (var group in groups)
+        {
+            var ordered = group.OrderBy(r => r.BarTimeUtc).ToList();
+            if (ordered.Count < 2)
+            {
+                continue;
+            }
+
+            var expected = GetExpectedPenultimateUtc(group.Key, session, alignedStart, timeframeMinutes, offsetMinutes);
+            var target = expected.HasValue
+                ? ordered.FirstOrDefault(r => r.BarTimeUtc == expected.Value) ?? ordered[^2]
+                : ordered[^2];
+
+            ZeroRow(target);
+        }
+    }
+
+    private static void ZeroPenultimateByCalendarDay(List<WeightRow> rows)
+    {
+        foreach (var group in rows.GroupBy(r => r.BarTimeUtc.Date))
+        {
+            var ordered = group.OrderBy(r => r.BarTimeUtc).ToList();
+            if (ordered.Count < 2)
+            {
+                continue;
+            }
+
+            ZeroRow(ordered[^2]);
+        }
+    }
+
+    private static void ZeroRow(WeightRow? row)
+    {
+        if (row is null)
+        {
+            return;
+        }
+
+        for (var i = 0; i < row.Weights.Length; i++)
+        {
+            if (row.Weights[i].HasValue)
+            {
+                row.Weights[i] = 0m;
+            }
+        }
+    }
+
+    private static DateTime GetSessionStartLocal(DateTime barTimeUtc, SessionInfo session, TimeSpan alignedStart, int offsetMinutes)
+    {
+        var local = TimeZoneInfo.ConvertTimeFromUtc(barTimeUtc, session.Zone);
+        if (offsetMinutes != 0)
+        {
+            local = local.AddMinutes(-offsetMinutes);
+        }
+
+        var startLocal = local.Date.Add(alignedStart);
+        if (SessionWrapsMidnight(session.Start, session.End) || local.TimeOfDay < alignedStart)
+        {
+            if (local.TimeOfDay < alignedStart)
+            {
+                startLocal = startLocal.AddDays(-1);
+            }
+        }
+
+        return startLocal;
+    }
+
+    private static DateTime? GetExpectedPenultimateUtc(
+        DateTime sessionStartLocal,
+        SessionInfo session,
+        TimeSpan alignedStart,
+        int timeframeMinutes,
+        int offsetMinutes)
+    {
+        var bucketCount = GetSessionBucketCount(alignedStart, session.End, timeframeMinutes, SessionWrapsMidnight(session.Start, session.End));
+        if (bucketCount < 2)
+        {
+            return null;
+        }
+
+        var penultimateStartLocal = sessionStartLocal.AddMinutes(timeframeMinutes * (bucketCount - 2));
+        var penultimateLocalWithOffset = penultimateStartLocal.AddMinutes(offsetMinutes);
+        return TimeZoneInfo.ConvertTimeToUtc(penultimateLocalWithOffset, session.Zone);
+    }
+
+    private static int GetSessionBucketCount(TimeSpan sessionStartAligned, TimeSpan sessionEnd, int timeframeMinutes, bool wrapsMidnight)
+    {
+        if (timeframeMinutes <= 0)
+        {
+            return 0;
+        }
+
+        int totalMinutes;
+        if (!wrapsMidnight)
+        {
+            if (sessionEnd < sessionStartAligned)
+            {
+                return 0;
+            }
+
+            totalMinutes = (int)(sessionEnd - sessionStartAligned).TotalMinutes + 1;
+        }
+        else
+        {
+            totalMinutes = (int)((TimeSpan.FromHours(24) - sessionStartAligned + sessionEnd).TotalMinutes) + 1;
+        }
+
+        if (totalMinutes < timeframeMinutes)
+        {
+            return 0;
+        }
+
+        return totalMinutes / timeframeMinutes;
+    }
+
+    private static TimeSpan AlignSessionStart(TimeSpan sessionStart, int minutes)
+    {
+        if (minutes <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(minutes), "Aggregation interval must be positive.");
+        }
+
+        if (sessionStart == TimeSpan.Zero)
+        {
+            return TimeSpan.Zero;
+        }
+
+        var totalMinutes = (int)Math.Ceiling(sessionStart.TotalMinutes / minutes) * minutes;
+        return TimeSpan.FromMinutes(totalMinutes);
+    }
+
+    private static bool SessionWrapsMidnight(TimeSpan sessionStart, TimeSpan sessionEnd)
+    {
+        return sessionEnd < sessionStart;
+    }
+
+    private static TimeZoneInfo ResolveTimeZone(string windowsId, string linuxId)
+    {
+        return TimeZoneInfo.FindSystemTimeZoneById(RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? windowsId : linuxId);
+    }
+
+    private sealed record SessionInfo(TimeZoneInfo Zone, TimeSpan Start, TimeSpan End);
 
     private async Task RunModelReportsAsync(Dictionary<int, int> modelTimeframes)
     {
