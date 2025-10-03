@@ -39,7 +39,9 @@ public class WeightCalculator
         var scriptPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../scripts/export_prices_rds.py"));
 
         var modelTimeframes = new Dictionary<int, int>();
+
         var modelSessions = new Dictionary<int, string>();
+
         var priceOffset = _config.GetValue<int?>("ExternalApis:WakettApi:PriceMinuteOffset") ?? 0;
 
         foreach (var model in _config.GetSection("Programmes").GetChildren())
