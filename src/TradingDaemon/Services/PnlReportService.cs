@@ -1,5 +1,7 @@
+using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Globalization;
 using System.Linq;
 using System.Threading;
 using Dapper;
@@ -45,7 +47,16 @@ WHEN NOT MATCHED THEN
     INSERT (TradingDate, CalculatedAtUtc, PnL)
     VALUES (source.TradingDate, source.CalculatedAtUtc, source.PnL);";
 
-    private const string PnlSql = @"WITH LatestPrices AS (
+    private const string PnlSql = @"WITH FillWithSecurity AS (
+    SELECT
+        f.ExecuteSize,
+        f.ExecutePrice,
+        f.TradeTimestamp,
+        f.Side,
+        s.SecurityId
+    FROM [wakett].[Fill] f
+    LEFT JOIN [Intraday].[core].[Security] s ON UPPER(LTRIM(RTRIM(s.Symbol))) = UPPER(LTRIM(RTRIM(f.Symbol)))
+), LatestPrices AS (
     SELECT
         pb.SecurityId,
         pb.[Close],
@@ -66,8 +77,8 @@ SELECT
         * COALESCE(f.ExecuteSize, 0)
         * (COALESCE(lp.[Close], f.ExecutePrice) - COALESCE(f.ExecutePrice, 0))
     )
-FROM [wakett].[Fill] f
-LEFT JOIN LatestPrices lp ON lp.SecurityId = f.SymbolId AND lp.rn = 1
+FROM FillWithSecurity f
+LEFT JOIN LatestPrices lp ON lp.SecurityId = f.SecurityId AND lp.rn = 1
 WHERE
     f.TradeTimestamp >= @StartUtc
     AND f.TradeTimestamp < @EndUtc;";
@@ -90,6 +101,7 @@ WHERE src.rn = 1;";
     private const string PositionsSql = @"WITH Aggregated AS (
     SELECT
         f.SymbolId,
+        MAX(f.Symbol) AS Symbol,
         SUM(
             CASE
                 WHEN UPPER(f.Side) IN ('SELL', 'S', 'SHORT', 'SS') THEN -1
@@ -105,6 +117,7 @@ WHERE src.rn = 1;";
 ), LatestFill AS (
     SELECT
         f.SymbolId,
+        f.Symbol,
         COALESCE(f.ExecutePrice, 0) AS ExecutePrice,
         ROW_NUMBER() OVER (PARTITION BY f.SymbolId ORDER BY f.TradeTimestamp DESC) AS rn
     FROM [wakett].[Fill] f
@@ -114,6 +127,7 @@ WHERE src.rn = 1;";
 )
 SELECT
     a.SymbolId,
+    COALESCE(a.Symbol, lf.Symbol) AS Symbol,
     a.NetQuantity,
     lf.ExecutePrice AS LastExecutePrice
 FROM Aggregated a
@@ -155,10 +169,19 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
                 cancellationToken: cancellationToken));
 
         var symbolInfos = await LoadSymbolInfosAsync(connection, cancellationToken);
-        var priceLookup = symbolInfos.Count > 0
-            ? await LoadLatestPricesAsync(connection, symbolInfos.Keys, cancellationToken)
-            : new Dictionary<int, decimal?>();
         var positions = await LoadPositionsAsync(connection, startUtc, endUtc, cancellationToken);
+
+        var securityIds = positions
+            .Select(p => TryGetSymbolInfo(symbolInfos, p.SymbolId, p.Symbol, out var info) ? info.SecurityId : (int?)null)
+            .Where(id => id.HasValue)
+            .Select(id => id!.Value)
+            .Distinct()
+            .ToArray();
+
+        var priceLookup = securityIds.Length > 0
+            ? await LoadLatestPricesAsync(connection, securityIds, cancellationToken)
+            : new Dictionary<int, decimal?>();
+
         var reportPositions = BuildReportPositions(symbolInfos, priceLookup, positions);
 
         var grossMarketValue = reportPositions.Sum(p => Math.Abs(p.MarketValueUsd ?? 0m));
@@ -196,20 +219,44 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
         }
     }
 
-    private async Task<Dictionary<int, CurrencyPair>> LoadSymbolInfosAsync(IDbConnection connection, CancellationToken cancellationToken)
+    private async Task<Dictionary<string, SymbolInfo>> LoadSymbolInfosAsync(IDbConnection connection, CancellationToken cancellationToken)
     {
         var definition = new CommandDefinition(SymbolSql, cancellationToken: cancellationToken);
         var rows = await connection.QueryAsync<SecuritySymbolRow>(definition);
 
-        var result = new Dictionary<int, CurrencyPair>();
+        var result = new Dictionary<string, SymbolInfo>(StringComparer.OrdinalIgnoreCase);
         foreach (var row in rows)
         {
+            if (string.IsNullOrWhiteSpace(row.Symbol))
+            {
+                continue;
+            }
+
+            var normalized = NormalizeSymbol(row.Symbol);
+            if (string.IsNullOrEmpty(normalized))
+            {
+                continue;
+            }
+
             if (!CurrencyPairParser.TryParse(row.Symbol, out var pair))
             {
                 continue;
             }
 
-            result[row.SecurityId] = pair;
+            var info = new SymbolInfo(row.SecurityId, pair);
+            info.Keys.Add(normalized);
+            result[normalized] = info;
+
+            var securityKey = NormalizeSymbol(row.SecurityId.ToString(CultureInfo.InvariantCulture));
+            info.Keys.Add(securityKey);
+            result[securityKey] = info;
+
+            var formattedKey = NormalizeSymbol(info.Pair.FormattedSymbol);
+            if (!string.IsNullOrEmpty(formattedKey))
+            {
+                info.Keys.Add(formattedKey);
+                result[formattedKey] = info;
+            }
         }
 
         return result;
@@ -237,7 +284,7 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
     }
 
     private IReadOnlyList<PnlReportPosition> BuildReportPositions(
-        IReadOnlyDictionary<int, CurrencyPair> symbolInfos,
+        IReadOnlyDictionary<string, SymbolInfo> symbolInfos,
         IReadOnlyDictionary<int, decimal?> priceLookup,
         IReadOnlyCollection<PositionRow> positions)
     {
@@ -246,32 +293,35 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
 
         foreach (var position in positions)
         {
-            if (!symbolInfos.TryGetValue(position.SymbolId, out var pair))
+            if (!TryGetSymbolInfo(symbolInfos, position.SymbolId, position.Symbol, out var info))
             {
-                _logger.LogDebug("Skipping position for unknown security {SecurityId}.", position.SymbolId);
+                _logger.LogDebug(
+                    "Skipping position for unknown symbol {SymbolId} (symbol {Symbol}).",
+                    position.SymbolId,
+                    position.Symbol);
                 continue;
             }
 
-            var price = priceLookup.TryGetValue(position.SymbolId, out var latest) && latest.HasValue && latest.Value != 0m
+            var price = priceLookup.TryGetValue(info.SecurityId, out var latest) && latest.HasValue && latest.Value != 0m
                 ? latest.Value
                 : (position.LastExecutePrice is { } last && last != 0m ? last : (decimal?)null);
 
             decimal? marketValueUsd = null;
 
-            if (TryGetConversionRate(pair.BaseCurrency, "USD", conversionGraph, out var baseToUsd))
+            if (TryGetConversionRate(info.Pair.BaseCurrency, "USD", conversionGraph, out var baseToUsd))
             {
                 marketValueUsd = position.NetQuantity * baseToUsd;
             }
-            else if (price.HasValue && TryGetConversionRate(pair.QuoteCurrency, "USD", conversionGraph, out var quoteToUsd))
+            else if (price.HasValue && TryGetConversionRate(info.Pair.QuoteCurrency, "USD", conversionGraph, out var quoteToUsd))
             {
                 var quoteAmount = -position.NetQuantity * price.Value;
                 marketValueUsd = quoteAmount * quoteToUsd;
             }
 
             positionsList.Add(new PnlReportPosition(
-                pair.FormattedSymbol,
-                pair.BaseCurrency,
-                pair.QuoteCurrency,
+                info.Pair.FormattedSymbol,
+                info.Pair.BaseCurrency,
+                info.Pair.QuoteCurrency,
                 position.NetQuantity,
                 price,
                 marketValueUsd));
@@ -284,33 +334,101 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
     }
 
     private static Dictionary<string, List<(string Target, decimal Rate)>> BuildConversionGraph(
-        IReadOnlyDictionary<int, CurrencyPair> symbolInfos,
+        IReadOnlyDictionary<string, SymbolInfo> symbolInfos,
         IReadOnlyDictionary<int, decimal?> priceLookup,
         IReadOnlyCollection<PositionRow> positions)
     {
         var graph = new Dictionary<string, List<(string Target, decimal Rate)>>(StringComparer.OrdinalIgnoreCase);
-        var positionLookup = positions.ToDictionary(p => p.SymbolId);
+        var lastPriceLookup = BuildLastPriceLookup(positions);
 
-        foreach (var kvp in symbolInfos)
+        foreach (var info in symbolInfos.Values.Distinct())
         {
-            var price = priceLookup.TryGetValue(kvp.Key, out var close) && close.HasValue && close.Value != 0m
-                ? close.Value
-                : (positionLookup.TryGetValue(kvp.Key, out var pos) && pos.LastExecutePrice is { } last && last != 0m ? last : (decimal?)null);
+            decimal? price = null;
+
+            if (priceLookup.TryGetValue(info.SecurityId, out var close) && close.HasValue && close.Value != 0m)
+            {
+                price = close.Value;
+            }
+            else
+            {
+                price = info.Keys
+                    .Select(key => lastPriceLookup.TryGetValue(key, out var last) ? last : null)
+                    .FirstOrDefault(last => last.HasValue);
+            }
 
             if (!price.HasValue || price.Value == 0m)
             {
                 continue;
             }
 
-            AddEdge(graph, kvp.Value.BaseCurrency, kvp.Value.QuoteCurrency, price.Value);
-            if (price.Value != 0m)
-            {
-                AddEdge(graph, kvp.Value.QuoteCurrency, kvp.Value.BaseCurrency, 1m / price.Value);
-            }
+            var resolvedPrice = price.Value;
+
+            AddEdge(graph, info.Pair.BaseCurrency, info.Pair.QuoteCurrency, resolvedPrice);
+            AddEdge(graph, info.Pair.QuoteCurrency, info.Pair.BaseCurrency, 1m / resolvedPrice);
         }
 
         graph.TryAdd("USD", new List<(string, decimal)>());
         return graph;
+    }
+
+    private static Dictionary<string, decimal?> BuildLastPriceLookup(IReadOnlyCollection<PositionRow> positions)
+    {
+        var lookup = new Dictionary<string, decimal?>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var position in positions)
+        {
+            if (position.LastExecutePrice is not { } price || price == 0m)
+            {
+                continue;
+            }
+
+            if (!string.IsNullOrWhiteSpace(position.SymbolId))
+            {
+                lookup[NormalizeSymbol(position.SymbolId)] = price;
+            }
+
+            if (!string.IsNullOrWhiteSpace(position.Symbol))
+            {
+                lookup[NormalizeSymbol(position.Symbol)] = price;
+            }
+        }
+
+        return lookup;
+    }
+
+    private static bool TryGetSymbolInfo(
+        IReadOnlyDictionary<string, SymbolInfo> symbolInfos,
+        string? symbolId,
+        string? symbol,
+        out SymbolInfo info)
+    {
+        if (!string.IsNullOrWhiteSpace(symbolId))
+        {
+            var normalizedId = NormalizeSymbol(symbolId);
+            if (symbolInfos.TryGetValue(normalizedId, out info))
+            {
+                info.Keys.Add(normalizedId);
+                return true;
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(symbol))
+        {
+            var normalizedSymbol = NormalizeSymbol(symbol);
+            if (symbolInfos.TryGetValue(normalizedSymbol, out info))
+            {
+                info.Keys.Add(normalizedSymbol);
+                return true;
+            }
+        }
+
+        info = default!;
+        return false;
+    }
+
+    private static string NormalizeSymbol(string? value)
+    {
+        return string.IsNullOrWhiteSpace(value) ? string.Empty : value.Trim().ToUpperInvariant();
     }
 
     private static void AddEdge(
@@ -392,5 +510,21 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
 
     private sealed record LatestPriceRow(int SecurityId, decimal? Close);
 
-    private sealed record PositionRow(int SymbolId, decimal NetQuantity, decimal? LastExecutePrice);
+    private sealed record PositionRow(string? SymbolId, string? Symbol, decimal NetQuantity, decimal? LastExecutePrice);
+
+    private sealed class SymbolInfo
+    {
+        public SymbolInfo(int securityId, CurrencyPair pair)
+        {
+            SecurityId = securityId;
+            Pair = pair;
+            Keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        public int SecurityId { get; }
+
+        public CurrencyPair Pair { get; }
+
+        public HashSet<string> Keys { get; }
+    }
 }
