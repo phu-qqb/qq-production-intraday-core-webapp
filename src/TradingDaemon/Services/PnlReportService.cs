@@ -506,7 +506,12 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
         return false;
     }
 
-    private sealed record SecuritySymbolRow(int SecurityId, string Symbol);
+    private sealed record SecuritySymbolRow
+    {
+        public int SecurityId { get; init; }
+
+        public string? Symbol { get; init; }
+    }
 
     private sealed record LatestPriceRow(int SecurityId, decimal? Close);
 
