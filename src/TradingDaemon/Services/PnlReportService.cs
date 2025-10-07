@@ -513,7 +513,12 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
         public string? Symbol { get; init; }
     }
 
-    private sealed record LatestPriceRow(int SecurityId, decimal? Close);
+    private sealed record LatestPriceRow
+    {
+        public int SecurityId { get; init; }
+
+        public decimal? Close { get; init; }
+    }
 
     private sealed record PositionRow(string? SymbolId, string? Symbol, decimal NetQuantity, decimal? LastExecutePrice);
 
