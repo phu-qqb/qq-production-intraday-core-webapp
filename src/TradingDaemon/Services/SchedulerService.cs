@@ -75,7 +75,6 @@ public class SchedulerService : IHostedService
             return timeZone;
         }
 
-        throw;
     }
 
     private static bool TryResolveAlternate(string timeZoneId, out TimeZoneInfo timeZone)
