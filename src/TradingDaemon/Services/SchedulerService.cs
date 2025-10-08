@@ -74,7 +74,6 @@ public class SchedulerService : IHostedService
             _logger.LogWarning(ex, "Falling back to alternate time zone ID {Fallback} for configured ID {Configured}", timeZone.Id, timeZoneId);
             return timeZone;
         }
-
     }
 
     private static bool TryResolveAlternate(string timeZoneId, out TimeZoneInfo timeZone)

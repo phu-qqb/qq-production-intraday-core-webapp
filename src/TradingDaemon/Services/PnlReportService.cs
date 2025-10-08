@@ -172,7 +172,7 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
         var positions = await LoadPositionsAsync(connection, startUtc, endUtc, cancellationToken);
 
         var securityIds = positions
-            .Select(p => TryGetSymbolInfo(symbolInfos, p.SymbolId, p.Symbol, out var info) ? info.SecurityId : (int?)null)
+            .Select(p => TryGetSymbolInfo(symbolInfos, p.SymbolId, p.Symbol, out var info) ? info.SecurityId : (long?)null)
             .Where(id => id.HasValue)
             .Select(id => id!.Value)
             .Distinct()
@@ -180,7 +180,7 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
 
         var priceLookup = securityIds.Length > 0
             ? await LoadLatestPricesAsync(connection, securityIds, cancellationToken)
-            : new Dictionary<int, decimal?>();
+            : new Dictionary<long, decimal?>();
 
         var reportPositions = BuildReportPositions(symbolInfos, priceLookup, positions);
 
@@ -262,12 +262,12 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
         return result;
     }
 
-    private async Task<Dictionary<int, decimal?>> LoadLatestPricesAsync(IDbConnection connection, IEnumerable<int> securityIds, CancellationToken cancellationToken)
+    private async Task<Dictionary<long, decimal?>> LoadLatestPricesAsync(IDbConnection connection, IEnumerable<long> securityIds, CancellationToken cancellationToken)
     {
         var ids = securityIds.Distinct().ToArray();
         if (ids.Length == 0)
         {
-            return new Dictionary<int, decimal?>();
+            return new Dictionary<long, decimal?>();
         }
 
         var definition = new CommandDefinition(LatestPricesSql, new { SecurityIds = ids }, cancellationToken: cancellationToken);
@@ -285,7 +285,7 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
 
     private IReadOnlyList<PnlReportPosition> BuildReportPositions(
         IReadOnlyDictionary<string, SymbolInfo> symbolInfos,
-        IReadOnlyDictionary<int, decimal?> priceLookup,
+        IReadOnlyDictionary<long, decimal?> priceLookup,
         IReadOnlyCollection<PositionRow> positions)
     {
         var conversionGraph = BuildConversionGraph(symbolInfos, priceLookup, positions);
@@ -335,7 +335,7 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
 
     private static Dictionary<string, List<(string Target, decimal Rate)>> BuildConversionGraph(
         IReadOnlyDictionary<string, SymbolInfo> symbolInfos,
-        IReadOnlyDictionary<int, decimal?> priceLookup,
+        IReadOnlyDictionary<long, decimal?> priceLookup,
         IReadOnlyCollection<PositionRow> positions)
     {
         var graph = new Dictionary<string, List<(string Target, decimal Rate)>>(StringComparer.OrdinalIgnoreCase);
@@ -506,32 +506,22 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
         return false;
     }
 
-    private sealed record SecuritySymbolRow
-    {
-        public int SecurityId { get; init; }
+    private sealed record SecuritySymbolRow(long SecurityId, string Symbol);
 
-        public string? Symbol { get; init; }
-    }
-
-    private sealed record LatestPriceRow
-    {
-        public int SecurityId { get; init; }
-
-        public decimal? Close { get; init; }
-    }
+    private sealed record LatestPriceRow(long SecurityId, decimal? Close);
 
     private sealed record PositionRow(string? SymbolId, string? Symbol, decimal NetQuantity, decimal? LastExecutePrice);
 
     private sealed class SymbolInfo
     {
-        public SymbolInfo(int securityId, CurrencyPair pair)
+        public SymbolInfo(long securityId, CurrencyPair pair)
         {
             SecurityId = securityId;
             Pair = pair;
             Keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         }
 
-        public int SecurityId { get; }
+        public long SecurityId { get; }
 
         public CurrencyPair Pair { get; }
 
