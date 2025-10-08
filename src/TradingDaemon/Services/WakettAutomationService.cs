@@ -173,8 +173,8 @@ public sealed class WakettAutomationService : BackgroundService
 
         if (!pricesComplete)
         {
-            _logger.LogWarning("Skipping weight calculation and order submission because prices are incomplete.");
-            return;
+            _logger.LogWarning(
+                "Recent Wakett prices are incomplete; continuing automation workflow.");
         }
 
         try
