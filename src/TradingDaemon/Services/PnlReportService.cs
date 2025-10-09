@@ -143,9 +143,12 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
     public async Task<PnlReport> ComputeAndStoreCurrentDayPnlAsync(DateTime? clock = null, CancellationToken cancellationToken = default)
     {
         var nowUtc = (clock ?? DateTime.UtcNow).ToUniversalTime();
-        var tradingDate = DateOnly.FromDateTime(nowUtc);
-        var startUtc = tradingDate.ToDateTime(TimeOnly.MinValue, DateTimeKind.Utc);
-        var endUtc = startUtc.AddDays(1);
+        var nowLocal = TimeZoneInfo.ConvertTimeFromUtc(nowUtc, NewYorkTimeZone);
+        var tradingDate = DateOnly.FromDateTime(nowLocal);
+        var startLocal = tradingDate.ToDateTime(TimeOnly.MinValue);
+        var endLocal = startLocal.AddDays(1);
+        var startUtc = TimeZoneInfo.ConvertTimeToUtc(startLocal, NewYorkTimeZone);
+        var endUtc = TimeZoneInfo.ConvertTimeToUtc(endLocal, NewYorkTimeZone);
 
         await using var connection = (SqlConnection)_context.CreateConnection();
         await connection.OpenAsync(cancellationToken);
@@ -192,6 +195,10 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
 
         return new PnlReport(tradingDate, pnlValue, grossMarketValue, totalNetExposure, reportPositions);
     }
+
+    private static TimeZoneInfo NewYorkTimeZone
+        => TimeZoneInfo.FindSystemTimeZoneById(
+            OperatingSystem.IsWindows() ? "Eastern Standard Time" : "America/New_York");
 
     private async Task EnsureStorageAsync(SqlConnection connection, CancellationToken cancellationToken)
     {
