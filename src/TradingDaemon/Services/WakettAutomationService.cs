@@ -14,6 +14,7 @@ public sealed class WakettAutomationService : BackgroundService
 {
     private static readonly TimeSpan SessionStart = TimeSpan.FromHours(9);
     private static readonly TimeSpan SessionEnd = new(15, 59, 0);
+    private static readonly TimeSpan SessionShutdownDelay = TimeSpan.FromHours(1);
 
     private readonly WakettPriceFetcher _priceFetcher;
     private readonly WeightCalculator _weightCalculator;
@@ -61,6 +62,8 @@ public sealed class WakettAutomationService : BackgroundService
         }
 
         var sessionActive = false;
+        DateTime? sessionShutdownDeadlineUtc = null;
+        var postSessionFillCheckCompleted = false;
         var initialReferenceUtc = _timeProvider.GetUtcNow().UtcDateTime;
         var nextWorkflowUtc = GetNextWorkflowRunUtc(initialReferenceUtc);
         var nextFillUtc = GetNextFillCheckUtc(initialReferenceUtc);
@@ -77,6 +80,8 @@ public sealed class WakettAutomationService : BackgroundService
 
             if (withinSession)
             {
+                sessionShutdownDeadlineUtc = null;
+                postSessionFillCheckCompleted = false;
                 if (!sessionActive)
                 {
                     sessionActive = true;
@@ -125,10 +130,26 @@ public sealed class WakettAutomationService : BackgroundService
             {
                 if (sessionActive)
                 {
-                    await RunFillCheckAsync(stoppingToken);
-                    _logger.LogInformation("US session completed. Shutting down application.");
-                    _applicationLifetime.StopApplication();
-                    return;
+                    sessionShutdownDeadlineUtc ??= GetSessionShutdownDeadlineUtc(nowUtc);
+
+                    if (!postSessionFillCheckCompleted)
+                    {
+                        await RunFillCheckAsync(stoppingToken);
+                        postSessionFillCheckCompleted = true;
+                        _logger.LogInformation(
+                            "US session completed. Reports will continue until {ShutdownUtc:o} before shutdown.",
+                            sessionShutdownDeadlineUtc);
+                    }
+
+                    if (nowUtc >= sessionShutdownDeadlineUtc)
+                    {
+                        _logger.LogInformation("Post-session buffer elapsed. Shutting down application.");
+                        _applicationLifetime.StopApplication();
+                        return;
+                    }
+
+                    await DelayUntilAsync(sessionShutdownDeadlineUtc.Value, stoppingToken);
+                    continue;
                 }
 
                 var nextSessionStart = GetNextSessionStartUtc(nowUtc);
@@ -189,6 +210,7 @@ public sealed class WakettAutomationService : BackgroundService
 
         try
         {
+            await WaitForNextHourPlusOneAsync(stoppingToken);
             await _orderSender.SendOrdersAsync(ResolveAutomationAum(), stoppingToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -345,6 +367,13 @@ public sealed class WakettAutomationService : BackgroundService
         return sessionStartUtc;
     }
 
+    private DateTime GetSessionShutdownDeadlineUtc(DateTime referenceUtc)
+    {
+        var local = TimeZoneInfo.ConvertTimeFromUtc(referenceUtc, NewYorkTimeZone);
+        var endLocal = GetSessionEndLocal(local).Add(SessionShutdownDelay);
+        return TimeZoneInfo.ConvertTimeToUtc(endLocal, NewYorkTimeZone);
+    }
+
     private static DateTime GetSessionEndLocal(DateTime local)
     {
         var end = new DateTime(local.Year, local.Month, local.Day, SessionEnd.Hours, SessionEnd.Minutes, SessionEnd.Seconds);
@@ -400,4 +429,14 @@ public sealed class WakettAutomationService : BackgroundService
     private static TimeZoneInfo NewYorkTimeZone
         => TimeZoneInfo.FindSystemTimeZoneById(
             OperatingSystem.IsWindows() ? "Eastern Standard Time" : "America/New_York");
+
+    private async Task WaitForNextHourPlusOneAsync(CancellationToken stoppingToken)
+    {
+        var nowUtc = _timeProvider.GetUtcNow().UtcDateTime;
+        var local = TimeZoneInfo.ConvertTimeFromUtc(nowUtc, NewYorkTimeZone);
+        var nextHour = new DateTime(local.Year, local.Month, local.Day, local.Hour, 0, 0).AddHours(1);
+        var targetLocal = nextHour.AddMinutes(1);
+        var targetUtc = TimeZoneInfo.ConvertTimeToUtc(targetLocal, NewYorkTimeZone);
+        await DelayUntilAsync(targetUtc, stoppingToken);
+    }
 }
