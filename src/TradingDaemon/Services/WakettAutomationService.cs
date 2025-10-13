@@ -271,6 +271,10 @@ public sealed class WakettAutomationService : BackgroundService
         {
             await _tradeFetcher.FetchAndStoreAsync(request, stoppingToken);
         }
+        catch (TaskCanceledException ex) when (!stoppingToken.IsCancellationRequested)
+        {
+            _logger.LogError(ex, "Wakett fill fetch timed out while calling the Wakett API.");
+        }
         catch (WakettTradeFetcherException ex)
         {
             _logger.LogError(ex, "Wakett fill fetch returned an error: {Message}", ex.Message);

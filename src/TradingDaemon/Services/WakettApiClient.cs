@@ -68,7 +68,9 @@ public class WakettApiClient
         return JsonSerializer.Deserialize<WakettOrderResponse>(json, _jsonOptions);
     }
 
-    public async Task<WakettTradeResponse?> GetTradesAsync(WakettTradeRequest request)
+    public async Task<WakettTradeResponse?> GetTradesAsync(
+        WakettTradeRequest request,
+        CancellationToken cancellationToken = default)
     {
         var client = _clientFactory.CreateClient("WakettTradeApi");
 
@@ -83,7 +85,7 @@ public class WakettApiClient
         System.Console.WriteLine($"Posting Wakett trades request to {requestUri}");
 
 
-        var response = await client.PostAsync("trades", content);
+        var response = await client.PostAsync("trades", content, cancellationToken);
         response.EnsureSuccessStatusCode();
         var json = await response.Content.ReadAsStringAsync();
         return JsonSerializer.Deserialize<WakettTradeResponse>(json, _jsonOptions);

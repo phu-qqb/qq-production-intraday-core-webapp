@@ -274,7 +274,7 @@ OUTPUT $action;";
             Strategy = normalized.Strategy
         };
 
-        var response = await _client.GetTradesAsync(tradeRequest);
+        var response = await _client.GetTradesAsync(tradeRequest, cancellationToken);
         if (response is null)
         {
             throw new WakettTradeFetcherException(
