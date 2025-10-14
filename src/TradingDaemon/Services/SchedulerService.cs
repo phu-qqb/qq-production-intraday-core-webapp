@@ -128,23 +128,9 @@ public class TradingJob : IJob
     {
         await _priceFetcher.FetchAndStoreAsync();
         var report = await _pnlReportService.ComputeAndStoreCurrentDayPnlAsync(cancellationToken: context.CancellationToken);
-
-        if (ShouldSendReport(context))
-        {
-            await _emailNotificationService.SendPnLReportAsync(report, context.CancellationToken);
-        }
+        await _emailNotificationService.SendPnLReportAsync(report, context.CancellationToken);
 
         await _weightCalculator.CalculateAndStoreAsync();
         await _orderSender.SendOrdersAsync();
-    }
-
-    private static bool ShouldSendReport(IJobExecutionContext context)
-    {
-
-        var scheduled = context.ScheduledFireTimeUtc
-            ?? (DateTimeOffset?)context.FireTimeUtc
-            ?? DateTimeOffset.UtcNow;
-
-        return scheduled.Minute == 0;
     }
 }
