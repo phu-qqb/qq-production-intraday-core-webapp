@@ -20,6 +20,8 @@ public sealed class WakettAutomationService : BackgroundService
     private readonly WeightCalculator _weightCalculator;
     private readonly OrderSender _orderSender;
     private readonly WakettTradeFetcher _tradeFetcher;
+    private readonly PnlReportService _pnlReportService;
+    private readonly IEmailNotificationService _emailNotificationService;
     private readonly IHostApplicationLifetime _applicationLifetime;
     private readonly ILogger<WakettAutomationService> _logger;
     private readonly WakettAutomationOptions _options;
@@ -31,6 +33,8 @@ public sealed class WakettAutomationService : BackgroundService
         WeightCalculator weightCalculator,
         OrderSender orderSender,
         WakettTradeFetcher tradeFetcher,
+        PnlReportService pnlReportService,
+        IEmailNotificationService emailNotificationService,
         IHostApplicationLifetime applicationLifetime,
         IOptions<WakettAutomationOptions> options,
         ILogger<WakettAutomationService> logger,
@@ -41,6 +45,8 @@ public sealed class WakettAutomationService : BackgroundService
         _weightCalculator = weightCalculator;
         _orderSender = orderSender;
         _tradeFetcher = tradeFetcher;
+        _pnlReportService = pnlReportService;
+        _emailNotificationService = emailNotificationService;
         _applicationLifetime = applicationLifetime;
         _logger = logger;
         _options = options?.Value ?? new WakettAutomationOptions();
@@ -172,13 +178,33 @@ public sealed class WakettAutomationService : BackgroundService
     {
         _logger.LogInformation("Executing automated Wakett trading workflow.");
 
+        WakettPriceUploadResult? uploadResult = null;
         try
         {
-            await _priceFetcher.FetchAndStoreAsync(stoppingToken);
+            uploadResult = await _priceFetcher.FetchAndStoreAsync(stoppingToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogError(ex, "Failed to fetch Wakett prices.");
+        }
+
+        var hasNewPrices = uploadResult?.Prices.Count > 0;
+
+        if (hasNewPrices)
+        {
+            try
+            {
+                var report = await _pnlReportService.ComputeAndStoreCurrentDayPnlAsync(cancellationToken: stoppingToken);
+                await _emailNotificationService.SendPnLReportAsync(report, stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to compute or send PnL report after Wakett price update.");
+            }
         }
 
         bool pricesComplete;
