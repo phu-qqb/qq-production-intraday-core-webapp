@@ -53,9 +53,17 @@ WHEN NOT MATCHED THEN
         f.ExecutePrice,
         f.TradeTimestamp,
         f.Side,
-        s.SecurityId
+        COALESCE(secById.SecurityId, secBySymbol.SecurityId) AS SecurityId
     FROM [wakett].[Fill] f
-    LEFT JOIN [Intraday].[core].[Security] s ON UPPER(LTRIM(RTRIM(s.Symbol))) = UPPER(LTRIM(RTRIM(f.Symbol)))
+    OUTER APPLY (
+        SELECT
+            TRY_CAST(NULLIF(LTRIM(RTRIM(f.SymbolId)), '') AS bigint) AS SymbolSecurityId,
+            UPPER(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(f.Symbol)), '/', ''), '-', ''), '_', ''), ' ', '')) AS NormalizedSymbol
+    ) parsed
+    LEFT JOIN [Intraday].[core].[Security] secById ON secById.SecurityId = parsed.SymbolSecurityId
+    LEFT JOIN [Intraday].[core].[Security] secBySymbol ON secById.SecurityId IS NULL
+        AND parsed.NormalizedSymbol IS NOT NULL
+        AND UPPER(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(secBySymbol.Symbol)), '/', ''), '-', ''), '_', ''), ' ', '')) = parsed.NormalizedSymbol
 ), LatestPrices AS (
     SELECT
         pb.SecurityId,
@@ -64,7 +72,6 @@ WHEN NOT MATCHED THEN
     FROM [Intraday].[mkt].[PriceBar] pb
     WHERE
         pb.TimeframeMinute = 60
-        AND pb.BarTimeUtc >= @StartUtc
         AND pb.BarTimeUtc < @EndUtc
 )
 SELECT
