@@ -108,27 +108,23 @@ public class TradingJob : IJob
     private readonly WeightCalculator _weightCalculator;
     private readonly OrderSender _orderSender;
     private readonly PnlReportService _pnlReportService;
-    private readonly IEmailNotificationService _emailNotificationService;
 
     public TradingJob(
         PriceFetcher priceFetcher,
         WeightCalculator weightCalculator,
         OrderSender orderSender,
-        PnlReportService pnlReportService,
-        IEmailNotificationService emailNotificationService)
+        PnlReportService pnlReportService)
     {
         _priceFetcher = priceFetcher;
         _weightCalculator = weightCalculator;
         _orderSender = orderSender;
         _pnlReportService = pnlReportService;
-        _emailNotificationService = emailNotificationService;
     }
 
     public async Task Execute(IJobExecutionContext context)
     {
         await _priceFetcher.FetchAndStoreAsync();
-        var report = await _pnlReportService.ComputeAndStoreCurrentDayPnlAsync(cancellationToken: context.CancellationToken);
-        await _emailNotificationService.SendPnLReportAsync(report, context.CancellationToken);
+        await _pnlReportService.ComputeAndStoreCurrentDayPnlAsync(cancellationToken: context.CancellationToken);
 
         await _weightCalculator.CalculateAndStoreAsync();
         await _orderSender.SendOrdersAsync();

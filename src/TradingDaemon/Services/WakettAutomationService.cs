@@ -454,7 +454,27 @@ public sealed class WakettAutomationService : BackgroundService
     private static bool IsWeekend(DateTime value)
         => value.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday;
 
-    private int WorkflowMinuteOffset => Math.Clamp(_options.WorkflowMinuteOffset, 0, 59);
+    private int WorkflowMinuteOffset
+    {
+        get
+        {
+            var configuredOffset = Math.Clamp(_options.WorkflowMinuteOffset, 0, 59);
+            var priceOffset = PriceMinuteOffset;
+
+            if (configuredOffset < priceOffset)
+            {
+                _logger.LogDebug(
+                    "Adjusting Wakett workflow offset from {Configured} to {PriceOffset} to ensure prices are available before triggering.",
+                    configuredOffset,
+                    priceOffset);
+            }
+
+            return Math.Max(configuredOffset, priceOffset);
+        }
+    }
+
+    private int PriceMinuteOffset
+        => Math.Clamp(_configuration.GetValue<int?>("ExternalApis:WakettApi:PriceMinuteOffset") ?? 6, 0, 59);
 
     private static TimeZoneInfo NewYorkTimeZone
         => TimeZoneInfo.FindSystemTimeZoneById(
