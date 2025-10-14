@@ -20,6 +20,8 @@ public sealed class WakettAutomationService : BackgroundService
     private readonly WeightCalculator _weightCalculator;
     private readonly OrderSender _orderSender;
     private readonly WakettTradeFetcher _tradeFetcher;
+    private readonly PnlReportService _pnlReportService;
+    private readonly IEmailNotificationService _emailNotificationService;
     private readonly IHostApplicationLifetime _applicationLifetime;
     private readonly ILogger<WakettAutomationService> _logger;
     private readonly WakettAutomationOptions _options;
@@ -31,6 +33,8 @@ public sealed class WakettAutomationService : BackgroundService
         WeightCalculator weightCalculator,
         OrderSender orderSender,
         WakettTradeFetcher tradeFetcher,
+        PnlReportService pnlReportService,
+        IEmailNotificationService emailNotificationService,
         IHostApplicationLifetime applicationLifetime,
         IOptions<WakettAutomationOptions> options,
         ILogger<WakettAutomationService> logger,
@@ -41,6 +45,8 @@ public sealed class WakettAutomationService : BackgroundService
         _weightCalculator = weightCalculator;
         _orderSender = orderSender;
         _tradeFetcher = tradeFetcher;
+        _pnlReportService = pnlReportService;
+        _emailNotificationService = emailNotificationService;
         _applicationLifetime = applicationLifetime;
         _logger = logger;
         _options = options?.Value ?? new WakettAutomationOptions();
@@ -172,13 +178,33 @@ public sealed class WakettAutomationService : BackgroundService
     {
         _logger.LogInformation("Executing automated Wakett trading workflow.");
 
+        WakettPriceUploadResult? uploadResult = null;
         try
         {
-            await _priceFetcher.FetchAndStoreAsync(stoppingToken);
+            uploadResult = await _priceFetcher.FetchAndStoreAsync(stoppingToken);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogError(ex, "Failed to fetch Wakett prices.");
+        }
+
+        var hasNewPrices = uploadResult?.Prices.Count > 0;
+
+        if (hasNewPrices)
+        {
+            try
+            {
+                var report = await _pnlReportService.ComputeAndStoreCurrentDayPnlAsync(cancellationToken: stoppingToken);
+                await _emailNotificationService.SendPnLReportAsync(report, stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Failed to compute or send PnL report after Wakett price update.");
+            }
         }
 
         bool pricesComplete;
@@ -428,7 +454,27 @@ public sealed class WakettAutomationService : BackgroundService
     private static bool IsWeekend(DateTime value)
         => value.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday;
 
-    private int WorkflowMinuteOffset => Math.Clamp(_options.WorkflowMinuteOffset, 0, 59);
+    private int WorkflowMinuteOffset
+    {
+        get
+        {
+            var configuredOffset = Math.Clamp(_options.WorkflowMinuteOffset, 0, 59);
+            var priceOffset = PriceMinuteOffset;
+
+            if (configuredOffset < priceOffset)
+            {
+                _logger.LogDebug(
+                    "Adjusting Wakett workflow offset from {Configured} to {PriceOffset} to ensure prices are available before triggering.",
+                    configuredOffset,
+                    priceOffset);
+            }
+
+            return Math.Max(configuredOffset, priceOffset);
+        }
+    }
+
+    private int PriceMinuteOffset
+        => Math.Clamp(_configuration.GetValue<int?>("ExternalApis:WakettApi:PriceMinuteOffset") ?? 6, 0, 59);
 
     private static TimeZoneInfo NewYorkTimeZone
         => TimeZoneInfo.FindSystemTimeZoneById(
