@@ -115,20 +115,20 @@ public class OrderSender
         }
 
         var scheduledTimestamp = ResolveScheduledTimestamp(orderTimestampUtc);
-        //var existingOrderSymbols = await LoadExistingOrderSymbolsAsync(
-        //    connection,
-        //    scheduledTimestamp,
-        //    builtOrders,
-        //    cancellationToken);
+        var existingOrderSymbols = await LoadExistingOrderSymbolsAsync(
+            connection,
+            scheduledTimestamp,
+            builtOrders,
+            cancellationToken);
 
-        //if (existingOrderSymbols.Count > 0)
-        //{
-        //    _logger.LogInformation(
-        //        "Skipping Wakett order submission for scheduled timestamp {ScheduledTimestamp} because existing orders were found for symbol(s): {Symbols}.",
-        //        scheduledTimestamp,
-        //        string.Join(", ", existingOrderSymbols));
-        //    return;
-        //}
+        if (existingOrderSymbols.Count > 0)
+        {
+            _logger.LogInformation(
+                "Skipping Wakett order submission for scheduled timestamp {ScheduledTimestamp} because existing orders were found for symbol(s): {Symbols}.",
+                scheduledTimestamp,
+                string.Join(", ", existingOrderSymbols));
+            return;
+        }
 
         var aum = aumOverride ?? ResolveAum();
 
