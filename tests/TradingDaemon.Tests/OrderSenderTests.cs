@@ -695,6 +695,27 @@ public class OrderSenderTests
     }
 
     [Fact]
+    public void CalculateOrderTimestamp_NextSessionRespectsOffsetWhenBarSizeIsLarger()
+    {
+        var zoneId = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York";
+        var zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
+        var localBar = new DateTime(2024, 1, 2, 15, 59, 0, DateTimeKind.Unspecified);
+        var barTimeUtc = TimeZoneInfo.ConvertTimeToUtc(localBar, zone);
+
+        var result = OrderSender.CalculateOrderTimestamp(
+            barTimeUtc,
+            TimeSpan.FromMinutes(60),
+            "US",
+            6,
+            60);
+
+        var nextSessionLocal = new DateTime(2024, 1, 3, 9, 6, 0, DateTimeKind.Unspecified);
+        var expectedUtc = TimeZoneInfo.ConvertTimeToUtc(nextSessionLocal, zone);
+
+        Assert.Equal(expectedUtc, result);
+    }
+
+    [Fact]
     public void CalculateOrderTimestamp_ZeroOffsetAlignsNextSessionToBarSize()
     {
         var zoneId = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York";

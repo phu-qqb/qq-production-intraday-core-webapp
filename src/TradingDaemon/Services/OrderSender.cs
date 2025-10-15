@@ -661,6 +661,12 @@ VALUES
         var baseMinute = Math.Max(0, barSizeMinutes ?? 0);
         var step = offsetMinutes.Value;
 
+        if (barSizeMinutes is > 0 && offsetMinutes.Value < barSizeMinutes.Value)
+        {
+            baseMinute = offsetMinutes.Value;
+            step = barSizeMinutes.Value;
+        }
+
         var withinSession = GetNextScheduledLocal(local, step, baseMinute, strictlyGreater: true);
         if (withinSession <= sessionEnd)
         {
@@ -695,8 +701,16 @@ VALUES
 
         if (offsetMinutes is > 0)
         {
+            var step = offsetMinutes.Value;
             var baseMinute = Math.Max(0, barSizeMinutes ?? 0);
-            return GetNextScheduledLocal(nextSessionStart, offsetMinutes.Value, baseMinute, strictlyGreater: false);
+
+            if (barSizeMinutes is > 0 && offsetMinutes.Value < barSizeMinutes.Value)
+            {
+                baseMinute = offsetMinutes.Value;
+                step = barSizeMinutes.Value;
+            }
+
+            return GetNextScheduledLocal(nextSessionStart, step, baseMinute, strictlyGreater: false);
         }
 
         var alignment = barSizeMinutes.GetValueOrDefault((int)Math.Round(barInterval.TotalMinutes));
