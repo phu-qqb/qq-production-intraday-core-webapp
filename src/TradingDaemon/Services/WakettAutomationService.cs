@@ -70,6 +70,7 @@ public sealed class WakettAutomationService : BackgroundService
         var sessionActive = false;
         DateTime? sessionShutdownDeadlineUtc = null;
         var postSessionFillCheckCompleted = false;
+        var postSessionWorkflowCompleted = false;
         var initialReferenceUtc = _timeProvider.GetUtcNow().UtcDateTime;
         var nextWorkflowUtc = GetNextWorkflowRunUtc(initialReferenceUtc);
         var nextFillUtc = GetNextFillCheckUtc(initialReferenceUtc);
@@ -84,10 +85,52 @@ public sealed class WakettAutomationService : BackgroundService
             var nowUtc = _timeProvider.GetUtcNow().UtcDateTime;
             var withinSession = IsWithinSession(nowUtc);
 
+            if (!withinSession && sessionActive)
+            {
+                sessionShutdownDeadlineUtc ??= GetSessionShutdownDeadlineUtc(nowUtc);
+            }
+
+            var canRunWorkflow = withinSession
+                || (sessionActive
+                    && !postSessionWorkflowCompleted
+                    && sessionShutdownDeadlineUtc is { } shutdownDeadline
+                    && nowUtc < shutdownDeadline);
+
+            if (canRunWorkflow && nowUtc >= nextWorkflowUtc)
+            {
+                try
+                {
+                    await RunTradingWorkflowAsync(stoppingToken);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogError(ex, "Scheduled Wakett workflow run failed.");
+                }
+
+                var reference = _timeProvider.GetUtcNow().UtcDateTime.AddSeconds(1);
+
+                if (withinSession)
+                {
+                    nextWorkflowUtc = GetNextWorkflowRunUtc(reference);
+                    _logger.LogDebug(
+                        "Rescheduled next Wakett workflow run for {WorkflowUtc:o}.",
+                        nextWorkflowUtc);
+                }
+                else
+                {
+                    postSessionWorkflowCompleted = true;
+                    nextWorkflowUtc = GetFirstWorkflowRunUtc(GetNextSessionStartUtc(reference));
+                    _logger.LogInformation(
+                        "Completed post-session Wakett workflow. Next run scheduled for {WorkflowUtc:o}.",
+                        nextWorkflowUtc);
+                }
+            }
+
             if (withinSession)
             {
                 sessionShutdownDeadlineUtc = null;
                 postSessionFillCheckCompleted = false;
+                postSessionWorkflowCompleted = false;
                 if (!sessionActive)
                 {
                     sessionActive = true;
@@ -103,23 +146,6 @@ public sealed class WakettAutomationService : BackgroundService
                         nextFillUtc);
                 }
 
-                if (nowUtc >= nextWorkflowUtc)
-                {
-                    try
-                    {
-                        await RunTradingWorkflowAsync(stoppingToken);
-                    }
-                    catch (Exception ex) when (ex is not OperationCanceledException)
-                    {
-                        _logger.LogError(ex, "Scheduled Wakett workflow run failed.");
-                    }
-
-                    nextWorkflowUtc = GetNextWorkflowRunUtc(_timeProvider.GetUtcNow().UtcDateTime.AddSeconds(1));
-                    _logger.LogDebug(
-                        "Rescheduled next Wakett workflow run for {WorkflowUtc:o}.",
-                        nextWorkflowUtc);
-                }
-
                 if (nowUtc >= nextFillUtc)
                 {
                     await RunFillCheckAsync(stoppingToken);
@@ -130,6 +156,11 @@ public sealed class WakettAutomationService : BackgroundService
                 }
 
                 var nextEvent = nextWorkflowUtc < nextFillUtc ? nextWorkflowUtc : nextFillUtc;
+                var sessionEndUtc = GetCurrentSessionEndUtc(nowUtc);
+                if (nextEvent > sessionEndUtc)
+                {
+                    nextEvent = sessionEndUtc;
+                }
                 await DelayUntilAsync(nextEvent, stoppingToken);
             }
             else
@@ -154,7 +185,13 @@ public sealed class WakettAutomationService : BackgroundService
                         return;
                     }
 
-                    await DelayUntilAsync(sessionShutdownDeadlineUtc.Value, stoppingToken);
+                    var nextDelayTarget = sessionShutdownDeadlineUtc.Value;
+                    if (!postSessionWorkflowCompleted && nextWorkflowUtc < nextDelayTarget)
+                    {
+                        nextDelayTarget = nextWorkflowUtc;
+                    }
+
+                    await DelayUntilAsync(nextDelayTarget, stoppingToken);
                     continue;
                 }
 
@@ -347,8 +384,22 @@ public sealed class WakettAutomationService : BackgroundService
 
         if (candidate > endLocal)
         {
-            var nextSession = GetNextSessionStartUtc(referenceUtc);
-            return GetFirstWorkflowRunUtc(nextSession);
+            var minimumDelayMinutes = Math.Max(WorkflowMinuteOffset, 1);
+            var postSessionLocal = endLocal.AddMinutes(minimumDelayMinutes);
+            var shutdownLocal = endLocal.Add(SessionShutdownDelay);
+
+            if (postSessionLocal > shutdownLocal)
+            {
+                postSessionLocal = shutdownLocal;
+            }
+
+            if (postSessionLocal <= local)
+            {
+                var nextSession = GetNextSessionStartUtc(referenceUtc);
+                return GetFirstWorkflowRunUtc(nextSession);
+            }
+
+            return TimeZoneInfo.ConvertTimeToUtc(postSessionLocal, NewYorkTimeZone);
         }
 
         return TimeZoneInfo.ConvertTimeToUtc(candidate, NewYorkTimeZone);
@@ -401,6 +452,13 @@ public sealed class WakettAutomationService : BackgroundService
     {
         var local = TimeZoneInfo.ConvertTimeFromUtc(referenceUtc, NewYorkTimeZone);
         var endLocal = GetSessionEndLocal(local).Add(SessionShutdownDelay);
+        return TimeZoneInfo.ConvertTimeToUtc(endLocal, NewYorkTimeZone);
+    }
+
+    private DateTime GetCurrentSessionEndUtc(DateTime referenceUtc)
+    {
+        var local = TimeZoneInfo.ConvertTimeFromUtc(referenceUtc, NewYorkTimeZone);
+        var endLocal = GetSessionEndLocal(local);
         return TimeZoneInfo.ConvertTimeToUtc(endLocal, NewYorkTimeZone);
     }
 
