@@ -640,6 +640,7 @@ VALUES
 
         var nextSessionStart = AlignNextSessionStart(
             sessionStart,
+            local,
             barInterval,
             offsetMinutes,
             barSizeMinutes);
@@ -658,8 +659,8 @@ VALUES
             return null;
         }
 
-        var baseMinute = Math.Max(0, barSizeMinutes ?? 0);
         var step = offsetMinutes.Value;
+        var baseMinute = ResolveScheduleBaseMinute(local, step, barSizeMinutes);
 
         var withinSession = GetNextScheduledLocal(local, step, baseMinute, strictlyGreater: true);
         if (withinSession <= sessionEnd)
@@ -687,6 +688,7 @@ VALUES
 
     private static DateTime AlignNextSessionStart(
         DateTime sessionStart,
+        DateTime lastBarLocal,
         TimeSpan barInterval,
         int? offsetMinutes,
         int? barSizeMinutes)
@@ -695,7 +697,7 @@ VALUES
 
         if (offsetMinutes is > 0)
         {
-            var baseMinute = Math.Max(0, barSizeMinutes ?? 0);
+            var baseMinute = ResolveScheduleBaseMinute(lastBarLocal, offsetMinutes.Value, barSizeMinutes);
             return GetNextScheduledLocal(nextSessionStart, offsetMinutes.Value, baseMinute, strictlyGreater: false);
         }
 
@@ -714,6 +716,28 @@ VALUES
 
         var delta = alignment - remainder;
         return nextSessionStart.AddMinutes(delta);
+    }
+
+    private static int ResolveScheduleBaseMinute(DateTime reference, int stepMinutes, int? barSizeMinutes)
+    {
+        if (stepMinutes <= 0)
+        {
+            return Math.Max(0, barSizeMinutes ?? 0);
+        }
+
+        if (barSizeMinutes is int barSize && barSize > 0 && barSize < stepMinutes)
+        {
+            return barSize;
+        }
+
+        var minutesIntoDay = (int)Math.Floor(reference.TimeOfDay.TotalMinutes);
+        var remainder = minutesIntoDay % stepMinutes;
+        if (remainder < 0)
+        {
+            remainder += stepMinutes;
+        }
+
+        return remainder;
     }
 
     private static DateTime GetNextScheduledLocal(
