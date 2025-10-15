@@ -725,7 +725,7 @@ VALUES
             return Math.Max(0, barSizeMinutes ?? 0);
         }
 
-        if (barSizeMinutes is int barSize && barSize >= 0 && barSize < stepMinutes)
+        if (barSizeMinutes is int barSize && barSize > 0 && barSize < stepMinutes)
         {
             return barSize;
         }

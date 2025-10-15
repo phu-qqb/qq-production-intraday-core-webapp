@@ -21,7 +21,7 @@ public static class FillController
         });
 
 
-        app.MapGet("/api/pnl", async (DateTime date, DapperContext context, IEmailNotificationService emailNotificationService, ILogger<FillController> logger) =>
+        app.MapGet("/api/pnl", async (DateTime date, DapperContext context, IEmailNotificationService emailNotificationService, ILogger<FillEndpointsLogger> logger) =>
 
         {
             using var connection = context.CreateConnection();
