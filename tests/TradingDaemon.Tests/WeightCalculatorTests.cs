@@ -15,7 +15,7 @@ public class WeightCalculatorTests
             ["Executables:GenBinariesExecutable"] = "bash",
             ["Executables:PythonExecutable"] = "python3",
             ["Programmes:0:Universe"] = "INFXUS",
-            ["Programmes:0:Session"] = "US",
+            ["Programmes:0:Session"] = "EUUS",
             ["Programmes:0:Timeframe"] = "60",
             ["Programmes:0:StartDate"] = "2022-01-01T00:00:00Z"
         }).Build();
