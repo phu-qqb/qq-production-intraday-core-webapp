@@ -760,7 +760,7 @@ public class OrderSenderTests
         var defaults = new Dictionary<string, string?>
         {
             ["Programmes:0:ModelId"] = "1",
-            ["Programmes:0:Session"] = "US",
+            ["Programmes:0:Session"] = "EUUS",
             ["Programmes:0:Timeframe"] = "60",
             ["ExternalApis:WakettApi:Symbols:0:SecurityId"] = "58",
             ["ExternalApis:WakettApi:Symbols:0:Symbol"] = "EUR/USD",
