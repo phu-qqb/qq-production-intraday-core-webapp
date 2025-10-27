@@ -110,8 +110,7 @@ public class OrderSender
         var builtOrders = BuildOrders(latestWeights, symbolMap, allowedSymbols, orderTimestampUtc);
         if (builtOrders.Count == 0)
         {
-            _logger.LogInformation("No non-zero weights available for Wakett order submission.");
-            return;
+            _logger.LogInformation("All Wakett order weights are zero. Submitting flat order request.");
         }
 
         var scheduledTimestamp = ResolveScheduledTimestamp(orderTimestampUtc);
