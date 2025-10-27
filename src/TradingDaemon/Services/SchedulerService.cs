@@ -34,10 +34,10 @@ public class SchedulerService : IHostedService
 
         var schedulerOptions = _optionsMonitor.CurrentValue;
         var cron = string.IsNullOrWhiteSpace(schedulerOptions.Cron)
-            ? "0 0/30 7-19 ? * *"
+            ? "0 0/30 9-15 ? * *"
             : schedulerOptions.Cron;
         var timeZoneId = string.IsNullOrWhiteSpace(schedulerOptions.TimeZone)
-            ? TimeZoneInfo.Utc.Id
+            ? "Eastern Standard Time"
             : schedulerOptions.TimeZone;
 
         var timeZone = ResolveTimeZone(timeZoneId);
