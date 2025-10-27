@@ -605,7 +605,15 @@ public class WakettPriceFetcher
             DateTimeKind.Utc);
     }
 
-    private static bool IsWeekend(DateTime value) => value.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday;
+    private static bool IsWeekend(DateTime value)
+    {
+        var utc = value.Kind == DateTimeKind.Utc
+            ? value
+            : DateTime.SpecifyKind(value, DateTimeKind.Utc);
+
+        var local = TimeZoneInfo.ConvertTimeFromUtc(utc, NewYorkZone);
+        return local.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday;
+    }
 
     private async Task<Dictionary<int, CurrencyPair>> LoadSecurityPairsAsync(
         IEnumerable<int> securityIds,
