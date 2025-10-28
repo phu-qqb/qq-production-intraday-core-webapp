@@ -296,15 +296,22 @@ END";
         foreach (var group in groups)
         {
             var ordered = group.OrderBy(r => r.BarTimeUtc).ToList();
-            if (ordered.Count < 2)
+            var expected = GetExpectedPenultimateUtc(group.Key, session, alignedStart, timeframeMinutes, offsetMinutes);
+            if (!expected.HasValue)
             {
                 continue;
             }
 
-            var expected = GetExpectedPenultimateUtc(group.Key, session, alignedStart, timeframeMinutes, offsetMinutes);
-            var target = expected.HasValue
-                ? ordered.FirstOrDefault(r => r.BarTimeUtc == expected.Value) ?? ordered[^2]
-                : ordered[^2];
+            var target = ordered.FirstOrDefault(r => r.BarTimeUtc == expected.Value);
+            if (target is null)
+            {
+                _logger.LogWarning(
+                    "Unable to locate expected penultimate bar {ExpectedUtc} for session {Session} (start {SessionStart})",
+                    expected.Value,
+                    sessionKey,
+                    group.Key);
+                continue;
+            }
 
             ZeroRow(target);
         }
