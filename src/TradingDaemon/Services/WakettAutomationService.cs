@@ -113,54 +113,64 @@ public sealed class WakettAutomationService : BackgroundService
                     continue;
                 }
 
-                if (nowUtc >= nextPriceFetchUtc)
+                while (nowUtc >= nextPriceFetchUtc)
                 {
+                    var scheduledRunUtc = nextPriceFetchUtc;
                     await RunPriceFetchAsync(stoppingToken);
                     nextPriceFetchUtc = GetNextSessionEventUtc(
-                        nowUtc.AddSeconds(1),
+                        scheduledRunUtc.AddSeconds(1),
                         PriceFetchMinutes,
                         currentSessionStartUtc,
                         currentSessionEndUtc);
+                    nowUtc = _timeProvider.GetUtcNow().UtcDateTime;
                 }
 
-                if (nowUtc >= nextWeightCalculationUtc)
+                while (nowUtc >= nextWeightCalculationUtc)
                 {
+                    var scheduledRunUtc = nextWeightCalculationUtc;
                     await RunWeightCalculationAsync(stoppingToken);
                     nextWeightCalculationUtc = GetNextSessionEventUtc(
-                        nowUtc.AddSeconds(1),
+                        scheduledRunUtc.AddSeconds(1),
                         WeightCalculationMinutes,
                         currentSessionStartUtc,
                         currentSessionEndUtc);
+                    nowUtc = _timeProvider.GetUtcNow().UtcDateTime;
                 }
 
-                if (nowUtc >= nextOrderSubmissionUtc)
+                while (nowUtc >= nextOrderSubmissionUtc)
                 {
+                    var scheduledRunUtc = nextOrderSubmissionUtc;
                     await RunOrderSubmissionAsync(stoppingToken);
                     nextOrderSubmissionUtc = GetNextSessionEventUtc(
-                        nowUtc.AddSeconds(1),
+                        scheduledRunUtc.AddSeconds(1),
                         OrderSubmissionMinutes,
                         currentSessionStartUtc,
                         currentSessionEndUtc);
+                    nowUtc = _timeProvider.GetUtcNow().UtcDateTime;
                 }
 
-                if (nowUtc >= nextFillCheckUtc)
+                while (nowUtc >= nextFillCheckUtc)
                 {
+                    var scheduledRunUtc = nextFillCheckUtc;
                     await RunFillCheckAsync(stoppingToken);
                     nextFillCheckUtc = GetNextSessionEventUtc(
-                        nowUtc.AddSeconds(1),
+                        scheduledRunUtc.AddSeconds(1),
                         FillCheckMinutes,
                         currentSessionStartUtc,
                         currentSessionEndUtc);
+                    nowUtc = _timeProvider.GetUtcNow().UtcDateTime;
                 }
 
-                if (nowUtc >= nextPnlReportUtc)
+                while (nowUtc >= nextPnlReportUtc)
                 {
+                    var scheduledRunUtc = nextPnlReportUtc;
                     await RunPnlWorkflowAsync(stoppingToken);
                     nextPnlReportUtc = GetNextSessionEventUtc(
-                        nowUtc.AddSeconds(1),
+                        scheduledRunUtc.AddSeconds(1),
                         PnlReportMinutes,
                         currentSessionStartUtc,
                         currentSessionEndUtc);
+                    nowUtc = _timeProvider.GetUtcNow().UtcDateTime;
                 }
 
                 continue;
