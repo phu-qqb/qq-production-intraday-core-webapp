@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.OpenApi;
@@ -11,11 +12,15 @@ public static class TradingController
 {
     public static void MapTradingEndpoints(this IEndpointRouteBuilder app)
     {
-        app.MapPost("/api/trading/run", async Task<Ok<TradingRunResponse>> (PriceFetcher priceFetcher, WeightCalculator weightCalculator, OrderSender orderSender) =>
+        app.MapPost("/api/trading/run", async Task<Ok<TradingRunResponse>> (
+            WakettPriceFetcher priceFetcher,
+            WeightCalculator weightCalculator,
+            OrderSender orderSender,
+            CancellationToken cancellationToken) =>
         {
-            await priceFetcher.FetchAndStoreAsync();
+            await priceFetcher.FetchAndStoreAsync(cancellationToken);
             await weightCalculator.CalculateAndStoreAsync();
-            await orderSender.SendOrdersAsync();
+            await orderSender.SendOrdersAsync(cancellationToken: cancellationToken);
             return TypedResults.Ok(new TradingRunResponse("Completed"));
         })
         .WithName("RunTradingPipeline")
