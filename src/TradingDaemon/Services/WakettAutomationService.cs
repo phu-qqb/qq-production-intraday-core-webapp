@@ -69,13 +69,32 @@ public sealed class WakettAutomationService : BackgroundService
         var sessionShutdownDeadlineUtc = (DateTime?)null;
         var currentSessionStartUtc = DateTime.MinValue;
         var currentSessionEndUtc = DateTime.MinValue;
-        var nextSessionStartUtc = GetNextSessionStartUtc(_timeProvider.GetUtcNow().UtcDateTime);
+
+        var initialNowUtc = _timeProvider.GetUtcNow().UtcDateTime;
+        var nextSessionStartUtc = GetNextSessionStartUtc(initialNowUtc);
 
         var nextPriceFetchUtc = DateTime.MaxValue;
         var nextWeightCalculationUtc = DateTime.MaxValue;
         var nextOrderSubmissionUtc = DateTime.MaxValue;
         var nextFillCheckUtc = DateTime.MaxValue;
         var nextPnlReportUtc = DateTime.MaxValue;
+
+        if (IsWithinSession(initialNowUtc))
+        {
+            sessionActive = true;
+            currentSessionStartUtc = GetSessionStartUtc(initialNowUtc);
+            currentSessionEndUtc = GetSessionEndUtc(currentSessionStartUtc);
+            _logger.LogInformation(
+                "Starting within Wakett session window at {NowUtc:o}. Session ends at {SessionEndUtc:o}.",
+                initialNowUtc,
+                currentSessionEndUtc);
+
+            nextPriceFetchUtc = GetNextSessionEventUtc(initialNowUtc, PriceFetchMinutes, currentSessionStartUtc, currentSessionEndUtc);
+            nextWeightCalculationUtc = GetNextSessionEventUtc(initialNowUtc, WeightCalculationMinutes, currentSessionStartUtc, currentSessionEndUtc);
+            nextOrderSubmissionUtc = GetNextSessionEventUtc(initialNowUtc, OrderSubmissionMinutes, currentSessionStartUtc, currentSessionEndUtc);
+            nextFillCheckUtc = GetNextSessionEventUtc(initialNowUtc, FillCheckMinutes, currentSessionStartUtc, currentSessionEndUtc);
+            nextPnlReportUtc = GetNextSessionEventUtc(initialNowUtc, PnlReportMinutes, currentSessionStartUtc, currentSessionEndUtc);
+        }
 
         while (!stoppingToken.IsCancellationRequested)
         {
@@ -213,6 +232,19 @@ public sealed class WakettAutomationService : BackgroundService
 
             await DelayUntilAsync(nextDelayTargetUtc, stoppingToken);
         }
+    }
+
+    private DateTime GetSessionStartUtc(DateTime referenceUtc)
+    {
+        var local = TimeZoneInfo.ConvertTimeFromUtc(referenceUtc, NewYorkTimeZone);
+
+        if (SessionEnd < SessionStart && local.TimeOfDay <= SessionEnd)
+        {
+            local = local.AddDays(-1);
+        }
+
+        var startLocal = new DateTime(local.Year, local.Month, local.Day, SessionStart.Hours, SessionStart.Minutes, SessionStart.Seconds);
+        return TimeZoneInfo.ConvertTimeToUtc(startLocal, NewYorkTimeZone);
     }
 
     private async Task RunPriceFetchAsync(CancellationToken stoppingToken)
