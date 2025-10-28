@@ -104,18 +104,18 @@ public class SchedulerService : IHostedService
 
 public class TradingJob : IJob
 {
-    private readonly PriceFetcher _priceFetcher;
+    private readonly WakettPriceFetcher _wakettPriceFetcher;
     private readonly WeightCalculator _weightCalculator;
     private readonly OrderSender _orderSender;
     private readonly PnlReportService _pnlReportService;
 
     public TradingJob(
-        PriceFetcher priceFetcher,
+        WakettPriceFetcher wakettPriceFetcher,
         WeightCalculator weightCalculator,
         OrderSender orderSender,
         PnlReportService pnlReportService)
     {
-        _priceFetcher = priceFetcher;
+        _wakettPriceFetcher = wakettPriceFetcher;
         _weightCalculator = weightCalculator;
         _orderSender = orderSender;
         _pnlReportService = pnlReportService;
@@ -123,10 +123,10 @@ public class TradingJob : IJob
 
     public async Task Execute(IJobExecutionContext context)
     {
-        await _priceFetcher.FetchAndStoreAsync();
+        await _wakettPriceFetcher.FetchAndStoreAsync(context.CancellationToken);
         await _pnlReportService.ComputeAndStoreCurrentDayPnlAsync(cancellationToken: context.CancellationToken);
 
         await _weightCalculator.CalculateAndStoreAsync();
-        await _orderSender.SendOrdersAsync();
+        await _orderSender.SendOrdersAsync(cancellationToken: context.CancellationToken);
     }
 }

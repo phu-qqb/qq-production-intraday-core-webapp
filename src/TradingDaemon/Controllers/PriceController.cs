@@ -1,3 +1,4 @@
+using System.Threading;
 using Microsoft.AspNetCore.OpenApi;
 using TradingDaemon.Services;
 
@@ -7,16 +8,18 @@ public static class PriceController
 {
     public static void MapPriceEndpoints(this IEndpointRouteBuilder app)
     {
-        app.MapPost("/api/prices/fetch", async (PriceFetcher priceFetcher) =>
+        app.MapPost("/api/prices/fetch", async (
+            WakettPriceFetcher priceFetcher,
+            CancellationToken cancellationToken) =>
         {
-            await priceFetcher.FetchAndStoreAsync();
+            await priceFetcher.FetchAndStoreAsync(cancellationToken);
             return Results.Ok(new { Status = "PricesFetched" });
         })
         .WithName("FetchPrices")
         .WithOpenApi(op =>
         {
-            op.Summary = "Runs the price fetcher";
-            op.Description = "Fetches price data from the configured CSV file and stores it in the database.";
+            op.Summary = "Fetches the latest Wakett FX prices.";
+            op.Description = "Retrieves FX prices from Wakett and stores them in the intraday price tables.";
             return op;
         });
     }
