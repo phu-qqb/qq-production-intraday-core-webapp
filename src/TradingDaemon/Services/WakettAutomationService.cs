@@ -70,8 +70,8 @@ public sealed class WakettAutomationService : BackgroundService
         var currentSessionStartUtc = DateTime.MinValue;
         var currentSessionEndUtc = DateTime.MinValue;
 
-        var nowUtc = _timeProvider.GetUtcNow().UtcDateTime;
-        var nextSessionStartUtc = GetNextSessionStartUtc(nowUtc);
+        var initialNowUtc = _timeProvider.GetUtcNow().UtcDateTime;
+        var nextSessionStartUtc = GetNextSessionStartUtc(initialNowUtc);
 
         var nextPriceFetchUtc = DateTime.MaxValue;
         var nextWeightCalculationUtc = DateTime.MaxValue;
@@ -79,21 +79,21 @@ public sealed class WakettAutomationService : BackgroundService
         var nextFillCheckUtc = DateTime.MaxValue;
         var nextPnlReportUtc = DateTime.MaxValue;
 
-        if (IsWithinSession(nowUtc))
+        if (IsWithinSession(initialNowUtc))
         {
             sessionActive = true;
-            currentSessionStartUtc = GetSessionStartUtc(nowUtc);
+            currentSessionStartUtc = GetSessionStartUtc(initialNowUtc);
             currentSessionEndUtc = GetSessionEndUtc(currentSessionStartUtc);
             _logger.LogInformation(
                 "Starting within Wakett session window at {NowUtc:o}. Session ends at {SessionEndUtc:o}.",
-                nowUtc,
+                initialNowUtc,
                 currentSessionEndUtc);
 
-            nextPriceFetchUtc = GetNextSessionEventUtc(nowUtc, PriceFetchMinutes, currentSessionStartUtc, currentSessionEndUtc);
-            nextWeightCalculationUtc = GetNextSessionEventUtc(nowUtc, WeightCalculationMinutes, currentSessionStartUtc, currentSessionEndUtc);
-            nextOrderSubmissionUtc = GetNextSessionEventUtc(nowUtc, OrderSubmissionMinutes, currentSessionStartUtc, currentSessionEndUtc);
-            nextFillCheckUtc = GetNextSessionEventUtc(nowUtc, FillCheckMinutes, currentSessionStartUtc, currentSessionEndUtc);
-            nextPnlReportUtc = GetNextSessionEventUtc(nowUtc, PnlReportMinutes, currentSessionStartUtc, currentSessionEndUtc);
+            nextPriceFetchUtc = GetNextSessionEventUtc(initialNowUtc, PriceFetchMinutes, currentSessionStartUtc, currentSessionEndUtc);
+            nextWeightCalculationUtc = GetNextSessionEventUtc(initialNowUtc, WeightCalculationMinutes, currentSessionStartUtc, currentSessionEndUtc);
+            nextOrderSubmissionUtc = GetNextSessionEventUtc(initialNowUtc, OrderSubmissionMinutes, currentSessionStartUtc, currentSessionEndUtc);
+            nextFillCheckUtc = GetNextSessionEventUtc(initialNowUtc, FillCheckMinutes, currentSessionStartUtc, currentSessionEndUtc);
+            nextPnlReportUtc = GetNextSessionEventUtc(initialNowUtc, PnlReportMinutes, currentSessionStartUtc, currentSessionEndUtc);
         }
 
         while (!stoppingToken.IsCancellationRequested)
