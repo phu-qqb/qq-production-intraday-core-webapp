@@ -110,6 +110,7 @@ public sealed class WakettAutomationService : BackgroundService
                     sessionActive = false;
                     sessionShutdownDeadlineUtc = GetSessionShutdownDeadlineUtc(nowUtc);
                     nextAutomationWindowStartUtc = GetNextAutomationWindowStartUtc(nowUtc);
+                    var nextSessionStartUtc = nextAutomationWindowStartUtc.Add(AutomationLeadTime);
                     nextPriceFetchUtc = DateTime.MaxValue;
                     nextWeightCalculationUtc = DateTime.MaxValue;
                     nextOrderSubmissionUtc = DateTime.MaxValue;
