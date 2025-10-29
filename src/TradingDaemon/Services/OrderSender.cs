@@ -120,7 +120,7 @@ public class OrderSender
         }
 
         var builtOrders = BuildOrders(latestWeights, symbolMap, allowedSymbols, orderTimestampUtc);
-        if (builtOrders.Count == 0)
+        if (builtOrders.Count == 0 || builtOrders.All(order => order.Order.size?.value == 0d))
         {
             _logger.LogInformation("All Wakett order weights are zero. Submitting flat order request.");
         }
@@ -1085,7 +1085,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
         if (exposures.Count == 0)
         {
-            return new List<(int SecurityId, WakettOrderItem Order)>();
+            return BuildFlatOrders(weights, parsedSymbols, allowedSymbols, orderTimestampUtc);
         }
 
         var usdBasePairs = parsedSymbols.Values
@@ -1166,6 +1166,53 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
                 {
                     type = "percentage",
                     value = value
+                }
+            }));
+        }
+
+        return result;
+    }
+
+    private static List<(int SecurityId, WakettOrderItem Order)> BuildFlatOrders(
+        IEnumerable<TheoreticalWeightRow> weights,
+        IReadOnlyDictionary<int, SymbolInfo> parsedSymbols,
+        ISet<string> allowedSymbols,
+        DateTime orderTimestampUtc)
+    {
+        var result = new List<(int SecurityId, WakettOrderItem Order)>();
+
+        var orderedSymbols = weights
+            .Select(weight => weight.SecurityId)
+            .Distinct()
+            .Select(id => parsedSymbols.TryGetValue(id, out var info) ? info : null)
+            .Where(info => info is not null)
+            .Cast<SymbolInfo>()
+            .OrderBy(info => info.SecurityId);
+
+        foreach (var symbol in orderedSymbols)
+        {
+            var formatted = symbol.FormattedSymbol;
+
+            if (!allowedSymbols.Contains(formatted))
+            {
+                var reversed = symbol.ReversedFormattedSymbol;
+                if (!allowedSymbols.Contains(reversed))
+                {
+                    continue;
+                }
+
+                formatted = reversed;
+            }
+
+            result.Add((symbol.SecurityId, new WakettOrderItem
+            {
+                symbol = formatted,
+                side = "BUY",
+                code = BuildOrderCode(symbol.SecurityId, orderTimestampUtc),
+                size = new WakettOrderSize
+                {
+                    type = "percentage",
+                    value = 0d
                 }
             }));
         }

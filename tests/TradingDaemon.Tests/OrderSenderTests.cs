@@ -169,7 +169,30 @@ public class OrderSenderTests
         var payload = await captured!.Content.ReadAsStringAsync();
         using var document = JsonDocument.Parse(payload);
         var root = document.RootElement;
-        Assert.Equal(0, root.GetProperty("orders").GetArrayLength());
+
+        var expectedOrderTimestampUtc = OrderSender.CalculateOrderTimestamp(
+            barTimeUtc,
+            TimeSpan.FromMinutes(60),
+            "US",
+            60,
+            0);
+
+        var orders = root.GetProperty("orders");
+        Assert.Equal(2, orders.GetArrayLength());
+
+        var first = orders[0];
+        Assert.Equal("EUR/USD", first.GetProperty("symbol").GetString());
+        Assert.Equal("BUY", first.GetProperty("side").GetString());
+        Assert.Equal(OrderSender.BuildOrderCode(58, expectedOrderTimestampUtc), first.GetProperty("code").GetString());
+        Assert.Equal("percentage", first.GetProperty("size").GetProperty("type").GetString());
+        Assert.Equal(0d, first.GetProperty("size").GetProperty("value").GetDouble());
+
+        var second = orders[1];
+        Assert.Equal("EUR/CHF", second.GetProperty("symbol").GetString());
+        Assert.Equal("BUY", second.GetProperty("side").GetString());
+        Assert.Equal(OrderSender.BuildOrderCode(61, expectedOrderTimestampUtc), second.GetProperty("code").GetString());
+        Assert.Equal("percentage", second.GetProperty("size").GetProperty("type").GetString());
+        Assert.Equal(0d, second.GetProperty("size").GetProperty("value").GetDouble());
     }
 
     [Fact]
