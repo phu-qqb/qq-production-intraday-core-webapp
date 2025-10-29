@@ -93,6 +93,7 @@ public class OrderSender
             session,
             schedule?.Offset,
             schedule?.BarSize);
+
         var latestBarLocal = TimeZoneInfo.ConvertTimeFromUtc(latestBarTimeUtc, NewYorkZone);
         var orderTimestampLocal = TimeZoneInfo.ConvertTimeFromUtc(orderTimestampUtc, NewYorkZone);
         if (orderTimestampLocal.Date > latestBarLocal.Date)
@@ -103,6 +104,7 @@ public class OrderSender
                 latestBarLocal);
             return;
         }
+
         var symbolMap = await LoadSymbolMapAsync(connection, cancellationToken);
         if (symbolMap.Count == 0)
         {
