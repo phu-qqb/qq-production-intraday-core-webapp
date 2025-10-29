@@ -14,6 +14,7 @@ namespace TradingDaemon.Services;
 public sealed class WakettAutomationService : BackgroundService
 {
     private static readonly TimeSpan SessionStart = TimeSpan.FromHours(9);
+    private static readonly TimeSpan AutomationLeadTime = TimeSpan.FromHours(1);
     private static readonly TimeSpan SessionEnd = new(15, 59, 0);
     private static readonly TimeSpan SessionShutdownDelay = TimeSpan.FromHours(1);
 
@@ -67,11 +68,12 @@ public sealed class WakettAutomationService : BackgroundService
 
         var sessionActive = false;
         var sessionShutdownDeadlineUtc = (DateTime?)null;
+        var currentAutomationWindowStartUtc = DateTime.MinValue;
         var currentSessionStartUtc = DateTime.MinValue;
         var currentSessionEndUtc = DateTime.MinValue;
 
         var initialNowUtc = _timeProvider.GetUtcNow().UtcDateTime;
-        var nextSessionStartUtc = GetNextSessionStartUtc(initialNowUtc);
+        var nextAutomationWindowStartUtc = GetNextAutomationWindowStartUtc(initialNowUtc);
 
         var nextPriceFetchUtc = DateTime.MaxValue;
         var nextWeightCalculationUtc = DateTime.MaxValue;
@@ -79,21 +81,22 @@ public sealed class WakettAutomationService : BackgroundService
         var nextFillCheckUtc = DateTime.MaxValue;
         var nextPnlReportUtc = DateTime.MaxValue;
 
-        if (IsWithinSession(initialNowUtc))
+        if (IsWithinAutomationWindow(initialNowUtc))
         {
             sessionActive = true;
             currentSessionStartUtc = GetSessionStartUtc(initialNowUtc);
+            currentAutomationWindowStartUtc = GetAutomationWindowStartUtc(initialNowUtc);
             currentSessionEndUtc = GetSessionEndUtc(currentSessionStartUtc);
             _logger.LogInformation(
                 "Starting within Wakett session window at {NowUtc:o}. Session ends at {SessionEndUtc:o}.",
                 initialNowUtc,
                 currentSessionEndUtc);
 
-            nextPriceFetchUtc = GetNextSessionEventUtc(initialNowUtc, PriceFetchMinutes, currentSessionStartUtc, currentSessionEndUtc);
-            nextWeightCalculationUtc = GetNextSessionEventUtc(initialNowUtc, WeightCalculationMinutes, currentSessionStartUtc, currentSessionEndUtc);
-            nextOrderSubmissionUtc = GetNextSessionEventUtc(initialNowUtc, OrderSubmissionMinutes, currentSessionStartUtc, currentSessionEndUtc);
-            nextFillCheckUtc = GetNextSessionEventUtc(initialNowUtc, FillCheckMinutes, currentSessionStartUtc, currentSessionEndUtc);
-            nextPnlReportUtc = GetNextSessionEventUtc(initialNowUtc, PnlReportMinutes, currentSessionStartUtc, currentSessionEndUtc);
+            nextPriceFetchUtc = GetNextSessionEventUtc(initialNowUtc, PriceFetchMinutes, currentAutomationWindowStartUtc, currentSessionEndUtc);
+            nextWeightCalculationUtc = GetNextSessionEventUtc(initialNowUtc, WeightCalculationMinutes, currentAutomationWindowStartUtc, currentSessionEndUtc);
+            nextOrderSubmissionUtc = GetNextSessionEventUtc(initialNowUtc, OrderSubmissionMinutes, currentAutomationWindowStartUtc, currentSessionEndUtc);
+            nextFillCheckUtc = GetNextSessionEventUtc(initialNowUtc, FillCheckMinutes, currentAutomationWindowStartUtc, currentSessionEndUtc);
+            nextPnlReportUtc = GetNextSessionEventUtc(initialNowUtc, PnlReportMinutes, currentAutomationWindowStartUtc, currentSessionEndUtc);
         }
 
         while (!stoppingToken.IsCancellationRequested)
@@ -106,7 +109,8 @@ public sealed class WakettAutomationService : BackgroundService
                 {
                     sessionActive = false;
                     sessionShutdownDeadlineUtc = GetSessionShutdownDeadlineUtc(nowUtc);
-                    nextSessionStartUtc = GetNextSessionStartUtc(nowUtc);
+                    nextAutomationWindowStartUtc = GetNextAutomationWindowStartUtc(nowUtc);
+                    var nextSessionStartUtc = nextAutomationWindowStartUtc.Add(AutomationLeadTime);
                     nextPriceFetchUtc = DateTime.MaxValue;
                     nextWeightCalculationUtc = DateTime.MaxValue;
                     nextOrderSubmissionUtc = DateTime.MaxValue;
@@ -139,7 +143,7 @@ public sealed class WakettAutomationService : BackgroundService
                     nextPriceFetchUtc = GetNextSessionEventUtc(
                         scheduledRunUtc.AddSeconds(1),
                         PriceFetchMinutes,
-                        currentSessionStartUtc,
+                        currentAutomationWindowStartUtc,
                         currentSessionEndUtc);
                     nowUtc = _timeProvider.GetUtcNow().UtcDateTime;
                 }
@@ -151,7 +155,7 @@ public sealed class WakettAutomationService : BackgroundService
                     nextWeightCalculationUtc = GetNextSessionEventUtc(
                         scheduledRunUtc.AddSeconds(1),
                         WeightCalculationMinutes,
-                        currentSessionStartUtc,
+                        currentAutomationWindowStartUtc,
                         currentSessionEndUtc);
                     nowUtc = _timeProvider.GetUtcNow().UtcDateTime;
                 }
@@ -163,7 +167,7 @@ public sealed class WakettAutomationService : BackgroundService
                     nextOrderSubmissionUtc = GetNextSessionEventUtc(
                         scheduledRunUtc.AddSeconds(1),
                         OrderSubmissionMinutes,
-                        currentSessionStartUtc,
+                        currentAutomationWindowStartUtc,
                         currentSessionEndUtc);
                     nowUtc = _timeProvider.GetUtcNow().UtcDateTime;
                 }
@@ -175,7 +179,7 @@ public sealed class WakettAutomationService : BackgroundService
                     nextFillCheckUtc = GetNextSessionEventUtc(
                         scheduledRunUtc.AddSeconds(1),
                         FillCheckMinutes,
-                        currentSessionStartUtc,
+                        currentAutomationWindowStartUtc,
                         currentSessionEndUtc);
                     nowUtc = _timeProvider.GetUtcNow().UtcDateTime;
                 }
@@ -187,7 +191,7 @@ public sealed class WakettAutomationService : BackgroundService
                     nextPnlReportUtc = GetNextSessionEventUtc(
                         scheduledRunUtc.AddSeconds(1),
                         PnlReportMinutes,
-                        currentSessionStartUtc,
+                        currentAutomationWindowStartUtc,
                         currentSessionEndUtc);
                     nowUtc = _timeProvider.GetUtcNow().UtcDateTime;
                 }
@@ -202,26 +206,27 @@ public sealed class WakettAutomationService : BackgroundService
                 return;
             }
 
-            if (nowUtc >= nextSessionStartUtc)
+            if (nowUtc >= nextAutomationWindowStartUtc)
             {
                 sessionActive = true;
                 sessionShutdownDeadlineUtc = null;
-                currentSessionStartUtc = nextSessionStartUtc;
+                currentAutomationWindowStartUtc = nextAutomationWindowStartUtc;
+                currentSessionStartUtc = GetSessionStartUtc(nowUtc);
                 currentSessionEndUtc = GetSessionEndUtc(currentSessionStartUtc);
                 _logger.LogInformation(
                     "Entering Wakett session window at {NowUtc:o}. Session ends at {SessionEndUtc:o}.",
                     nowUtc,
                     currentSessionEndUtc);
 
-                nextPriceFetchUtc = GetNextSessionEventUtc(nowUtc, PriceFetchMinutes, currentSessionStartUtc, currentSessionEndUtc);
-                nextWeightCalculationUtc = GetNextSessionEventUtc(nowUtc, WeightCalculationMinutes, currentSessionStartUtc, currentSessionEndUtc);
-                nextOrderSubmissionUtc = GetNextSessionEventUtc(nowUtc, OrderSubmissionMinutes, currentSessionStartUtc, currentSessionEndUtc);
-                nextFillCheckUtc = GetNextSessionEventUtc(nowUtc, FillCheckMinutes, currentSessionStartUtc, currentSessionEndUtc);
-                nextPnlReportUtc = GetNextSessionEventUtc(nowUtc, PnlReportMinutes, currentSessionStartUtc, currentSessionEndUtc);
+                nextPriceFetchUtc = GetNextSessionEventUtc(nowUtc, PriceFetchMinutes, currentAutomationWindowStartUtc, currentSessionEndUtc);
+                nextWeightCalculationUtc = GetNextSessionEventUtc(nowUtc, WeightCalculationMinutes, currentAutomationWindowStartUtc, currentSessionEndUtc);
+                nextOrderSubmissionUtc = GetNextSessionEventUtc(nowUtc, OrderSubmissionMinutes, currentAutomationWindowStartUtc, currentSessionEndUtc);
+                nextFillCheckUtc = GetNextSessionEventUtc(nowUtc, FillCheckMinutes, currentAutomationWindowStartUtc, currentSessionEndUtc);
+                nextPnlReportUtc = GetNextSessionEventUtc(nowUtc, PnlReportMinutes, currentAutomationWindowStartUtc, currentSessionEndUtc);
                 continue;
             }
 
-            var nextDelayTargetUtc = nextSessionStartUtc;
+            var nextDelayTargetUtc = nextAutomationWindowStartUtc;
             if (sessionShutdownDeadlineUtc is { } shutdownDeadline)
             {
                 if (shutdownDeadline < nextDelayTargetUtc)
@@ -245,6 +250,13 @@ public sealed class WakettAutomationService : BackgroundService
 
         var startLocal = new DateTime(local.Year, local.Month, local.Day, SessionStart.Hours, SessionStart.Minutes, SessionStart.Seconds);
         return TimeZoneInfo.ConvertTimeToUtc(startLocal, NewYorkTimeZone);
+    }
+
+    private DateTime GetAutomationWindowStartUtc(DateTime referenceUtc)
+    {
+        var sessionStartUtc = GetSessionStartUtc(referenceUtc);
+        var automationStartLocal = TimeZoneInfo.ConvertTimeFromUtc(sessionStartUtc, NewYorkTimeZone).Add(-AutomationLeadTime);
+        return TimeZoneInfo.ConvertTimeToUtc(automationStartLocal, NewYorkTimeZone);
     }
 
     private async Task RunPriceFetchAsync(CancellationToken stoppingToken)
@@ -427,14 +439,14 @@ public sealed class WakettAutomationService : BackgroundService
         return TimeZoneInfo.ConvertTimeToUtc(endLocal, NewYorkTimeZone);
     }
 
-    private DateTime GetNextSessionStartUtc(DateTime referenceUtc)
+    private DateTime GetNextAutomationWindowStartUtc(DateTime referenceUtc)
     {
         var local = TimeZoneInfo.ConvertTimeFromUtc(referenceUtc, NewYorkTimeZone);
         var candidate = new DateTime(local.Year, local.Month, local.Day, SessionStart.Hours, SessionStart.Minutes, 0);
 
         if (local < candidate && !IsWeekend(candidate))
         {
-            return TimeZoneInfo.ConvertTimeToUtc(candidate, NewYorkTimeZone);
+            return TimeZoneInfo.ConvertTimeToUtc(candidate.Add(-AutomationLeadTime), NewYorkTimeZone);
         }
 
         do
@@ -443,10 +455,10 @@ public sealed class WakettAutomationService : BackgroundService
         }
         while (IsWeekend(candidate));
 
-        return TimeZoneInfo.ConvertTimeToUtc(candidate, NewYorkTimeZone);
+        return TimeZoneInfo.ConvertTimeToUtc(candidate.Add(-AutomationLeadTime), NewYorkTimeZone);
     }
 
-    private bool IsWithinSession(DateTime utcTime)
+    private bool IsWithinAutomationWindow(DateTime utcTime)
     {
         var local = TimeZoneInfo.ConvertTimeFromUtc(utcTime, NewYorkTimeZone);
         if (IsWeekend(local))
@@ -454,13 +466,11 @@ public sealed class WakettAutomationService : BackgroundService
             return false;
         }
 
-        var timeOfDay = local.TimeOfDay;
-        if (SessionEnd < SessionStart)
-        {
-            return timeOfDay >= SessionStart || timeOfDay <= SessionEnd;
-        }
+        var sessionStartUtc = GetSessionStartUtc(utcTime);
+        var automationStartUtc = GetAutomationWindowStartUtc(utcTime);
+        var sessionEndUtc = GetSessionEndUtc(sessionStartUtc);
 
-        return timeOfDay >= SessionStart && timeOfDay <= SessionEnd;
+        return utcTime >= automationStartUtc && utcTime <= sessionEndUtc;
     }
 
     private static bool IsWeekend(DateTime value)
