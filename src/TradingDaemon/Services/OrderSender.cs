@@ -93,6 +93,16 @@ public class OrderSender
             session,
             schedule?.Offset,
             schedule?.BarSize);
+        var latestBarLocal = TimeZoneInfo.ConvertTimeFromUtc(latestBarTimeUtc, NewYorkZone);
+        var orderTimestampLocal = TimeZoneInfo.ConvertTimeFromUtc(orderTimestampUtc, NewYorkZone);
+        if (orderTimestampLocal.Date > latestBarLocal.Date)
+        {
+            _logger.LogInformation(
+                "Skipping Wakett order submission because the calculated order timestamp {OrderTimestamp} falls on the next trading day relative to the latest bar {BarTimestamp}.",
+                orderTimestampLocal,
+                latestBarLocal);
+            return;
+        }
         var symbolMap = await LoadSymbolMapAsync(connection, cancellationToken);
         if (symbolMap.Count == 0)
         {
