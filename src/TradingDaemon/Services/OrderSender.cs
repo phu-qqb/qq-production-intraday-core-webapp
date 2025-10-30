@@ -186,7 +186,7 @@ public class OrderSender
                 StringComparer.OrdinalIgnoreCase);
 
         var submissionTimeUtc = _timeProvider.GetUtcNow().UtcDateTime;
-        var response = await _wakettApiClient.SendOrdersAsync(request);
+            var response = await _wakettApiClient.SendOrdersAsync(request);
         var receivedAtUtc = _timeProvider.GetUtcNow().UtcDateTime;
 
         if (response?.Orders is { Count: > 0 })
