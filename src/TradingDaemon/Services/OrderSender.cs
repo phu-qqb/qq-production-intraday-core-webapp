@@ -99,10 +99,9 @@ public class OrderSender
         if (orderTimestampLocal.Date > latestBarLocal.Date)
         {
             _logger.LogInformation(
-                "Skipping Wakett order submission because the calculated order timestamp {OrderTimestamp} falls on the next trading day relative to the latest bar {BarTimestamp}.",
+                "Calculated Wakett order timestamp {OrderTimestamp} falls on the next trading day relative to the latest bar {BarTimestamp}. Proceeding with submission.",
                 orderTimestampLocal,
                 latestBarLocal);
-            return;
         }
 
         var symbolMap = await LoadSymbolMapAsync(connection, cancellationToken);
