@@ -32,7 +32,7 @@ public class OrderSenderTests
 
         var now = new DateTimeOffset(2024, 1, 2, 16, 30, 0, TimeSpan.Zero);
         var barTimeUtc = now.AddMinutes(-60).UtcDateTime;
-        var weights = new List<OrderSender.TheoreticalWeightRow>
+        var weights = new List<OrderSender.NettedWeightRow>
         {
             new() { SecurityId = 58, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 10, Weight = 0.15m },
             new() { SecurityId = 61, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 10, Weight = -0.05m }
@@ -123,7 +123,7 @@ public class OrderSenderTests
 
         var now = new DateTimeOffset(2024, 1, 2, 16, 30, 0, TimeSpan.Zero);
         var barTimeUtc = now.AddMinutes(-60).UtcDateTime;
-        var weights = new List<OrderSender.TheoreticalWeightRow>
+        var weights = new List<OrderSender.NettedWeightRow>
         {
             new() { SecurityId = 58, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 10, Weight = 0m },
             new() { SecurityId = 61, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 10, Weight = 0m }
@@ -205,7 +205,7 @@ public class OrderSenderTests
 
         var now = new DateTimeOffset(2024, 1, 2, 16, 30, 0, TimeSpan.Zero);
         var barTimeUtc = now.AddMinutes(-60).UtcDateTime;
-        var weights = new List<OrderSender.TheoreticalWeightRow>
+        var weights = new List<OrderSender.NettedWeightRow>
         {
             new() { SecurityId = 58, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 10, Weight = 0.15m },
             new() { SecurityId = 61, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 10, Weight = -0.05m }
@@ -259,7 +259,7 @@ public class OrderSenderTests
 
         var now = new DateTimeOffset(2024, 1, 2, 16, 30, 0, TimeSpan.Zero);
         var barTimeUtc = now.AddMinutes(-60).UtcDateTime;
-        var weights = new List<OrderSender.TheoreticalWeightRow>
+        var weights = new List<OrderSender.NettedWeightRow>
         {
             new() { SecurityId = 58, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 10, Weight = 0.15m },
             new() { SecurityId = 61, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 10, Weight = -0.05m }
@@ -325,7 +325,7 @@ public class OrderSenderTests
 
         var now = new DateTimeOffset(2024, 1, 2, 16, 30, 0, TimeSpan.Zero);
         var barTimeUtc = now.AddMinutes(-60).UtcDateTime;
-        var weights = new List<OrderSender.TheoreticalWeightRow>
+        var weights = new List<OrderSender.NettedWeightRow>
         {
             new() { SecurityId = 58, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 10, Weight = 0.15m }
         };
@@ -404,7 +404,7 @@ public class OrderSenderTests
 
         var now = new DateTimeOffset(2024, 1, 2, 16, 30, 0, TimeSpan.Zero);
         var barTimeUtc = now.AddMinutes(-60).UtcDateTime;
-        var weights = new List<OrderSender.TheoreticalWeightRow>
+        var weights = new List<OrderSender.NettedWeightRow>
         {
             new() { SecurityId = 58, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 10, Weight = 0.15m }
         };
@@ -462,7 +462,7 @@ public class OrderSenderTests
 
         var now = new DateTimeOffset(2024, 1, 2, 16, 30, 0, TimeSpan.Zero);
         var barTimeUtc = now.AddMinutes(-60).UtcDateTime;
-        var weights = new List<OrderSender.TheoreticalWeightRow>
+        var weights = new List<OrderSender.NettedWeightRow>
         {
             new() { SecurityId = 61, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 11, Weight = 0.2m },
             new() { SecurityId = 62, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 11, Weight = 0.1m },
@@ -556,7 +556,7 @@ public class OrderSenderTests
 
         var now = new DateTimeOffset(2024, 1, 2, 16, 30, 0, TimeSpan.Zero);
         var barTimeUtc = now.AddMinutes(-60).UtcDateTime;
-        var weights = new List<OrderSender.TheoreticalWeightRow>
+        var weights = new List<OrderSender.NettedWeightRow>
         {
             new() { SecurityId = 200, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 11, Weight = 0.2m }
         };
@@ -644,7 +644,7 @@ public class OrderSenderTests
 
         var timeProvider = new TestTimeProvider(new DateTimeOffset(nowUtc, TimeSpan.Zero));
 
-        var weights = new List<OrderSender.TheoreticalWeightRow>
+        var weights = new List<OrderSender.NettedWeightRow>
         {
             new() { SecurityId = 58, ModelId = 1, BarTimeUtc = staleUtc, ModelRunId = 1, Weight = 0.2m }
         };
@@ -706,7 +706,7 @@ public class OrderSenderTests
 
         var timeProvider = new TestTimeProvider(new DateTimeOffset(nowUtc, TimeSpan.Zero));
 
-        var weights = new List<OrderSender.TheoreticalWeightRow>
+        var weights = new List<OrderSender.NettedWeightRow>
         {
             new() { SecurityId = 58, ModelId = 1, BarTimeUtc = previousDayUtc, ModelRunId = 1, Weight = 0.3m }
         };
@@ -878,7 +878,7 @@ public class OrderSenderTests
 
     private sealed class TestOrderSender : OrderSender
     {
-        private readonly IReadOnlyList<TheoreticalWeightRow> _weights;
+        private readonly IReadOnlyList<OrderSender.NettedWeightRow> _weights;
         private readonly IReadOnlyDictionary<int, string> _symbolMap;
         private readonly ModelScheduleRow? _schedule;
         private readonly TradingLimitRow? _tradingLimit;
@@ -891,7 +891,7 @@ public class OrderSenderTests
             ILogger<OrderSender> logger,
             IConfiguration configuration,
             TimeProvider timeProvider,
-            IReadOnlyList<TheoreticalWeightRow> weights,
+            IReadOnlyList<OrderSender.NettedWeightRow> weights,
             IReadOnlyDictionary<int, string> symbolMap,
             ModelScheduleRow? schedule,
             TradingLimitRow? tradingLimit = null,
@@ -923,7 +923,7 @@ public class OrderSenderTests
                 TotalTurnoverLimit = totalTurnover
             };
 
-        protected override Task<IReadOnlyList<TheoreticalWeightRow>> LoadLatestWeightsAsync(
+        protected override Task<IReadOnlyList<OrderSender.NettedWeightRow>> LoadLatestNettedWeightsAsync(
             IDbConnection connection,
             CancellationToken cancellationToken)
             => Task.FromResult(_weights);
