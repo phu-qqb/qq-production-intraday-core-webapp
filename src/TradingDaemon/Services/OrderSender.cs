@@ -67,10 +67,10 @@ public class OrderSender
     public async Task SendOrdersAsync(double? aumOverride = null, CancellationToken cancellationToken = default)
     {
         using var connection = _context.CreateConnection();
-        var latest = await LoadLatestWeightsAsync(connection, cancellationToken);
+        var latest = await LoadLatestNettedWeightsAsync(connection, cancellationToken);
         if (latest.Count == 0)
         {
-            _logger.LogWarning("No theoretical weights found for model {ModelId}.", TargetModelId);
+            _logger.LogWarning("No netted weights found for model {ModelId}.", TargetModelId);
             return;
         }
 
@@ -781,7 +781,7 @@ VALUES
         return candidateDate + TimeSpan.FromMinutes(minuteOfDay);
     }
 
-    private TimeSpan ResolveBarInterval(IReadOnlyList<TheoreticalWeightRow> weights, DateTime latestBarTimeUtc)
+    private TimeSpan ResolveBarInterval(IReadOnlyList<NettedWeightRow> weights, DateTime latestBarTimeUtc)
     {
         foreach (var row in weights)
         {
@@ -889,26 +889,26 @@ VALUES
         return time >= bounds.Start || time <= bounds.End;
     }
 
-    protected virtual async Task<IReadOnlyList<TheoreticalWeightRow>> LoadLatestWeightsAsync(
+    protected virtual async Task<IReadOnlyList<NettedWeightRow>> LoadLatestNettedWeightsAsync(
         IDbConnection connection,
         CancellationToken cancellationToken)
     {
         const string sql = @"SELECT TOP (1000)
-    tw.SecurityId,
-    tw.ModelId,
-    tw.BarTimeUtc,
-    tw.ModelRunId,
-    tw.Weight
-FROM [Intraday].[model].[TheoreticalWeight] tw
-WHERE tw.ModelId = @ModelId
-ORDER BY tw.BarTimeUtc DESC, tw.SecurityId";
+    nw.SecurityId,
+    nw.ModelId,
+    nw.BarTimeUtc,
+    nw.ModelRunId,
+    nw.Weight
+FROM [Intraday].[model].[NettedWeight] nw
+WHERE nw.ModelId = @ModelId
+ORDER BY nw.BarTimeUtc DESC, nw.SecurityId";
 
         var definition = new CommandDefinition(
             sql,
             new { ModelId = TargetModelId },
             cancellationToken: cancellationToken);
 
-        var rows = await connection.QueryAsync<TheoreticalWeightRow>(definition);
+        var rows = await connection.QueryAsync<NettedWeightRow>(definition);
         return rows.ToList();
     }
 
@@ -966,7 +966,7 @@ ORDER BY TradingLimitId DESC;";
         if (barLocal.Date < nowLocal.Date)
         {
             _logger.LogInformation(
-                "Using previous day's theoretical weights from {BarTimeUtc:O} for first trade of the day.",
+                "Using previous day's netted weights from {BarTimeUtc:O} for first trade of the day.",
                 barTimeUtc);
             return true;
         }
@@ -974,7 +974,7 @@ ORDER BY TradingLimitId DESC;";
         if (utcNow - barTimeUtc > TimeSpan.FromMinutes(60))
         {
             _logger.LogWarning(
-                "Latest theoretical weights are stale. Last bar: {BarTimeUtc:O}, now: {NowUtc:O}.",
+                "Latest netted weights are stale. Last bar: {BarTimeUtc:O}, now: {NowUtc:O}.",
                 barTimeUtc,
                 utcNow);
             return false;
@@ -1048,7 +1048,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
     }
 
     private static List<(int SecurityId, WakettOrderItem Order)> BuildOrders(
-        IEnumerable<TheoreticalWeightRow> weights,
+        IEnumerable<NettedWeightRow> weights,
         IReadOnlyDictionary<int, string> symbolMap,
         ISet<string> allowedSymbols,
         DateTime orderTimestampUtc)
@@ -1173,7 +1173,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
     }
 
     private static List<(int SecurityId, WakettOrderItem Order)> BuildFlatOrders(
-        IEnumerable<TheoreticalWeightRow> weights,
+        IEnumerable<NettedWeightRow> weights,
         IReadOnlyDictionary<int, SymbolInfo> parsedSymbols,
         ISet<string> allowedSymbols,
         DateTime orderTimestampUtc)
@@ -1549,7 +1549,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         public decimal? TotalTurnoverLimit { get; init; }
     }
 
-    protected sealed record TheoreticalWeightRow
+    protected sealed record NettedWeightRow
     {
         public int SecurityId { get; init; }
 
