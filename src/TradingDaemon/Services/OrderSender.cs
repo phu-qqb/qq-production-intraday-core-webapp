@@ -234,7 +234,7 @@ public class OrderSender
     {
         var utc = DateTime.SpecifyKind(orderTimestampUtc, DateTimeKind.Utc);
         var local = TimeZoneInfo.ConvertTimeFromUtc(utc, NewYorkZone);
-        return $"QQB-{securityId}-{local:yyyyMMddhhmm}";
+        return $"QQB-{securityId}-{local:yyyyMMddHHmm}";
     }
 
     private async Task PersistOrderResponseAsync(
