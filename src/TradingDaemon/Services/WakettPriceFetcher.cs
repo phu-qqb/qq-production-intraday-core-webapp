@@ -354,11 +354,13 @@ public class WakettPriceFetcher
     }
 
     internal static bool TryComputeCrossRate(
-        IDictionary<string, Dictionary<string, decimal>> graph,
-        CurrencyPair target,
-        out decimal rate)
+    IDictionary<string, Dictionary<string, decimal>> graph,
+    CurrencyPair target,
+    out decimal rate)
     {
         rate = 0m;
+
+        // 1. Trivial
         if (target.Base.Equals(target.Quote, StringComparison.OrdinalIgnoreCase))
         {
             rate = 1m;
@@ -368,16 +370,17 @@ public class WakettPriceFetcher
         if (!graph.ContainsKey(target.Base) || !graph.ContainsKey(target.Quote))
             return false;
 
-        var queue = new Queue<(string Currency, decimal Rate)>();
+        // 2. BFS en log-space
+        var queue = new Queue<(string Currency, double LogRate)>();
         var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            target.Base
-        };
+    {
+        target.Base
+    };
 
-        queue.Enqueue((target.Base, 1m));
+        queue.Enqueue((target.Base, 0.0)); // log(1) = 0
         while (queue.Count > 0)
         {
-            var (currency, currentRate) = queue.Dequeue();
+            var (currency, currentLogRate) = queue.Dequeue();
             if (!graph.TryGetValue(currency, out var edges))
                 continue;
 
@@ -386,19 +389,22 @@ public class WakettPriceFetcher
                 if (!visited.Add(kvp.Key))
                     continue;
 
-                var nextRate = currentRate * kvp.Value;
+                // conversion en log pour addition
+                var nextLogRate = currentLogRate + Math.Log((double)kvp.Value);
+
                 if (kvp.Key.Equals(target.Quote, StringComparison.OrdinalIgnoreCase))
                 {
-                    rate = nextRate;
+                    rate = (decimal)Math.Exp(nextLogRate);
                     return true;
                 }
 
-                queue.Enqueue((kvp.Key, nextRate));
+                queue.Enqueue((kvp.Key, nextLogRate));
             }
         }
 
         return false;
     }
+
 
     internal static bool TryAdjustRateForSecurity(
         decimal rate,
