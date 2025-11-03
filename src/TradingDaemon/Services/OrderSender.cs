@@ -1050,7 +1050,9 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
         foreach (var symbol in configured)
         {
-            if (SymbolInfo.TryCreate(symbol.SecurityId, symbol.Symbol, out var info))
+            var requestSymbol = WakettSymbolPatch.GetRequestSymbol(symbol.SecurityId, symbol.Symbol);
+
+            if (SymbolInfo.TryCreate(symbol.SecurityId, requestSymbol, out var info))
             {
                 yield return info.FormattedSymbol;
             }
