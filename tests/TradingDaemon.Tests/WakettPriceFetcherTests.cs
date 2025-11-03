@@ -72,6 +72,29 @@ public class WakettPriceFetcherTests
         Assert.Equal(expected, cadNzd.Rate, 6);
     }
 
+    [Fact]
+    public void BuildComputedRates_HandlesReversedWakettSymbolResponses()
+    {
+        var baseSymbols = new List<WakettSecuritySymbol>
+        {
+            new() { SecurityId = 127, Symbol = "USD/AUD" }
+        };
+
+        var prices = new List<WakettPrice>
+        {
+            new() { Symbol = "AUD/USD", Mid = 0.65m }
+        };
+
+        var computed = WakettPriceFetcher.BuildComputedRates(
+            baseSymbols,
+            Array.Empty<WakettSecuritySymbol>(),
+            prices,
+            Mock.Of<ILogger<WakettPriceFetcher>>());
+
+        var usdAud = Assert.Single(computed);
+        Assert.Equal(1m / 0.65m, usdAud.Rate, 6);
+    }
+
     [Theory]
     [InlineData("EUR/USD", "EUR", "USD")]
     [InlineData("USDJPY", "USD", "JPY")]
