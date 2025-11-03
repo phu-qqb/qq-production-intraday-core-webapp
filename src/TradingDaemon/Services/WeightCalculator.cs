@@ -500,6 +500,10 @@ END";
             if (pair.Length < 6) continue;
             var baseCcy = pair[..3];
             var quoteCcy = pair.Substring(3, 3);
+            if(pair.Contains("NZD"))
+            {
+                int u = 0;
+            }
 
             if (baseCcy == "USD" || quoteCcy == "USD")
             {

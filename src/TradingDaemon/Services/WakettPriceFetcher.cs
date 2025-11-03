@@ -353,55 +353,28 @@ public class WakettPriceFetcher
         return price.Bid ?? price.Ask;
     }
 
-    internal static bool TryComputeCrossRate(
-    IDictionary<string, Dictionary<string, decimal>> graph,
-    CurrencyPair target,
-    out decimal rate)
+    internal static bool TryComputeCrossRate(IDictionary<string, Dictionary<string, decimal>> graph, CurrencyPair target, out decimal rate)
     {
-        rate = 0m;
-
-        // 1. Trivial
-        if (target.Base.Equals(target.Quote, StringComparison.OrdinalIgnoreCase))
-        {
-            rate = 1m;
-            return true;
+        rate = 0m; 
+        if (target.Base.Equals(target.Quote, StringComparison.OrdinalIgnoreCase)) { 
+            rate = 1m; return true; 
         }
-
-        if (!graph.ContainsKey(target.Base) || !graph.ContainsKey(target.Quote))
-            return false;
-
-        // 2. BFS en log-space
-        var queue = new Queue<(string Currency, double LogRate)>();
-        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-    {
-        target.Base
-    };
-
-        queue.Enqueue((target.Base, 0.0)); // log(1) = 0
-        while (queue.Count > 0)
-        {
-            var (currency, currentLogRate) = queue.Dequeue();
-            if (!graph.TryGetValue(currency, out var edges))
-                continue;
-
-            foreach (var kvp in edges)
-            {
-                if (!visited.Add(kvp.Key))
-                    continue;
-
-                // conversion en log pour addition
-                var nextLogRate = currentLogRate + Math.Log((double)kvp.Value);
-
-                if (kvp.Key.Equals(target.Quote, StringComparison.OrdinalIgnoreCase))
-                {
-                    rate = (decimal)Math.Exp(nextLogRate);
-                    return true;
-                }
-
-                queue.Enqueue((kvp.Key, nextLogRate));
-            }
+        if (!graph.ContainsKey(target.Base) || !graph.ContainsKey(target.Quote)) return false; 
+        var queue = new Queue<(string Currency, decimal Rate)>(); 
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { target.Base }; 
+        queue.Enqueue((target.Base, 1m)); 
+        while (queue.Count > 0) 
+        { 
+            var (currency, currentRate) = queue.Dequeue(); 
+            if (!graph.TryGetValue(currency, out var edges)) continue; 
+            foreach (var kvp in edges) { if (!visited.Add(kvp.Key)) continue; 
+                var nextRate = currentRate * kvp.Value; 
+                if (kvp.Key.Equals(target.Quote, StringComparison.OrdinalIgnoreCase)) { 
+                    rate = nextRate; return true; 
+                } 
+                queue.Enqueue((kvp.Key, nextRate)); 
+            } 
         }
-
         return false;
     }
 
