@@ -689,7 +689,7 @@ VALUES
             duration += TimeSpan.FromDays(1);
         }
 
-        var nextSessionStart = sessionStart.AddDays(1);
+        var nextSessionStart = SkipWeekend(sessionStart.AddDays(1));
         var nextSessionEnd = nextSessionStart + duration;
 
         var nextSession = GetNextScheduledLocal(nextSessionStart, step, baseMinute, strictlyGreater: false);
@@ -707,7 +707,7 @@ VALUES
         int? offsetMinutes,
         int? barSizeMinutes)
     {
-        var nextSessionStart = sessionStart.AddDays(1);
+        var nextSessionStart = SkipWeekend(sessionStart.AddDays(1));
 
         if (offsetMinutes is > 0)
         {
@@ -738,6 +738,16 @@ VALUES
 
         var delta = alignment - remainder;
         return nextSessionStart.AddMinutes(delta);
+    }
+
+    private static DateTime SkipWeekend(DateTime candidate)
+    {
+        while (candidate.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday)
+        {
+            candidate = candidate.AddDays(1);
+        }
+
+        return candidate;
     }
 
     private static DateTime GetNextScheduledLocal(

@@ -827,6 +827,27 @@ public class OrderSenderTests
     }
 
     [Fact]
+    public void CalculateOrderTimestamp_SkipsWeekendWhenAdvancingToNextSession()
+    {
+        var zoneId = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York";
+        var zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
+        var localBar = new DateTime(2024, 1, 5, 15, 30, 0, DateTimeKind.Unspecified);
+        var barTimeUtc = TimeZoneInfo.ConvertTimeToUtc(localBar, zone);
+
+        var result = OrderSender.CalculateOrderTimestamp(
+            barTimeUtc,
+            TimeSpan.FromMinutes(60),
+            "US",
+            0,
+            60);
+
+        var expectedLocal = new DateTime(2024, 1, 8, 10, 0, 0, DateTimeKind.Unspecified);
+        var expectedUtc = TimeZoneInfo.ConvertTimeToUtc(expectedLocal, zone);
+
+        Assert.Equal(expectedUtc, result);
+    }
+
+    [Fact]
     public void FormatTimestamp_TopOfHourBarsAdvanceToNextHour()
     {
         var zoneId = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York";
