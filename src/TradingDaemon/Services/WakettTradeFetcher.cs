@@ -107,7 +107,9 @@ USING (VALUES (
     RecordedAtUtc
 )
 ON target.ExecuteId = source.ExecuteId
+    AND target.Account = source.Account
     AND ISNULL(target.SubOrderId, -2147483648) = ISNULL(source.SubOrderId, -2147483648)
+    AND ISNULL(target.ExecuteTimestamp, '0001-01-01T00:00:00+00:00') = ISNULL(source.ExecuteTimestamp, '0001-01-01T00:00:00+00:00')
 WHEN MATCHED THEN
     UPDATE SET
         Account = source.Account,
