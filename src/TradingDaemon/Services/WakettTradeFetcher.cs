@@ -326,22 +326,11 @@ OUTPUT $action;";
         using var transaction = connection.BeginTransaction();
         var inserted = 0;
         var updated = 0;
-        var seenExecuteIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
         foreach (var trade in executions)
         {
             var item = CreateUploadItem(trade, normalized, recordedAtUtc, skipped);
             if (item is null)
             {
-                continue;
-            }
-
-            if (!seenExecuteIds.Add(item.ExecuteId))
-            {
-                skipped.Add(new WakettFillUploadSkippedRecord(
-                    "Duplicate execute identifier in response.",
-                    item.ExecuteId,
-                    item.Symbol));
                 continue;
             }
 
