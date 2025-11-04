@@ -6,13 +6,16 @@ using System.Globalization;
 using System.Text;
 using Dapper;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using TradingDaemon.Data;
 using TradingDaemon.Models;
+using TradingDaemon.Options;
 
 namespace TradingDaemon.Services;
 
 public class WakettTradeFetcher
 {
+    private const decimal OneMillion = 1_000_000m;
     private static readonly string[] TimestampFormats =
     {
         "yyyy-MM-dd HH:mm:ss.fff zzz",
@@ -65,6 +68,7 @@ USING (VALUES (
     @Quote,
     @Amount,
     @Rate,
+    @CommissionUsd,
     @RecordedAtUtc
 )) AS source (
     ExecuteId,
@@ -104,6 +108,7 @@ USING (VALUES (
     Quote,
     Amount,
     Rate,
+    CommissionUsd,
     RecordedAtUtc
 )
 ON target.ExecuteId = source.ExecuteId
@@ -148,6 +153,7 @@ WHEN MATCHED THEN
         Quote = source.Quote,
         Amount = source.Amount,
         Rate = source.Rate,
+        CommissionUsd = source.CommissionUsd,
         UpdatedAtUtc = source.RecordedAtUtc
 WHEN NOT MATCHED THEN
     INSERT (
@@ -188,6 +194,7 @@ WHEN NOT MATCHED THEN
         Quote,
         Amount,
         Rate,
+        CommissionUsd,
         CreatedAtUtc,
         UpdatedAtUtc
     )
@@ -229,6 +236,7 @@ WHEN NOT MATCHED THEN
         source.Quote,
         source.Amount,
         source.Rate,
+        source.CommissionUsd,
         source.RecordedAtUtc,
         source.RecordedAtUtc
     )
@@ -237,17 +245,20 @@ OUTPUT $action;";
     private readonly WakettApiClient _client;
     private readonly DapperContext _context;
     private readonly ILogger<WakettTradeFetcher> _logger;
+    private readonly TradingOptions _tradingOptions;
     private readonly TimeProvider _timeProvider;
 
     public WakettTradeFetcher(
         WakettApiClient client,
         DapperContext context,
         ILogger<WakettTradeFetcher> logger,
+        IOptions<TradingOptions>? tradingOptions = null,
         TimeProvider? timeProvider = null)
     {
         _client = client;
         _context = context;
         _logger = logger;
+        _tradingOptions = tradingOptions?.Value ?? new TradingOptions();
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
@@ -403,6 +414,10 @@ OUTPUT $action;";
             return null;
         }
 
+        var executeSize = ToDecimal(trade.ExecuteSize);
+        var rate = ToDecimal(trade.Rate);
+        var commissionUsd = CalculateCommissionUsd(executeSize, rate);
+
         return new WakettFillUploadItem(
             executeId,
             normalized.Account,
@@ -431,7 +446,7 @@ OUTPUT $action;";
             ParseTimestamp(trade.ProviderTimestamp, "providerTS", executeId),
             ParseTimestamp(trade.ExecuteTimestamp, "executeTS", executeId),
             ToDecimal(trade.EntitySize),
-            ToDecimal(trade.ExecuteSize),
+            executeSize,
             ToDecimal(trade.ExecutePrice),
             ParseTimestamp(trade.TradeTimestamp, "tradets", executeId),
             TrimOrNull(trade.Event),
@@ -440,12 +455,41 @@ OUTPUT $action;";
             TrimOrNull(trade.Type),
             ToDecimal(trade.Quote),
             ToDecimal(trade.Amount),
-            ToDecimal(trade.Rate),
+            rate,
+            commissionUsd,
             recordedAtUtc);
     }
 
     private static decimal? ToDecimal(double? value)
         => value.HasValue ? Convert.ToDecimal(value.Value, CultureInfo.InvariantCulture) : null;
+
+    private decimal? CalculateCommissionUsd(decimal? executeSize, decimal? rate)
+    {
+        if (executeSize is not { } size || rate is not { } fxRate)
+        {
+            return null;
+        }
+
+        var perMillion = _tradingOptions.CommissionUsdPerMillion;
+        if (perMillion <= 0m)
+        {
+            return 0m;
+        }
+
+        var notionalUsd = Math.Abs(size * fxRate);
+        if (notionalUsd == 0m)
+        {
+            return 0m;
+        }
+
+        var commissionUsd = notionalUsd / OneMillion * perMillion;
+        if (commissionUsd == 0m)
+        {
+            return 0m;
+        }
+
+        return -Math.Abs(commissionUsd);
+    }
 
     private DateTimeOffset? ParseTimestamp(string? raw, string fieldName, string executeId)
     {
@@ -605,4 +649,5 @@ internal sealed record WakettFillUploadItem(
     decimal? Quote,
     decimal? Amount,
     decimal? Rate,
+    decimal? CommissionUsd,
     DateTime RecordedAtUtc);

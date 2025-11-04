@@ -7,4 +7,5 @@ public class Fill
     public decimal Quantity { get; set; }
     public decimal Price { get; set; }
     public DateTime Timestamp { get; set; }
+    public decimal? CommissionUsd { get; set; }
 }
