@@ -47,12 +47,14 @@ WHEN NOT MATCHED THEN
     INSERT (TradingDate, CalculatedAtUtc, PnL)
     VALUES (source.TradingDate, source.CalculatedAtUtc, source.PnL);";
 
-    private const string PnlSql = @"WITH FillWithSecurity AS (
+    private const string PnlSql = @"
+WITH FillWithSecurity AS (
     SELECT
         f.ExecuteSize,
         f.ExecutePrice,
         f.TradeTimestamp,
         f.Side,
+        f.Rate,
         COALESCE(secById.SecurityId, secBySymbol.SecurityId) AS SecurityId
     FROM [wakett].[Fill] f
     OUTER APPLY (
@@ -64,7 +66,8 @@ WHEN NOT MATCHED THEN
     LEFT JOIN [Intraday].[core].[Security] secBySymbol ON secById.SecurityId IS NULL
         AND parsed.NormalizedSymbol IS NOT NULL
         AND UPPER(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(secBySymbol.Symbol)), '/', ''), '-', ''), '_', ''), ' ', '')) = parsed.NormalizedSymbol
-), LatestPrices AS (
+),
+LatestPrices AS (
     SELECT
         pb.SecurityId,
         pb.[Close],
@@ -76,19 +79,20 @@ WHEN NOT MATCHED THEN
 )
 SELECT
     SUM(
-        CASE
-            WHEN UPPER(f.Side) IN ('SELL', 'S', 'SHORT', 'SS') THEN -1
-            WHEN UPPER(f.Side) IN ('BUY', 'B', 'LONG', 'L') THEN 1
-            ELSE CASE WHEN f.ExecuteSize < 0 THEN -1 ELSE 1 END
-        END
+        CASE WHEN UPPER(f.Side) IN ('BUY','B','LONG','L') THEN -1
+             WHEN UPPER(f.Side) IN ('SELL','S','SHORT','SS') THEN  1
+             ELSE 0 END
         * COALESCE(f.ExecuteSize, 0)
+        * COALESCE(f.Rate, 1)
         * (COALESCE(lp.[Close], f.ExecutePrice) - COALESCE(f.ExecutePrice, 0))
-    )
+    ) AS PnL_USD
 FROM FillWithSecurity f
 LEFT JOIN LatestPrices lp ON lp.SecurityId = f.SecurityId AND lp.rn = 1
 WHERE
     f.TradeTimestamp >= @StartUtc
-    AND f.TradeTimestamp < @EndUtc;";
+    AND f.TradeTimestamp < @EndUtc;
+";
+
 
     private const string SymbolSql = @"SELECT SecurityId, Symbol
 FROM [Intraday].[core].[Security]

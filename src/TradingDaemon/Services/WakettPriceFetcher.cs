@@ -89,7 +89,7 @@ public class WakettPriceFetcher
                 "Requesting Wakett prices for timestamp {TimestampUtc}.",
                 requestTimestamp.UtcDateTime);
 
-            var response = await _client.GetPricesAsync(wakettSymbols, requestTimestamp);
+                var response = await _client.GetPricesAsync(wakettSymbols, requestTimestamp);
             var computedRates = BuildComputedRates(baseSymbols, missingSymbols, response?.Prices, _logger);
             if (computedRates.Count == 0)
             {
