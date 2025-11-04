@@ -482,7 +482,13 @@ OUTPUT $action;";
             return 0m;
         }
 
-        return notionalUsd / OneMillion * perMillion;
+        var commissionUsd = notionalUsd / OneMillion * perMillion;
+        if (commissionUsd == 0m)
+        {
+            return 0m;
+        }
+
+        return -Math.Abs(commissionUsd);
     }
 
     private DateTimeOffset? ParseTimestamp(string? raw, string fieldName, string executeId)
