@@ -47,14 +47,15 @@ WHEN NOT MATCHED THEN
     INSERT (TradingDate, CalculatedAtUtc, PnL)
     VALUES (source.TradingDate, source.CalculatedAtUtc, source.PnL);";
 
-    private const string PnlSql = @"
+    private const string PnlFillsSql = @"
 WITH FillWithSecurity AS (
     SELECT
         f.ExecuteSize,
         f.ExecutePrice,
+        f.CommissionBase,
         f.TradeTimestamp,
-        f.Side,
-        f.Rate,
+        f.SymbolId,
+        f.Symbol,
         COALESCE(secById.SecurityId, secBySymbol.SecurityId) AS SecurityId
     FROM [wakett].[Fill] f
     OUTER APPLY (
@@ -66,31 +67,18 @@ WITH FillWithSecurity AS (
     LEFT JOIN [Intraday].[core].[Security] secBySymbol ON secById.SecurityId IS NULL
         AND parsed.NormalizedSymbol IS NOT NULL
         AND UPPER(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(secBySymbol.Symbol)), '/', ''), '-', ''), '_', ''), ' ', '')) = parsed.NormalizedSymbol
-),
-LatestPrices AS (
-    SELECT
-        pb.SecurityId,
-        pb.[Close],
-        ROW_NUMBER() OVER (PARTITION BY pb.SecurityId ORDER BY pb.BarTimeUtc DESC) AS rn
-    FROM [Intraday].[mkt].[PriceBar] pb
     WHERE
-        pb.TimeframeMinute = 60
-        AND pb.BarTimeUtc < @EndUtc
+        f.TradeTimestamp >= @StartUtc
+        AND f.TradeTimestamp < @EndUtc
 )
 SELECT
-    SUM(
-        CASE WHEN UPPER(f.Side) IN ('BUY','B','LONG','L') THEN -1
-             WHEN UPPER(f.Side) IN ('SELL','S','SHORT','SS') THEN  1
-             ELSE 0 END
-        * COALESCE(f.ExecuteSize, 0)
-        * COALESCE(f.Rate, 1)
-        * (COALESCE(lp.[Close], f.ExecutePrice) - COALESCE(f.ExecutePrice, 0))
-    ) AS PnL_USD
-FROM FillWithSecurity f
-LEFT JOIN LatestPrices lp ON lp.SecurityId = f.SecurityId AND lp.rn = 1
-WHERE
-    f.TradeTimestamp >= @StartUtc
-    AND f.TradeTimestamp < @EndUtc;
+    ExecuteSize,
+    ExecutePrice,
+    CommissionBase,
+    SecurityId,
+    SymbolId,
+    Symbol
+FROM FillWithSecurity;
 ";
 
 
@@ -105,7 +93,21 @@ FROM (
         pb.[Close],
         ROW_NUMBER() OVER (PARTITION BY pb.SecurityId ORDER BY pb.BarTimeUtc DESC) AS rn
     FROM [Intraday].[mkt].[PriceBar] pb
-    WHERE pb.TimeframeMinute = 60 AND pb.SecurityId IN @SecurityIds
+        WHERE pb.TimeframeMinute = 60 AND pb.SecurityId IN @SecurityIds
+) src
+WHERE src.rn = 1;";
+
+    private const string LatestPricesForDaySql = @"SELECT SecurityId, [Close]
+FROM (
+    SELECT
+        pb.SecurityId,
+        pb.[Close],
+        ROW_NUMBER() OVER (PARTITION BY pb.SecurityId ORDER BY pb.BarTimeUtc DESC) AS rn
+    FROM [Intraday].[mkt].[PriceBar] pb
+    WHERE
+        pb.TimeframeMinute = 60
+        AND pb.SecurityId IN @SecurityIds
+        AND pb.BarTimeUtc < @EndUtc
 ) src
 WHERE src.rn = 1;";
 
@@ -166,10 +168,9 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
 
         await EnsureStorageAsync(connection, cancellationToken);
 
-        var pnl = await connection.ExecuteScalarAsync<decimal?>(
-            new CommandDefinition(PnlSql, new { StartUtc = startUtc, EndUtc = endUtc }, cancellationToken: cancellationToken));
-
-        var pnlValue = pnl ?? 0m;
+        var symbolInfos = await LoadSymbolInfosAsync(connection, cancellationToken);
+        var fillRows = await LoadPnlFillRowsAsync(connection, startUtc, endUtc, cancellationToken);
+        var pnlValue = await CalculatePnlAsync(connection, fillRows, symbolInfos, endUtc, cancellationToken);
 
         await connection.ExecuteAsync(
             new CommandDefinition(
@@ -182,11 +183,10 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
                 },
                 cancellationToken: cancellationToken));
 
-        var symbolInfos = await LoadSymbolInfosAsync(connection, cancellationToken);
         var positions = await LoadPositionsAsync(connection, startUtc, endUtc, cancellationToken);
 
         var securityIds = positions
-            .Select(p => TryGetSymbolInfo(symbolInfos, p.SymbolId, p.Symbol, out var info) ? info.SecurityId : (long?)null)
+            .Select(p => TryGetSymbolInfo(symbolInfos, p.SymbolId, p.Symbol, null, out var info) ? info.SecurityId : (long?)null)
             .Where(id => id.HasValue)
             .Select(id => id!.Value)
             .Distinct()
@@ -280,6 +280,16 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
         return result;
     }
 
+    private async Task<IReadOnlyCollection<PnlFillRow>> LoadPnlFillRowsAsync(IDbConnection connection, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken)
+    {
+        var definition = new CommandDefinition(
+            PnlFillsSql,
+            new { StartUtc = startUtc, EndUtc = endUtc },
+            cancellationToken: cancellationToken);
+        var rows = await connection.QueryAsync<PnlFillRow>(definition);
+        return rows.ToList();
+    }
+
     private async Task<Dictionary<long, decimal?>> LoadLatestPricesAsync(IDbConnection connection, IEnumerable<long> securityIds, CancellationToken cancellationToken)
     {
         var ids = securityIds.Distinct().ToArray();
@@ -294,11 +304,122 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
         return rows.ToDictionary(row => row.SecurityId, row => row.Close);
     }
 
+    private async Task<Dictionary<long, decimal?>> LoadLatestPricesForDayAsync(IDbConnection connection, IEnumerable<long> securityIds, DateTime endUtc, CancellationToken cancellationToken)
+    {
+        var ids = securityIds.Distinct().ToArray();
+        if (ids.Length == 0)
+        {
+            return new Dictionary<long, decimal?>();
+        }
+
+        var definition = new CommandDefinition(
+            LatestPricesForDaySql,
+            new { SecurityIds = ids, EndUtc = endUtc },
+            cancellationToken: cancellationToken);
+        var rows = await connection.QueryAsync<LatestPriceRow>(definition);
+
+        return rows.ToDictionary(row => row.SecurityId, row => row.Close);
+    }
+
     private async Task<IReadOnlyCollection<PositionRow>> LoadPositionsAsync(IDbConnection connection, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken)
     {
         var definition = new CommandDefinition(PositionsSql, new { StartUtc = startUtc, EndUtc = endUtc }, cancellationToken: cancellationToken);
         var rows = await connection.QueryAsync<PositionRow>(definition);
         return rows.ToList();
+    }
+
+    private async Task<decimal> CalculatePnlAsync(
+        SqlConnection connection,
+        IReadOnlyCollection<PnlFillRow> fills,
+        IReadOnlyDictionary<string, SymbolInfo> symbolInfos,
+        DateTime endUtc,
+        CancellationToken cancellationToken)
+    {
+        if (fills.Count == 0)
+        {
+            return 0m;
+        }
+
+        var byCurrency = new Dictionary<string, CurrencyAggregation>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var fill in fills)
+        {
+            if (!TryGetSymbolInfo(symbolInfos, fill.SymbolId, fill.Symbol, fill.SecurityId, out var info))
+            {
+                _logger.LogDebug(
+                    "Skipping PnL contribution for unknown symbol {SymbolId} (symbol {Symbol}).",
+                    fill.SymbolId,
+                    fill.Symbol);
+                continue;
+            }
+
+            var baseCurrency = info.Pair.QuoteCurrency;
+            if (string.IsNullOrWhiteSpace(baseCurrency))
+            {
+                continue;
+            }
+
+            var pnlContribution = (fill.ExecuteSize ?? 0m) * (fill.ExecutePrice ?? 0m);
+            var commissionContribution = fill.CommissionBase ?? 0m;
+
+            if (!byCurrency.TryGetValue(baseCurrency, out var aggregation))
+            {
+                aggregation = new CurrencyAggregation();
+                byCurrency[baseCurrency] = aggregation;
+            }
+
+            aggregation.PnlBase += pnlContribution;
+            aggregation.CommissionBase += commissionContribution;
+            aggregation.SecurityIds.Add(info.SecurityId);
+        }
+
+        if (byCurrency.Count == 0)
+        {
+            return 0m;
+        }
+
+        var securityIds = byCurrency.Values
+            .SelectMany(a => a.SecurityIds)
+            .Distinct()
+            .ToArray();
+
+        var priceLookup = securityIds.Length > 0
+            ? await LoadLatestPricesForDayAsync(connection, securityIds, endUtc, cancellationToken)
+            : new Dictionary<long, decimal?>();
+
+        var conversionGraph = BuildConversionGraph(symbolInfos, priceLookup, Array.Empty<PositionRow>());
+
+        decimal totalPnlUsd = 0m;
+
+        foreach (var (currency, aggregation) in byCurrency)
+        {
+            var baseAmount = aggregation.PnlBase - aggregation.CommissionBase;
+            if (baseAmount == 0m)
+            {
+                continue;
+            }
+
+            decimal conversionRate;
+            if (string.Equals(currency, "USD", StringComparison.OrdinalIgnoreCase))
+            {
+                conversionRate = 1m;
+            }
+            else if (TryGetConversionRate(currency, "USD", conversionGraph, out var rate) && rate != 0m)
+            {
+                conversionRate = rate;
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Unable to convert {Currency} PnL to USD due to missing rate.",
+                    currency);
+                continue;
+            }
+
+            totalPnlUsd += baseAmount * conversionRate;
+        }
+
+        return totalPnlUsd;
     }
 
     private IReadOnlyList<PnlReportPosition> BuildReportPositions(
@@ -311,7 +432,7 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
 
         foreach (var position in positions)
         {
-            if (!TryGetSymbolInfo(symbolInfos, position.SymbolId, position.Symbol, out var info))
+            if (!TryGetSymbolInfo(symbolInfos, position.SymbolId, position.Symbol, null, out var info))
             {
                 _logger.LogDebug(
                     "Skipping position for unknown symbol {SymbolId} (symbol {Symbol}).",
@@ -418,8 +539,19 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
         IReadOnlyDictionary<string, SymbolInfo> symbolInfos,
         string? symbolId,
         string? symbol,
+        long? securityId,
         out SymbolInfo info)
     {
+        if (securityId.HasValue)
+        {
+            var normalizedSecurityId = NormalizeSymbol(securityId.Value.ToString(CultureInfo.InvariantCulture));
+            if (symbolInfos.TryGetValue(normalizedSecurityId, out info))
+            {
+                info.Keys.Add(normalizedSecurityId);
+                return true;
+            }
+        }
+
         if (!string.IsNullOrWhiteSpace(symbolId))
         {
             var normalizedId = NormalizeSymbol(symbolId);
@@ -524,11 +656,26 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
         return false;
     }
 
+    private sealed record PnlFillRow(
+        decimal? ExecuteSize,
+        decimal? ExecutePrice,
+        decimal? CommissionBase,
+        long? SecurityId,
+        string? SymbolId,
+        string? Symbol);
+
     private sealed record SecuritySymbolRow(long SecurityId, string Symbol);
 
     private sealed record LatestPriceRow(long SecurityId, decimal? Close);
 
     private sealed record PositionRow(string? SymbolId, string? Symbol, decimal NetQuantity, decimal? LastExecutePrice);
+
+    private sealed class CurrencyAggregation
+    {
+        public decimal PnlBase { get; set; }
+        public decimal CommissionBase { get; set; }
+        public HashSet<long> SecurityIds { get; } = new();
+    }
 
     private sealed class SymbolInfo
     {
