@@ -68,7 +68,7 @@ USING (VALUES (
     @Quote,
     @Amount,
     @Rate,
-    @CommissionUsd,
+    @CommissionBase,
     @RecordedAtUtc
 )) AS source (
     ExecuteId,
@@ -108,7 +108,7 @@ USING (VALUES (
     Quote,
     Amount,
     Rate,
-    CommissionUsd,
+    CommissionBase,
     RecordedAtUtc
 )
 ON target.ExecuteId = source.ExecuteId
@@ -153,7 +153,7 @@ WHEN MATCHED THEN
         Quote = source.Quote,
         Amount = source.Amount,
         Rate = source.Rate,
-        CommissionUsd = source.CommissionUsd,
+        CommissionBase = source.CommissionBase,
         UpdatedAtUtc = source.RecordedAtUtc
 WHEN NOT MATCHED THEN
     INSERT (
@@ -194,7 +194,7 @@ WHEN NOT MATCHED THEN
         Quote,
         Amount,
         Rate,
-        CommissionUsd,
+        CommissionBase,
         CreatedAtUtc,
         UpdatedAtUtc
     )
@@ -236,7 +236,7 @@ WHEN NOT MATCHED THEN
         source.Quote,
         source.Amount,
         source.Rate,
-        source.CommissionUsd,
+        source.CommissionBase,
         source.RecordedAtUtc,
         source.RecordedAtUtc
     )
@@ -415,8 +415,9 @@ OUTPUT $action;";
         }
 
         var executeSize = ToDecimal(trade.ExecuteSize);
+        var executePrice = ToDecimal(trade.ExecutePrice);
         var rate = ToDecimal(trade.Rate);
-        var commissionUsd = CalculateCommissionUsd(executeSize, rate);
+        var commissionBase = CalculateCommissionBase(executeSize, executePrice);
 
         return new WakettFillUploadItem(
             executeId,
@@ -447,7 +448,7 @@ OUTPUT $action;";
             ParseTimestamp(trade.ExecuteTimestamp, "executeTS", executeId),
             ToDecimal(trade.EntitySize),
             executeSize,
-            ToDecimal(trade.ExecutePrice),
+            executePrice,
             ParseTimestamp(trade.TradeTimestamp, "tradets", executeId),
             TrimOrNull(trade.Event),
             TrimOrNull(trade.User),
@@ -456,39 +457,39 @@ OUTPUT $action;";
             ToDecimal(trade.Quote),
             ToDecimal(trade.Amount),
             rate,
-            commissionUsd,
+            commissionBase,
             recordedAtUtc);
     }
 
     private static decimal? ToDecimal(double? value)
         => value.HasValue ? Convert.ToDecimal(value.Value, CultureInfo.InvariantCulture) : null;
 
-    private decimal? CalculateCommissionUsd(decimal? executeSize, decimal? rate)
+    private decimal? CalculateCommissionBase(decimal? executeSize, decimal? executePrice)
     {
-        if (executeSize is not { } size || rate is not { } fxRate)
+        if (executeSize is not { } size || executePrice is not { } price)
         {
             return null;
         }
 
-        var perMillion = _tradingOptions.CommissionUsdPerMillion;
+        var perMillion = _tradingOptions.CommissionBasePerMillion;
         if (perMillion <= 0m)
         {
             return 0m;
         }
 
-        var notionalUsd = Math.Abs(size * fxRate);
-        if (notionalUsd == 0m)
+        var notionalBase = Math.Abs(size * price);
+        if (notionalBase == 0m)
         {
             return 0m;
         }
 
-        var commissionUsd = notionalUsd / OneMillion * perMillion;
-        if (commissionUsd == 0m)
+        var commissionBase = notionalBase / OneMillion * perMillion;
+        if (commissionBase == 0m)
         {
             return 0m;
         }
 
-        return -Math.Abs(commissionUsd);
+        return Math.Abs(commissionBase);
     }
 
     private DateTimeOffset? ParseTimestamp(string? raw, string fieldName, string executeId)
@@ -649,5 +650,5 @@ internal sealed record WakettFillUploadItem(
     decimal? Quote,
     decimal? Amount,
     decimal? Rate,
-    decimal? CommissionUsd,
+    decimal? CommissionBase,
     DateTime RecordedAtUtc);
