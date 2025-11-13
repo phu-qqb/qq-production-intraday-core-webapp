@@ -67,10 +67,10 @@ public class OrderSender
     public async Task SendOrdersAsync(double? aumOverride = null, CancellationToken cancellationToken = default)
     {
         using var connection = _context.CreateConnection();
-        var latest = await LoadLatestWeightsAsync(connection, cancellationToken);
+        var latest = await LoadLatestNettedWeightsAsync(connection, cancellationToken);
         if (latest.Count == 0)
         {
-            _logger.LogWarning("No theoretical weights found for model {ModelId}.", TargetModelId);
+            _logger.LogWarning("No netted weights found for model {ModelId}.", TargetModelId);
             return;
         }
 
@@ -93,6 +93,17 @@ public class OrderSender
             session,
             schedule?.Offset,
             schedule?.BarSize);
+
+        var latestBarLocal = TimeZoneInfo.ConvertTimeFromUtc(latestBarTimeUtc, NewYorkZone);
+        var orderTimestampLocal = TimeZoneInfo.ConvertTimeFromUtc(orderTimestampUtc, NewYorkZone);
+        if (orderTimestampLocal.Date > latestBarLocal.Date)
+        {
+            _logger.LogInformation(
+                "Calculated Wakett order timestamp {OrderTimestamp} falls on the next trading day relative to the latest bar {BarTimestamp}. Proceeding with submission.",
+                orderTimestampLocal,
+                latestBarLocal);
+        }
+
         var symbolMap = await LoadSymbolMapAsync(connection, cancellationToken);
         if (symbolMap.Count == 0)
         {
@@ -108,10 +119,9 @@ public class OrderSender
         }
 
         var builtOrders = BuildOrders(latestWeights, symbolMap, allowedSymbols, orderTimestampUtc);
-        if (builtOrders.Count == 0)
+        if (builtOrders.Count == 0 || builtOrders.All(order => order.Order.size?.value == 0d))
         {
-            _logger.LogInformation("No non-zero weights available for Wakett order submission.");
-            return;
+            _logger.LogInformation("All Wakett order weights are zero. Submitting flat order request.");
         }
 
         var scheduledTimestamp = ResolveScheduledTimestamp(orderTimestampUtc);
@@ -175,7 +185,7 @@ public class OrderSender
                 StringComparer.OrdinalIgnoreCase);
 
         var submissionTimeUtc = _timeProvider.GetUtcNow().UtcDateTime;
-        var response = await _wakettApiClient.SendOrdersAsync(request);
+            var response = await _wakettApiClient.SendOrdersAsync(request);
         var receivedAtUtc = _timeProvider.GetUtcNow().UtcDateTime;
 
         if (response?.Orders is { Count: > 0 })
@@ -224,7 +234,7 @@ public class OrderSender
     {
         var utc = DateTime.SpecifyKind(orderTimestampUtc, DateTimeKind.Utc);
         var local = TimeZoneInfo.ConvertTimeFromUtc(utc, NewYorkZone);
-        return $"QQB-{securityId}-{local:yyyyMMddhhmm}";
+        return $"QQB-{securityId}-{local:yyyyMMddHHmm}";
     }
 
     private async Task PersistOrderResponseAsync(
@@ -662,6 +672,12 @@ VALUES
         var step = offsetMinutes.Value;
         var baseMinute = ResolveScheduleBaseMinute(local, step, barSizeMinutes);
 
+        if (barSizeMinutes is > 0 && offsetMinutes.Value < barSizeMinutes.Value)
+        {
+            baseMinute = offsetMinutes.Value;
+            step = barSizeMinutes.Value;
+        }
+
         var withinSession = GetNextScheduledLocal(local, step, baseMinute, strictlyGreater: true);
         if (withinSession <= sessionEnd)
         {
@@ -674,7 +690,7 @@ VALUES
             duration += TimeSpan.FromDays(1);
         }
 
-        var nextSessionStart = sessionStart.AddDays(1);
+        var nextSessionStart = SkipWeekend(sessionStart.AddDays(1));
         var nextSessionEnd = nextSessionStart + duration;
 
         var nextSession = GetNextScheduledLocal(nextSessionStart, step, baseMinute, strictlyGreater: false);
@@ -693,12 +709,21 @@ VALUES
         int? offsetMinutes,
         int? barSizeMinutes)
     {
-        var nextSessionStart = sessionStart.AddDays(1);
+        var nextSessionStart = SkipWeekend(sessionStart.AddDays(1));
 
         if (offsetMinutes is > 0)
         {
-            var baseMinute = ResolveScheduleBaseMinute(lastBarLocal, offsetMinutes.Value, barSizeMinutes);
-            return GetNextScheduledLocal(nextSessionStart, offsetMinutes.Value, baseMinute, strictlyGreater: false);
+
+            var step = offsetMinutes.Value;
+            var baseMinute = Math.Max(0, barSizeMinutes ?? 0);
+
+            if (barSizeMinutes is > 0 && offsetMinutes.Value < barSizeMinutes.Value)
+            {
+                baseMinute = offsetMinutes.Value;
+                step = barSizeMinutes.Value;
+            }
+
+            return GetNextScheduledLocal(nextSessionStart, step, baseMinute, strictlyGreater: false);
         }
 
         var alignment = barSizeMinutes.GetValueOrDefault((int)Math.Round(barInterval.TotalMinutes));
@@ -718,26 +743,16 @@ VALUES
         return nextSessionStart.AddMinutes(delta);
     }
 
-    private static int ResolveScheduleBaseMinute(DateTime reference, int stepMinutes, int? barSizeMinutes)
+
+    private static DateTime SkipWeekend(DateTime candidate)
     {
-        if (stepMinutes <= 0)
+        while (candidate.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday)
         {
-            return Math.Max(0, barSizeMinutes ?? 0);
+            candidate = candidate.AddDays(1);
         }
 
-        if (barSizeMinutes is int barSize && barSize > 0 && barSize < stepMinutes)
-        {
-            return barSize;
-        }
+        return candidate;
 
-        var minutesIntoDay = (int)Math.Floor(reference.TimeOfDay.TotalMinutes);
-        var remainder = minutesIntoDay % stepMinutes;
-        if (remainder < 0)
-        {
-            remainder += stepMinutes;
-        }
-
-        return remainder;
     }
 
     private static DateTime GetNextScheduledLocal(
@@ -781,7 +796,7 @@ VALUES
         return candidateDate + TimeSpan.FromMinutes(minuteOfDay);
     }
 
-    private TimeSpan ResolveBarInterval(IReadOnlyList<TheoreticalWeightRow> weights, DateTime latestBarTimeUtc)
+    private TimeSpan ResolveBarInterval(IReadOnlyList<NettedWeightRow> weights, DateTime latestBarTimeUtc)
     {
         foreach (var row in weights)
         {
@@ -889,26 +904,26 @@ VALUES
         return time >= bounds.Start || time <= bounds.End;
     }
 
-    protected virtual async Task<IReadOnlyList<TheoreticalWeightRow>> LoadLatestWeightsAsync(
+    protected virtual async Task<IReadOnlyList<NettedWeightRow>> LoadLatestNettedWeightsAsync(
         IDbConnection connection,
         CancellationToken cancellationToken)
     {
         const string sql = @"SELECT TOP (1000)
-    tw.SecurityId,
-    tw.ModelId,
-    tw.BarTimeUtc,
-    tw.ModelRunId,
-    tw.Weight
-FROM [Intraday].[model].[TheoreticalWeight] tw
-WHERE tw.ModelId = @ModelId
-ORDER BY tw.BarTimeUtc DESC, tw.SecurityId";
+    nw.SecurityId,
+    nw.ModelId,
+    nw.BarTimeUtc,
+    nw.ModelRunId,
+    nw.Weight
+FROM [Intraday].[model].[NettedWeight] nw
+WHERE nw.ModelId = @ModelId
+ORDER BY nw.BarTimeUtc DESC, nw.SecurityId";
 
         var definition = new CommandDefinition(
             sql,
             new { ModelId = TargetModelId },
             cancellationToken: cancellationToken);
 
-        var rows = await connection.QueryAsync<TheoreticalWeightRow>(definition);
+        var rows = await connection.QueryAsync<NettedWeightRow>(definition);
         return rows.ToList();
     }
 
@@ -966,7 +981,7 @@ ORDER BY TradingLimitId DESC;";
         if (barLocal.Date < nowLocal.Date)
         {
             _logger.LogInformation(
-                "Using previous day's theoretical weights from {BarTimeUtc:O} for first trade of the day.",
+                "Using previous day's netted weights from {BarTimeUtc:O} for first trade of the day.",
                 barTimeUtc);
             return true;
         }
@@ -974,7 +989,7 @@ ORDER BY TradingLimitId DESC;";
         if (utcNow - barTimeUtc > TimeSpan.FromMinutes(60))
         {
             _logger.LogWarning(
-                "Latest theoretical weights are stale. Last bar: {BarTimeUtc:O}, now: {NowUtc:O}.",
+                "Latest netted weights are stale. Last bar: {BarTimeUtc:O}, now: {NowUtc:O}.",
                 barTimeUtc,
                 utcNow);
             return false;
@@ -1040,7 +1055,9 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
         foreach (var symbol in configured)
         {
-            if (SymbolInfo.TryCreate(symbol.SecurityId, symbol.Symbol, out var info))
+            var requestSymbol = WakettSymbolPatch.GetRequestSymbol(symbol.SecurityId, symbol.Symbol);
+
+            if (SymbolInfo.TryCreate(symbol.SecurityId, requestSymbol, out var info))
             {
                 yield return info.FormattedSymbol;
             }
@@ -1048,7 +1065,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
     }
 
     private static List<(int SecurityId, WakettOrderItem Order)> BuildOrders(
-        IEnumerable<TheoreticalWeightRow> weights,
+        IEnumerable<NettedWeightRow> weights,
         IReadOnlyDictionary<int, string> symbolMap,
         ISet<string> allowedSymbols,
         DateTime orderTimestampUtc)
@@ -1084,7 +1101,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
         if (exposures.Count == 0)
         {
-            return new List<(int SecurityId, WakettOrderItem Order)>();
+            return BuildFlatOrders(weights, parsedSymbols, allowedSymbols, orderTimestampUtc);
         }
 
         var usdBasePairs = parsedSymbols.Values
@@ -1165,6 +1182,53 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
                 {
                     type = "percentage",
                     value = value
+                }
+            }));
+        }
+
+        return result;
+    }
+
+    private static List<(int SecurityId, WakettOrderItem Order)> BuildFlatOrders(
+        IEnumerable<NettedWeightRow> weights,
+        IReadOnlyDictionary<int, SymbolInfo> parsedSymbols,
+        ISet<string> allowedSymbols,
+        DateTime orderTimestampUtc)
+    {
+        var result = new List<(int SecurityId, WakettOrderItem Order)>();
+
+        var orderedSymbols = weights
+            .Select(weight => weight.SecurityId)
+            .Distinct()
+            .Select(id => parsedSymbols.TryGetValue(id, out var info) ? info : null)
+            .Where(info => info is not null)
+            .Cast<SymbolInfo>()
+            .OrderBy(info => info.SecurityId);
+
+        foreach (var symbol in orderedSymbols)
+        {
+            var formatted = symbol.FormattedSymbol;
+
+            if (!allowedSymbols.Contains(formatted))
+            {
+                var reversed = symbol.ReversedFormattedSymbol;
+                if (!allowedSymbols.Contains(reversed))
+                {
+                    continue;
+                }
+
+                formatted = reversed;
+            }
+
+            result.Add((symbol.SecurityId, new WakettOrderItem
+            {
+                symbol = formatted,
+                side = "BUY",
+                code = BuildOrderCode(symbol.SecurityId, orderTimestampUtc),
+                size = new WakettOrderSize
+                {
+                    type = "percentage",
+                    value = 0d
                 }
             }));
         }
@@ -1502,7 +1566,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         public decimal? TotalTurnoverLimit { get; init; }
     }
 
-    protected sealed record TheoreticalWeightRow
+    protected sealed record NettedWeightRow
     {
         public int SecurityId { get; init; }
 

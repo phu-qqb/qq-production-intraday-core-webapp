@@ -1,8 +1,11 @@
 using Xunit;
 using Moq;
 using Quartz;
+using Quartz.Spi;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using TradingDaemon.Options;
 using TradingDaemon.Services;
-using Microsoft.Extensions.DependencyInjection;
 
 public class SchedulerServiceTests
 {
@@ -12,7 +15,16 @@ public class SchedulerServiceTests
         var schedulerFactory = new Mock<ISchedulerFactory>();
         var scheduler = new Mock<IScheduler>();
         schedulerFactory.Setup(f => f.GetScheduler(It.IsAny<CancellationToken>())).ReturnsAsync(scheduler.Object);
-        var service = new SchedulerService(schedulerFactory.Object, new ServiceCollection().BuildServiceProvider());
+
+        var jobFactory = new Mock<IJobFactory>();
+        var optionsMonitor = Mock.Of<IOptionsMonitor<SchedulerOptions>>(o => o.CurrentValue == new SchedulerOptions
+        {
+            Cron = "0 0/30 * * * ?",
+            TimeZone = "UTC"
+        });
+        var logger = Mock.Of<ILogger<SchedulerService>>();
+
+        var service = new SchedulerService(schedulerFactory.Object, jobFactory.Object, optionsMonitor, logger);
 
         await service.StartAsync(CancellationToken.None);
 

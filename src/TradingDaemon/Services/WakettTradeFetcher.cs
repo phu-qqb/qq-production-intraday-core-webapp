@@ -6,13 +6,16 @@ using System.Globalization;
 using System.Text;
 using Dapper;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using TradingDaemon.Data;
 using TradingDaemon.Models;
+using TradingDaemon.Options;
 
 namespace TradingDaemon.Services;
 
 public class WakettTradeFetcher
 {
+    private const decimal OneMillion = 1_000_000m;
     private static readonly string[] TimestampFormats =
     {
         "yyyy-MM-dd HH:mm:ss.fff zzz",
@@ -65,6 +68,7 @@ USING (VALUES (
     @Quote,
     @Amount,
     @Rate,
+    @CommissionBase,
     @RecordedAtUtc
 )) AS source (
     ExecuteId,
@@ -104,9 +108,13 @@ USING (VALUES (
     Quote,
     Amount,
     Rate,
+    CommissionBase,
     RecordedAtUtc
 )
 ON target.ExecuteId = source.ExecuteId
+    AND target.Account = source.Account
+    AND ISNULL(target.SubOrderId, -2147483648) = ISNULL(source.SubOrderId, -2147483648)
+    AND ISNULL(target.ExecuteTimestamp, '0001-01-01T00:00:00+00:00') = ISNULL(source.ExecuteTimestamp, '0001-01-01T00:00:00+00:00')
 WHEN MATCHED THEN
     UPDATE SET
         Account = source.Account,
@@ -145,6 +153,7 @@ WHEN MATCHED THEN
         Quote = source.Quote,
         Amount = source.Amount,
         Rate = source.Rate,
+        CommissionBase = source.CommissionBase,
         UpdatedAtUtc = source.RecordedAtUtc
 WHEN NOT MATCHED THEN
     INSERT (
@@ -185,6 +194,7 @@ WHEN NOT MATCHED THEN
         Quote,
         Amount,
         Rate,
+        CommissionBase,
         CreatedAtUtc,
         UpdatedAtUtc
     )
@@ -226,6 +236,7 @@ WHEN NOT MATCHED THEN
         source.Quote,
         source.Amount,
         source.Rate,
+        source.CommissionBase,
         source.RecordedAtUtc,
         source.RecordedAtUtc
     )
@@ -234,17 +245,20 @@ OUTPUT $action;";
     private readonly WakettApiClient _client;
     private readonly DapperContext _context;
     private readonly ILogger<WakettTradeFetcher> _logger;
+    private readonly TradingOptions _tradingOptions;
     private readonly TimeProvider _timeProvider;
 
     public WakettTradeFetcher(
         WakettApiClient client,
         DapperContext context,
         ILogger<WakettTradeFetcher> logger,
+        IOptions<TradingOptions>? tradingOptions = null,
         TimeProvider? timeProvider = null)
     {
         _client = client;
         _context = context;
         _logger = logger;
+        _tradingOptions = tradingOptions?.Value ?? new TradingOptions();
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
@@ -274,7 +288,7 @@ OUTPUT $action;";
             Strategy = normalized.Strategy
         };
 
-        var response = await _client.GetTradesAsync(tradeRequest);
+        var response = await _client.GetTradesAsync(tradeRequest, cancellationToken);
         if (response is null)
         {
             throw new WakettTradeFetcherException(
@@ -326,22 +340,11 @@ OUTPUT $action;";
         using var transaction = connection.BeginTransaction();
         var inserted = 0;
         var updated = 0;
-        var seenExecuteIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
         foreach (var trade in executions)
         {
             var item = CreateUploadItem(trade, normalized, recordedAtUtc, skipped);
             if (item is null)
             {
-                continue;
-            }
-
-            if (!seenExecuteIds.Add(item.ExecuteId))
-            {
-                skipped.Add(new WakettFillUploadSkippedRecord(
-                    "Duplicate execute identifier in response.",
-                    item.ExecuteId,
-                    item.Symbol));
                 continue;
             }
 
@@ -411,6 +414,11 @@ OUTPUT $action;";
             return null;
         }
 
+        var executeSize = ToDecimal(trade.ExecuteSize);
+        var executePrice = ToDecimal(trade.ExecutePrice);
+        var rate = ToDecimal(trade.Rate);
+        var commissionBase = CalculateCommissionBase(executeSize, executePrice);
+
         return new WakettFillUploadItem(
             executeId,
             normalized.Account,
@@ -439,8 +447,8 @@ OUTPUT $action;";
             ParseTimestamp(trade.ProviderTimestamp, "providerTS", executeId),
             ParseTimestamp(trade.ExecuteTimestamp, "executeTS", executeId),
             ToDecimal(trade.EntitySize),
-            ToDecimal(trade.ExecuteSize),
-            ToDecimal(trade.ExecutePrice),
+            executeSize,
+            executePrice,
             ParseTimestamp(trade.TradeTimestamp, "tradets", executeId),
             TrimOrNull(trade.Event),
             TrimOrNull(trade.User),
@@ -448,12 +456,41 @@ OUTPUT $action;";
             TrimOrNull(trade.Type),
             ToDecimal(trade.Quote),
             ToDecimal(trade.Amount),
-            ToDecimal(trade.Rate),
+            rate,
+            commissionBase,
             recordedAtUtc);
     }
 
     private static decimal? ToDecimal(double? value)
         => value.HasValue ? Convert.ToDecimal(value.Value, CultureInfo.InvariantCulture) : null;
+
+    private decimal? CalculateCommissionBase(decimal? executeSize, decimal? executePrice)
+    {
+        if (executeSize is not { } size || executePrice is not { } price)
+        {
+            return null;
+        }
+
+        var perMillion = _tradingOptions.CommissionBasePerMillion;
+        if (perMillion <= 0m)
+        {
+            return 0m;
+        }
+
+        var notionalBase = Math.Abs(size * price);
+        if (notionalBase == 0m)
+        {
+            return 0m;
+        }
+
+        var commissionBase = notionalBase / OneMillion * perMillion;
+        if (commissionBase == 0m)
+        {
+            return 0m;
+        }
+
+        return Math.Abs(commissionBase);
+    }
 
     private DateTimeOffset? ParseTimestamp(string? raw, string fieldName, string executeId)
     {
@@ -613,4 +650,5 @@ internal sealed record WakettFillUploadItem(
     decimal? Quote,
     decimal? Amount,
     decimal? Rate,
+    decimal? CommissionBase,
     DateTime RecordedAtUtc);

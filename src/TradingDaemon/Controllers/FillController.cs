@@ -1,8 +1,11 @@
+using System.Collections.Generic;
+using System.Linq;
 using Dapper;
 using Microsoft.Extensions.Logging;
 using TradingDaemon.Data;
 using TradingDaemon.Models;
 using TradingDaemon.Services;
+using TradingDaemon.Utils;
 
 namespace TradingDaemon.Controllers;
 
@@ -36,9 +39,44 @@ public static class FillController
                        join w in weights on f.Symbol equals w.Symbol
                        select f.Quantity * (w.Value - f.Price)).Sum();
 
+            var positionGroups = fills
+                .GroupBy(f => f.Symbol)
+                .Select(group => new
+                {
+                    Symbol = group.Key,
+                    Quantity = group.Sum(f => f.Quantity),
+                    LastPrice = group.OrderByDescending(f => f.Timestamp).FirstOrDefault()?.Price
+                })
+                .Where(p => p.Quantity != 0m)
+                .ToList();
+
+            var positions = new List<PnlReportPosition>();
+            foreach (var position in positionGroups)
+            {
+                if (!CurrencyPairParser.TryParse(position.Symbol, out var pair))
+                {
+                    continue;
+                }
+
+                decimal? lastPrice = position.LastPrice;
+                decimal? usdValue = lastPrice.HasValue ? position.Quantity * lastPrice.Value : null;
+
+                positions.Add(new PnlReportPosition(
+                    pair.FormattedSymbol,
+                    pair.BaseCurrency,
+                    pair.QuoteCurrency,
+                    position.Quantity,
+                    lastPrice,
+                    usdValue));
+            }
+
+            var grossMarketValue = positions.Sum(p => Math.Abs(p.MarketValueUsd ?? 0m));
+            var totalNetExposure = positions.Sum(p => p.MarketValueUsd ?? 0m);
+            var report = new PnlReport(DateOnly.FromDateTime(date.Date), pnl, grossMarketValue, totalNetExposure, positions);
+
             try
             {
-                await emailNotificationService.SendPnLReportAsync(date.Date, pnl);
+                await emailNotificationService.SendPnLReportAsync(report);
             }
             catch (Exception ex)
             {
@@ -46,7 +84,14 @@ public static class FillController
                 return Results.Problem("Failed to send PnL email notification.", statusCode: StatusCodes.Status500InternalServerError);
             }
 
-            return Results.Ok(new { Date = date.Date, PnL = pnl });
+            return Results.Ok(new
+            {
+                Date = date.Date,
+                PnL = pnl,
+                GrossMarketValue = grossMarketValue,
+                TotalNetExposure = totalNetExposure,
+                Positions = positions
+            });
         });
     }
 }

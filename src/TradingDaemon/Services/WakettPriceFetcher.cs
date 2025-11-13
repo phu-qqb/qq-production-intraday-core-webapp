@@ -64,6 +64,7 @@ public class WakettPriceFetcher
         }
 
         var securityPairs = await LoadSecurityPairsAsync(allSecurityIds, cancellationToken);
+        var wakettSymbols = BuildWakettRequestSymbols(baseSymbols);
         WakettPriceUploadResult? lastResult = null;
 
         var nowUtc = DateTimeOffset.UtcNow;
@@ -88,7 +89,7 @@ public class WakettPriceFetcher
                 "Requesting Wakett prices for timestamp {TimestampUtc}.",
                 requestTimestamp.UtcDateTime);
 
-            var response = await _client.GetPricesAsync(baseSymbols, requestTimestamp);
+                var response = await _client.GetPricesAsync(wakettSymbols, requestTimestamp);
             var computedRates = BuildComputedRates(baseSymbols, missingSymbols, response?.Prices, _logger);
             if (computedRates.Count == 0)
             {
@@ -207,7 +208,7 @@ public class WakettPriceFetcher
         var result = new List<ComputedRate>();
         var graph = new Dictionary<string, Dictionary<string, decimal>>(StringComparer.OrdinalIgnoreCase);
 
-        var priceLookup = new Dictionary<string, WakettPrice>(StringComparer.OrdinalIgnoreCase);
+        var priceLookup = new Dictionary<string, (WakettPrice Price, bool Inverted)>(StringComparer.OrdinalIgnoreCase);
         if (prices is not null)
         {
             foreach (var p in prices)
@@ -215,7 +216,16 @@ public class WakettPriceFetcher
                 var key = NormalizeSymbol(p.Symbol);
                 if (string.IsNullOrEmpty(key))
                     continue;
-                priceLookup[key] = p;
+                priceLookup[key] = (p, false);
+
+                if (key.Length == 6)
+                {
+                    var reversed = key[3..] + key[..3];
+                    if (!priceLookup.ContainsKey(reversed))
+                    {
+                        priceLookup[reversed] = (p, true);
+                    }
+                }
             }
         }
 
@@ -230,36 +240,40 @@ public class WakettPriceFetcher
             }
 
             var lookupKey = NormalizeSymbol(symbol.Symbol);
-            if (!priceLookup.TryGetValue(lookupKey, out var price))
+            if (!priceLookup.TryGetValue(lookupKey, out var entry))
             {
                 logger?.LogWarning("No price returned from Wakett for symbol {Symbol}.", symbol.Symbol);
                 continue;
             }
 
-            if (price.Error is not null)
+            if (entry.Price.Error is not null)
             {
                 logger?.LogWarning(
                     "Wakett returned error for symbol {Symbol}: {Code} {Message}.",
                     symbol.Symbol,
-                    price.Error.Code,
-                    price.Error.Message);
+                    entry.Price.Error.Code,
+                    entry.Price.Error.Message);
                 continue;
             }
 
-            var mid = TryGetMidPrice(price);
+            var mid = TryGetMidPrice(entry.Price);
             if (!mid.HasValue || mid.Value <= 0m)
             {
                 logger?.LogWarning(
                     "Invalid price for symbol {Symbol}. Bid={Bid} Ask={Ask} Mid={Mid}",
                     symbol.Symbol,
-                    price.Bid,
-                    price.Ask,
-                    price.Mid);
+                    entry.Price.Bid,
+                    entry.Price.Ask,
+                    entry.Price.Mid);
                 continue;
             }
 
-            AddRate(graph, pair, mid.Value);
-            result.Add(new ComputedRate(symbol, pair, mid.Value));
+            var rateValue = entry.Inverted
+                ? 1m / mid.Value
+                : mid.Value;
+
+            AddRate(graph, pair, rateValue);
+            result.Add(new ComputedRate(symbol, pair, rateValue));
         }
 
         foreach (var symbol in missingSymbols)
@@ -353,52 +367,31 @@ public class WakettPriceFetcher
         return price.Bid ?? price.Ask;
     }
 
-    internal static bool TryComputeCrossRate(
-        IDictionary<string, Dictionary<string, decimal>> graph,
-        CurrencyPair target,
-        out decimal rate)
+    internal static bool TryComputeCrossRate(IDictionary<string, Dictionary<string, decimal>> graph, CurrencyPair target, out decimal rate)
     {
-        rate = 0m;
-        if (target.Base.Equals(target.Quote, StringComparison.OrdinalIgnoreCase))
-        {
-            rate = 1m;
-            return true;
+        rate = 0m; 
+        if (target.Base.Equals(target.Quote, StringComparison.OrdinalIgnoreCase)) { 
+            rate = 1m; return true; 
         }
-
-        if (!graph.ContainsKey(target.Base) || !graph.ContainsKey(target.Quote))
-            return false;
-
-        var queue = new Queue<(string Currency, decimal Rate)>();
-        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            target.Base
-        };
-
-        queue.Enqueue((target.Base, 1m));
-        while (queue.Count > 0)
-        {
-            var (currency, currentRate) = queue.Dequeue();
-            if (!graph.TryGetValue(currency, out var edges))
-                continue;
-
-            foreach (var kvp in edges)
-            {
-                if (!visited.Add(kvp.Key))
-                    continue;
-
-                var nextRate = currentRate * kvp.Value;
-                if (kvp.Key.Equals(target.Quote, StringComparison.OrdinalIgnoreCase))
-                {
-                    rate = nextRate;
-                    return true;
-                }
-
-                queue.Enqueue((kvp.Key, nextRate));
-            }
+        if (!graph.ContainsKey(target.Base) || !graph.ContainsKey(target.Quote)) return false; 
+        var queue = new Queue<(string Currency, decimal Rate)>(); 
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { target.Base }; 
+        queue.Enqueue((target.Base, 1m)); 
+        while (queue.Count > 0) 
+        { 
+            var (currency, currentRate) = queue.Dequeue(); 
+            if (!graph.TryGetValue(currency, out var edges)) continue; 
+            foreach (var kvp in edges) { if (!visited.Add(kvp.Key)) continue; 
+                var nextRate = currentRate * kvp.Value; 
+                if (kvp.Key.Equals(target.Quote, StringComparison.OrdinalIgnoreCase)) { 
+                    rate = nextRate; return true; 
+                } 
+                queue.Enqueue((kvp.Key, nextRate)); 
+            } 
         }
-
         return false;
     }
+
 
     internal static bool TryAdjustRateForSecurity(
         decimal rate,
@@ -485,6 +478,35 @@ public class WakettPriceFetcher
             .ToArray();
 
         return true;
+    }
+
+    private static IReadOnlyList<WakettSecuritySymbol> BuildWakettRequestSymbols(
+        IReadOnlyList<WakettSecuritySymbol> configuredSymbols)
+    {
+        if (configuredSymbols.Count == 0)
+        {
+            return Array.Empty<WakettSecuritySymbol>();
+        }
+
+        var result = new List<WakettSecuritySymbol>(configuredSymbols.Count);
+
+        foreach (var symbol in configuredSymbols)
+        {
+            var requestSymbol = WakettSymbolPatch.GetRequestSymbol(symbol.SecurityId, symbol.Symbol);
+
+            if (string.IsNullOrWhiteSpace(requestSymbol))
+            {
+                continue;
+            }
+
+            result.Add(new WakettSecuritySymbol
+            {
+                SecurityId = symbol.SecurityId,
+                Symbol = requestSymbol
+            });
+        }
+
+        return result;
     }
 
     private async Task<IReadOnlyList<DateTime>> FindMissingBarTimestampsAsync(
@@ -605,7 +627,15 @@ public class WakettPriceFetcher
             DateTimeKind.Utc);
     }
 
-    private static bool IsWeekend(DateTime value) => value.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday;
+    private static bool IsWeekend(DateTime value)
+    {
+        var utc = value.Kind == DateTimeKind.Utc
+            ? value
+            : DateTime.SpecifyKind(value, DateTimeKind.Utc);
+
+        var local = TimeZoneInfo.ConvertTimeFromUtc(utc, NewYorkZone);
+        return local.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday;
+    }
 
     private async Task<Dictionary<int, CurrencyPair>> LoadSecurityPairsAsync(
         IEnumerable<int> securityIds,

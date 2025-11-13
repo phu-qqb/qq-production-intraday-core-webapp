@@ -64,8 +64,8 @@ BEGIN
         UpdatedAtUtc        DATETIME2(7)         NOT NULL CONSTRAINT DF_WakettFill_UpdatedAtUtc DEFAULT SYSUTCDATETIME()
     );
 
-    CREATE UNIQUE INDEX UX_WakettFill_ExecuteId
-        ON [wakett].[Fill] (ExecuteId);
+    CREATE UNIQUE INDEX UX_WakettFill_Account_ExecuteId_SubOrderId_ExecuteTimestamp
+        ON [wakett].[Fill] (Account, ExecuteId, SubOrderId, ExecuteTimestamp);
 
     CREATE INDEX IX_WakettFill_RequestedWindow
         ON [wakett].[Fill] (Account, RequestedFrom, RequestedTo);
