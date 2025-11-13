@@ -16,12 +16,26 @@ public class PriceFetcher
     private readonly DapperContext _context;
     private readonly ILogger<PriceFetcher> _logger;
     private readonly IConfiguration _config;
+    private readonly string _stageHistCloseTable;
+    private readonly string _flatBarStagingTable;
+    private readonly string _stageInsertSql;
+    private readonly string _selectRawSql;
+    private readonly string _priceBarTable;
 
-    public PriceFetcher(DapperContext context, ILogger<PriceFetcher> logger, IConfiguration config)
+    public PriceFetcher(
+        DapperContext context,
+        ILogger<PriceFetcher> logger,
+        IConfiguration config,
+        IDatabaseObjectNameProvider databaseNameProvider)
     {
         _context = context;
         _logger = logger;
         _config = config;
+        _stageHistCloseTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketStageHistClose);
+        _flatBarStagingTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayStagingFlatBar);
+        _priceBarTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketPriceBar);
+        _stageInsertSql = $"INSERT INTO {_stageHistCloseTable} (SecurityId, BarTimeUtc, [Close]) VALUES (@SecurityId, @BarTimeUtc, @Close)";
+        _selectRawSql = $"SELECT SecurityId, BarTimeUtc, [Close] FROM {_priceBarTable} WHERE TimeframeMinute = 60 AND SecurityId IN @SecurityIds";
     }
 
     public async Task FetchAndStoreAsync()
@@ -59,9 +73,8 @@ public class PriceFetcher
 
         using var connection = (SqlConnection)_context.CreateConnection();
         await connection.OpenAsync();
-        await connection.ExecuteAsync("DELETE FROM [Intraday].[mkt].[Stage_HistClose]");
-        const string insertSql = "INSERT INTO [Intraday].[mkt].[Stage_HistClose] (SecurityId, BarTimeUtc, [Close]) VALUES (@SecurityId, @BarTimeUtc, @Close)";
-        await connection.ExecuteAsync(insertSql, records);
+        await connection.ExecuteAsync($"DELETE FROM {_stageHistCloseTable}");
+        await connection.ExecuteAsync(_stageInsertSql, records);
 
         // Load newly staged raw bars into the PriceBar table so that subsequent
         // queries include the latest data.
@@ -70,8 +83,7 @@ public class PriceFetcher
         // Retrieve all existing raw bars for the affected securities so that
         // flat bars can be recomputed over the full history instead of only
         // the newly provided data.
-        const string selectRaw = "SELECT SecurityId, BarTimeUtc, [Close] FROM [Intraday].[mkt].[PriceBar] WHERE TimeframeMinute = 60 AND SecurityId IN @SecurityIds";
-        var existing = await connection.QueryAsync<HistClose>(selectRaw, new { SecurityIds = securityIds });
+        var existing = await connection.QueryAsync<HistClose>(_selectRawSql, new { SecurityIds = securityIds });
 
         // Combine existing database bars with the latest file data, removing duplicates
         // by timestamp so that the most recent value for a given bar is used.
@@ -80,7 +92,7 @@ public class PriceFetcher
             .Select(g => g.Last())
             .ToList();
 
-        await connection.ExecuteAsync("DELETE FROM [Intraday].[dbo].[mkt_FlatBar_Staging]");
+        await connection.ExecuteAsync($"DELETE FROM {_flatBarStagingTable}");
         var flatRecords = new List<FlatPrice>();
         foreach (var grp in allBars.GroupBy(r => r.SecurityId))
         {
@@ -111,7 +123,7 @@ public class PriceFetcher
 
             using (var bulkCopy = new SqlBulkCopy(connection))
             {
-                bulkCopy.DestinationTableName = "[Intraday].[dbo].[mkt_FlatBar_Staging]";
+                bulkCopy.DestinationTableName = _flatBarStagingTable;
                 await bulkCopy.WriteToServerAsync(table);
             }
 

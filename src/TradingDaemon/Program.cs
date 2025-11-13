@@ -12,9 +12,16 @@ using TradingDaemon.Options;
 
 var builder = WebApplication.CreateBuilder(args);
 
+ConfigurationEnvironmentExtensions.ApplyEnvironmentOverrides(
+    builder.Configuration,
+    "ExternalApis",
+    builder.Configuration["Database:ActiveEnvironment"]);
+
 SerilogConfig.Configure(builder.Configuration);
 builder.Host.UseSerilog();
 
+builder.Services.Configure<DatabaseObjectNameOptions>(builder.Configuration.GetSection("Database"));
+builder.Services.AddSingleton<IDatabaseObjectNameProvider, DatabaseObjectNameProvider>();
 builder.Services.AddSingleton<DapperContext>();
 
 builder.Services.AddHttpClient("PriceApi", client =>

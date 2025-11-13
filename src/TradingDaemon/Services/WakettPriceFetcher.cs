@@ -26,6 +26,13 @@ public class WakettPriceFetcher
     private readonly ILogger<WakettPriceFetcher> _logger;
 
     private readonly WakettAutomationOptions? _automationOptions;
+    private readonly string _stageHistCloseTable;
+    private readonly string _flatBarStagingTable;
+    private readonly string _priceBarWindowQuery;
+    private readonly string _priceBarSelectWithOffsetSql;
+    private readonly string _stageDeleteSql;
+    private readonly string _stageInsertSql;
+    private readonly string _priceBarTable;
 
 
     private int PriceMinuteOffset => Math.Clamp(
@@ -39,6 +46,7 @@ public class WakettPriceFetcher
         DapperContext context,
         IConfiguration config,
         ILogger<WakettPriceFetcher> logger,
+        IDatabaseObjectNameProvider databaseNameProvider,
         IOptions<WakettAutomationOptions>? automationOptions = null)
     {
         _client = client;
@@ -46,6 +54,13 @@ public class WakettPriceFetcher
         _config = config;
         _logger = logger;
         _automationOptions = automationOptions?.Value;
+        _stageHistCloseTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketStageHistClose);
+        _flatBarStagingTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayStagingFlatBar);
+        _priceBarTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketPriceBar);
+        _priceBarWindowQuery = $"SELECT SecurityId, BarTimeUtc FROM {_priceBarTable} WHERE TimeframeMinute = 60 AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset AND BarTimeUtc BETWEEN @StartUtc AND @EndUtc";
+        _priceBarSelectWithOffsetSql = $"SELECT SecurityId, BarTimeUtc, [Close] FROM {_priceBarTable} WHERE TimeframeMinute = 60 AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset";
+        _stageDeleteSql = $"DELETE FROM {_stageHistCloseTable} WHERE BarTimeUtc = @BarTimeUtc AND SecurityId IN @SecurityIds";
+        _stageInsertSql = $"INSERT INTO {_stageHistCloseTable} (SecurityId, BarTimeUtc, [Close]) VALUES (@SecurityId, @BarTimeUtc, @Close)";
     }
 
     public async Task<WakettPriceUploadResult?> FetchAndStoreAsync(
@@ -530,8 +545,6 @@ public class WakettPriceFetcher
         var startUtc = startHourUtc.AddMinutes(minuteOffset);
         var endUtc = endHourUtc.AddMinutes(minuteOffset);
 
-        const string sql = @"SELECT SecurityId, BarTimeUtc FROM [Intraday].[mkt].[PriceBar] WHERE TimeframeMinute = 60 AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset AND BarTimeUtc BETWEEN @StartUtc AND @EndUtc";
-
         using var connection = _context.CreateConnection();
         if (connection is DbConnection dbConnection)
         {
@@ -543,7 +556,7 @@ public class WakettPriceFetcher
         }
 
         var rows = await connection.QueryAsync<(int SecurityId, DateTime BarTimeUtc)>(
-        sql,
+        _priceBarWindowQuery,
         new
         {
             SecurityIds = securityIds.ToArray(),
@@ -680,9 +693,6 @@ public class WakettPriceFetcher
             .Distinct()
             .ToArray();
 
-        const string deleteSql = "DELETE FROM [Intraday].[mkt].[Stage_HistClose] WHERE BarTimeUtc = @BarTimeUtc AND SecurityId IN @SecurityIds";
-        const string insertSql = "INSERT INTO [Intraday].[mkt].[Stage_HistClose] (SecurityId, BarTimeUtc, [Close]) VALUES (@SecurityId, @BarTimeUtc, @Close)";
-
         using var connection = _context.CreateConnection();
         if (connection is DbConnection dbConnection)
         {
@@ -706,9 +716,9 @@ public class WakettPriceFetcher
                     SecurityIds = securityKeys
                 };
 
-                await connection.ExecuteAsync(deleteSql, parameters, transaction);
+                await connection.ExecuteAsync(_stageDeleteSql, parameters, transaction);
                 await connection.ExecuteAsync(
-                    insertSql,
+                    _stageInsertSql,
                     recordList.Select(r => new { SecurityId = r.SecurityKey, r.BarTimeUtc, Close = r.Close }),
                     transaction);
 
@@ -725,8 +735,7 @@ public class WakettPriceFetcher
             await PriceProcessingProcedures.LoadRawFromStageAsync(connection, 60, cancellationToken);
 
             var minuteOffset = PriceMinuteOffset;
-            var selectRaw =
-                "SELECT SecurityId, BarTimeUtc, [Close] FROM [Intraday].[mkt].[PriceBar] WHERE TimeframeMinute = 60 AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset";
+            var selectRaw = _priceBarSelectWithOffsetSql;
             var existing = (await connection.QueryAsync<HistClose>(selectRaw, new { SecurityIds = securityKeys, MinuteOffset = minuteOffset }))
                 .GroupBy(r => (r.SecurityId, r.BarTimeUtc))
                 .Select(g => g.Last())
@@ -761,7 +770,7 @@ public class WakettPriceFetcher
 
             if (flatRecords.Count > 0)
             {
-                await connection.ExecuteAsync("DELETE FROM [Intraday].[dbo].[mkt_FlatBar_Staging]");
+                await connection.ExecuteAsync($"DELETE FROM {_flatBarStagingTable}");
 
                 var table = new DataTable();
                 table.Columns.Add("SecurityId", typeof(string));
@@ -777,7 +786,7 @@ public class WakettPriceFetcher
                 if (connection is SqlConnection sqlConnection)
                 {
                     using var bulkCopy = new SqlBulkCopy(sqlConnection);
-                    bulkCopy.DestinationTableName = "[Intraday].[dbo].[mkt_FlatBar_Staging]";
+                    bulkCopy.DestinationTableName = _flatBarStagingTable;
                     await bulkCopy.WriteToServerAsync(table);
                 }
                 else

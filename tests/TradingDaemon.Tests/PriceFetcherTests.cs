@@ -35,7 +35,8 @@ public class PriceFetcherTests
         }).Build();
         var context = new TestDapperContext(config);
         var logger = Mock.Of<ILogger<PriceFetcher>>();
-        var fetcher = new PriceFetcher(context, logger, config);
+        var provider = new DatabaseObjectNameProvider();
+        var fetcher = new PriceFetcher(context, logger, config, provider);
 
         await fetcher.FetchAndStoreAsync();
     }

@@ -16,6 +16,7 @@ using Xunit;
 
 public class OrderSenderTests
 {
+    private static readonly IDatabaseObjectNameProvider DefaultDatabaseNameProvider = new DatabaseObjectNameProvider();
     [Fact]
     public async Task SendOrdersAsync_SubmitsLatestWeightsToWakett()
     {
@@ -937,8 +938,9 @@ public class OrderSenderTests
             IReadOnlyDictionary<int, string> symbolMap,
             ModelScheduleRow? schedule,
             TradingLimitRow? tradingLimit = null,
-            IReadOnlyCollection<string>? existingOrderSymbols = null)
-            : base(client, context, logger, configuration, timeProvider)
+            IReadOnlyCollection<string>? existingOrderSymbols = null,
+            IDatabaseObjectNameProvider? databaseNameProvider = null)
+            : base(client, context, logger, configuration, databaseNameProvider ?? DefaultDatabaseNameProvider, timeProvider)
         {
             _weights = weights;
             _symbolMap = symbolMap;
