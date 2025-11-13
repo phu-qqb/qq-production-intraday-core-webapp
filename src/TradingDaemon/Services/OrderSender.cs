@@ -49,12 +49,19 @@ public class OrderSender
     private readonly ILogger<OrderSender> _logger;
     private readonly IConfiguration _configuration;
     private readonly TimeProvider _timeProvider;
+    private readonly string _nettedWeightTable;
+    private readonly string _modelTable;
+    private readonly string _securityTable;
+    private readonly string _tradingLimitTable;
+    private readonly string _orderTable;
+    private readonly string _tradingLimitBreachTable;
 
     public OrderSender(
         WakettApiClient wakettApiClient,
         DapperContext context,
         ILogger<OrderSender> logger,
         IConfiguration configuration,
+        IDatabaseObjectNameProvider databaseNameProvider,
         TimeProvider? timeProvider = null)
     {
         _wakettApiClient = wakettApiClient;
@@ -62,6 +69,12 @@ public class OrderSender
         _logger = logger;
         _configuration = configuration;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _nettedWeightTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayModelNettedWeight);
+        _modelTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayModel);
+        _securityTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayCoreSecurity);
+        _tradingLimitTable = databaseNameProvider.GetObjectName(DatabaseObjects.WakettTradingLimit);
+        _orderTable = databaseNameProvider.GetObjectName(DatabaseObjects.WakettOrder);
+        _tradingLimitBreachTable = databaseNameProvider.GetObjectName(DatabaseObjects.WakettTradingLimitBreachReport);
     }
 
     public async Task SendOrdersAsync(double? aumOverride = null, CancellationToken cancellationToken = default)
@@ -274,7 +287,7 @@ public class OrderSender
                 requestLookup[key] = order;
             }
 
-            const string insertSql = @"INSERT INTO [wakett].[Order]
+            var insertSql = $@"INSERT INTO {_orderTable}
 (
     ModelId,
     OrderCode,
@@ -383,7 +396,7 @@ VALUES
             return Array.Empty<string>();
         }
 
-        const string selectSql = @"SELECT Symbol FROM [wakett].[Order]
+        var selectSql = $@"SELECT Symbol FROM {_orderTable}
 WHERE ModelId = @ModelId AND ScheduledTimestamp = @ScheduledTimestamp AND Symbol IN @Symbols;";
 
         try
@@ -454,7 +467,7 @@ WHERE ModelId = @ModelId AND ScheduledTimestamp = @ScheduledTimestamp AND Symbol
 
             var aumValue = aum.HasValue ? (decimal?)aum.Value : null;
 
-            const string insertSql = @"INSERT INTO [wakett].[TradingLimitBreachReport]
+            var insertSql = $@"INSERT INTO {_tradingLimitBreachTable}
 (
     ModelId,
     LimitType,
@@ -903,13 +916,13 @@ VALUES
         IDbConnection connection,
         CancellationToken cancellationToken)
     {
-        const string sql = @"SELECT TOP (1000)
+        var sql = $@"SELECT TOP (1000)
     nw.SecurityId,
     nw.ModelId,
     nw.BarTimeUtc,
     nw.ModelRunId,
     nw.Weight
-FROM [Intraday].[model].[NettedWeight] nw
+FROM {_nettedWeightTable} nw
 WHERE nw.ModelId = @ModelId
 ORDER BY nw.BarTimeUtc DESC, nw.SecurityId";
 
@@ -926,10 +939,10 @@ ORDER BY nw.BarTimeUtc DESC, nw.SecurityId";
         IDbConnection connection,
         CancellationToken cancellationToken)
     {
-        const string sql = @"SELECT TOP (1)
+        var sql = $@"SELECT TOP (1)
     BarSize,
     Offset
-FROM [Intraday].[model].[Model]
+FROM {_modelTable}
 WHERE ModelId = @ModelId
 ORDER BY ModelId";
 
@@ -946,7 +959,7 @@ ORDER BY ModelId";
         IDbConnection connection,
         CancellationToken cancellationToken)
     {
-        const string sql = @"SELECT TOP (1)
+        var sql = $@"SELECT TOP (1)
     TradingLimitId,
     ModelId,
     SingleTradeGrossLimit,
@@ -954,7 +967,7 @@ ORDER BY ModelId";
     PortfolioNetLimit,
     SingleTradeTurnoverLimit,
     TotalTurnoverLimit
-FROM [wakett].[TradingLimit]
+FROM {_tradingLimitTable}
 WHERE ModelId = @ModelId
 ORDER BY TradingLimitId DESC;";
 
@@ -997,8 +1010,8 @@ ORDER BY TradingLimitId DESC;";
         IDbConnection connection,
         CancellationToken cancellationToken)
     {
-        const string sql = @"SELECT SecurityId, Symbol
-FROM [Intraday].[core].[Security]
+        var sql = $@"SELECT SecurityId, Symbol
+FROM {_securityTable}
 WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
         var definition = new CommandDefinition(sql, cancellationToken: cancellationToken);
