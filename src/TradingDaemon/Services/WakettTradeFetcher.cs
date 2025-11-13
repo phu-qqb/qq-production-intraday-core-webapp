@@ -28,8 +28,8 @@ public class WakettTradeFetcher
         "yyyy-MM-dd'T'HH:mm:sszzz"
     };
 
-    private const string MergeSql = @"
-MERGE [wakett].[Fill] AS target
+private const string MergeSqlTemplate = @"
+MERGE {WakettFill} AS target
 USING (VALUES (
     @ExecuteId,
     @Account,
@@ -247,11 +247,14 @@ OUTPUT $action;";
     private readonly ILogger<WakettTradeFetcher> _logger;
     private readonly TradingOptions _tradingOptions;
     private readonly TimeProvider _timeProvider;
+    private readonly string _fillTable;
+    private readonly string _mergeSql;
 
     public WakettTradeFetcher(
         WakettApiClient client,
         DapperContext context,
         ILogger<WakettTradeFetcher> logger,
+        IDatabaseObjectNameProvider databaseNameProvider,
         IOptions<TradingOptions>? tradingOptions = null,
         TimeProvider? timeProvider = null)
     {
@@ -260,6 +263,8 @@ OUTPUT $action;";
         _logger = logger;
         _tradingOptions = tradingOptions?.Value ?? new TradingOptions();
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _fillTable = databaseNameProvider.GetObjectName(DatabaseObjects.WakettFill);
+        _mergeSql = MergeSqlTemplate.Replace("{WakettFill}", _fillTable);
     }
 
     public async Task<WakettFillUploadResponse> FetchAndStoreAsync(
@@ -349,7 +354,7 @@ OUTPUT $action;";
             }
 
             var command = new CommandDefinition(
-                MergeSql,
+                _mergeSql,
                 item,
                 transaction,
                 cancellationToken: cancellationToken);
