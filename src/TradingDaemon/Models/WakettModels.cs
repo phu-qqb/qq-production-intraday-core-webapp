@@ -28,6 +28,8 @@ public class WakettOrderRequest
 {
     public string? ts { get; set; }
     public double? aum { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? execution { get; set; }
     public List<WakettOrderItem> orders { get; set; } = new();
 }
 

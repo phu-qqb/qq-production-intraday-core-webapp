@@ -119,7 +119,8 @@ public class OrderSender
         }
 
         var builtOrders = BuildOrders(latestWeights, symbolMap, allowedSymbols, orderTimestampUtc);
-        if (builtOrders.Count == 0 || builtOrders.All(order => order.Order.size?.value == 0d))
+        var isFlatOrderRequest = builtOrders.Count == 0 || builtOrders.All(order => order.Order.size?.value == 0d);
+        if (isFlatOrderRequest)
         {
             _logger.LogInformation("All Wakett order weights are zero. Submitting flat order request.");
         }
@@ -174,6 +175,7 @@ public class OrderSender
         {
             ts = FormatTimestamp(orderTimestampUtc),
             aum = aum,
+            execution = isFlatOrderRequest ? "EOF" : null,
             orders = orders
         };
 
