@@ -21,16 +21,19 @@ public class PriceFetcher
     private readonly string _stageInsertSql;
     private readonly string _selectRawSql;
     private readonly string _priceBarTable;
+    private readonly IPriceProcessingProcedureExecutor _priceProcedures;
 
     public PriceFetcher(
         DapperContext context,
         ILogger<PriceFetcher> logger,
         IConfiguration config,
-        IDatabaseObjectNameProvider databaseNameProvider)
+        IDatabaseObjectNameProvider databaseNameProvider,
+        IPriceProcessingProcedureExecutor priceProcedures)
     {
         _context = context;
         _logger = logger;
         _config = config;
+        _priceProcedures = priceProcedures;
         _stageHistCloseTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketStageHistClose);
         _flatBarStagingTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayStagingFlatBar);
         _priceBarTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketPriceBar);
@@ -78,7 +81,7 @@ public class PriceFetcher
 
         // Load newly staged raw bars into the PriceBar table so that subsequent
         // queries include the latest data.
-        await PriceProcessingProcedures.LoadRawFromStageAsync(connection, 60);
+        await _priceProcedures.LoadRawFromStageAsync(connection, 60);
 
         // Retrieve all existing raw bars for the affected securities so that
         // flat bars can be recomputed over the full history instead of only
@@ -128,7 +131,7 @@ public class PriceFetcher
             }
 
             // Move staged flat bars into the main table for each session.
-            await PriceProcessingProcedures.LoadFlatFromMinimalAsync(connection, 60);
+            await _priceProcedures.LoadFlatFromMinimalAsync(connection, 60);
         }
     }
 

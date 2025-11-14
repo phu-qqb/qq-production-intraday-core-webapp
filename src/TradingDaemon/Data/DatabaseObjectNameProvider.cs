@@ -21,6 +21,8 @@ public sealed class DatabaseObjectNameProvider : IDatabaseObjectNameProvider
         [DatabaseObjects.IntradayMarketFlatBar.Key] = "[Intraday].[mkt].[FlatBar]",
         [DatabaseObjects.IntradayMarketStageHistClose.Key] = "[Intraday].[mkt].[Stage_HistClose]",
         [DatabaseObjects.IntradayStagingFlatBar.Key] = "[Intraday].[dbo].[mkt_FlatBar_Staging]",
+        [DatabaseObjects.IntradayMarketLoadRawFromStageProc.Key] = "[Intraday].[mkt].[LoadRawFromStage]",
+        [DatabaseObjects.IntradayMarketLoadFlatFromMinimalProc.Key] = "[Intraday].[mkt].[LoadFlatFromMinimal]",
         [DatabaseObjects.WakettFill.Key] = "[wakett].[Fill]",
         [DatabaseObjects.WakettTradingLimit.Key] = "[wakett].[TradingLimit]",
         [DatabaseObjects.WakettTradingLimitBreachReport.Key] = "[wakett].[TradingLimitBreachReport]",

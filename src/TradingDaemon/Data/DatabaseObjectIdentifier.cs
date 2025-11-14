@@ -14,6 +14,8 @@ public static class DatabaseObjects
     public static readonly DatabaseObjectIdentifier IntradayMarketFlatBar = new("Intraday.mkt.FlatBar");
     public static readonly DatabaseObjectIdentifier IntradayMarketStageHistClose = new("Intraday.mkt.Stage_HistClose");
     public static readonly DatabaseObjectIdentifier IntradayStagingFlatBar = new("Intraday.dbo.mkt_FlatBar_Staging");
+    public static readonly DatabaseObjectIdentifier IntradayMarketLoadRawFromStageProc = new("Intraday.mkt.LoadRawFromStage");
+    public static readonly DatabaseObjectIdentifier IntradayMarketLoadFlatFromMinimalProc = new("Intraday.mkt.LoadFlatFromMinimal");
     public static readonly DatabaseObjectIdentifier WakettFill = new("wakett.Fill");
     public static readonly DatabaseObjectIdentifier WakettTradingLimit = new("wakett.TradingLimit");
     public static readonly DatabaseObjectIdentifier WakettTradingLimitBreachReport = new("wakett.TradingLimitBreachReport");

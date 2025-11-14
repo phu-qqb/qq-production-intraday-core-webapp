@@ -22,6 +22,7 @@ builder.Host.UseSerilog();
 
 builder.Services.Configure<DatabaseObjectNameOptions>(builder.Configuration.GetSection("Database"));
 builder.Services.AddSingleton<IDatabaseObjectNameProvider, DatabaseObjectNameProvider>();
+builder.Services.AddSingleton<IPriceProcessingProcedureExecutor, PriceProcessingProcedureExecutor>();
 builder.Services.AddSingleton<DapperContext>();
 
 builder.Services.AddHttpClient("PriceApi", client =>
