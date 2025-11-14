@@ -20,8 +20,10 @@ public class OrderSenderTests
     [Fact]
     public async Task SendOrdersAsync_SubmitsLatestWeightsToWakett()
     {
+        HttpRequestMessage? captured = null;
         var handler = new Mock<HttpMessageHandler>();
         handler.Protected().Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+            .Callback<HttpRequestMessage, CancellationToken>((message, _) => captured = message)
             .ReturnsAsync(new HttpResponseMessage(HttpStatusCode.OK)
             {
                 Content = new StringContent("{\"ts\":\"\",\"orders\":[]}")
@@ -88,7 +90,7 @@ public class OrderSenderTests
             0);
         Assert.Equal(OrderSender.FormatTimestamp(expectedOrderTimestampUtc), root.GetProperty("ts").GetString());
         Assert.Equal(2_500_000d, root.GetProperty("aum").GetDouble());
-        Assert.False(root.TryGetProperty("execution", out _));
+        Assert.Equal("EOC", root.GetProperty("execution").GetString());
 
         var orders = root.GetProperty("orders");
         Assert.Equal(2, orders.GetArrayLength());
