@@ -7,6 +7,12 @@ public class DatabaseObjectNameOptions
     public string? ActiveEnvironment { get; set; }
         = "Prod";
 
+    public string? ConnectionString { get; set; }
+        = null;
+
+    public string? SecretName { get; set; }
+        = null;
+
     public Dictionary<string, string> Objects { get; set; }
         = new(StringComparer.OrdinalIgnoreCase);
 
@@ -16,6 +22,12 @@ public class DatabaseObjectNameOptions
 
 public class DatabaseObjectNameEnvironment
 {
+    public string? ConnectionString { get; set; }
+        = null;
+
+    public string? SecretName { get; set; }
+        = null;
+
     public Dictionary<string, string> Objects { get; set; }
         = new(StringComparer.OrdinalIgnoreCase);
 }

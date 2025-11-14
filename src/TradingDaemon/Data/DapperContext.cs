@@ -15,14 +15,16 @@ public class DapperContext
 
     public DapperContext(IConfiguration configuration)
     {
-        var conn = configuration.GetConnectionString("DefaultConnection");
+        var activeEnvironment = configuration["Database:ActiveEnvironment"];
+
+        var conn = ResolveConnectionString(configuration, activeEnvironment);
         if (!string.IsNullOrWhiteSpace(conn))
         {
             _connectionString = conn;
             return;
         }
 
-        var secretName = configuration["Database:SecretName"] ?? "qq-intraday-credentials";
+        var secretName = ResolveSecretName(configuration, activeEnvironment);
         var region = configuration["AWS:Region"] ?? Environment.GetEnvironmentVariable("AWS_REGION") ?? "eu-west-2";
 
         using var client = new AmazonSecretsManagerClient(RegionEndpoint.GetBySystemName(region));
@@ -69,4 +71,43 @@ public class DapperContext
 
     public virtual IDbConnection CreateConnection()
         => new SqlConnection(_connectionString);
+
+    private static string? ResolveConnectionString(IConfiguration configuration, string? activeEnvironment)
+    {
+        var connectionString = configuration.GetConnectionString("DefaultConnection");
+
+        if (string.IsNullOrWhiteSpace(connectionString))
+        {
+            connectionString = configuration["Database:ConnectionString"];
+        }
+
+        if (!string.IsNullOrWhiteSpace(connectionString))
+        {
+            return connectionString;
+        }
+
+        if (string.IsNullOrWhiteSpace(activeEnvironment))
+        {
+            return null;
+        }
+
+        connectionString = configuration[$"Database:Environments:{activeEnvironment}:ConnectionString"];
+        return string.IsNullOrWhiteSpace(connectionString) ? null : connectionString;
+    }
+
+    private static string ResolveSecretName(IConfiguration configuration, string? activeEnvironment)
+    {
+        var secretName = configuration["Database:SecretName"];
+
+        if (!string.IsNullOrWhiteSpace(activeEnvironment))
+        {
+            var environmentSecretName = configuration[$"Database:Environments:{activeEnvironment}:SecretName"];
+            if (!string.IsNullOrWhiteSpace(environmentSecretName))
+            {
+                return environmentSecretName;
+            }
+        }
+
+        return string.IsNullOrWhiteSpace(secretName) ? "qq-intraday-credentials" : secretName;
+    }
 }
