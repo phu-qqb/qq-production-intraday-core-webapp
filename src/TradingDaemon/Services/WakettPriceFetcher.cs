@@ -33,6 +33,7 @@ public class WakettPriceFetcher
     private readonly string _stageDeleteSql;
     private readonly string _stageInsertSql;
     private readonly string _priceBarTable;
+    private readonly IPriceProcessingProcedureExecutor _priceProcedures;
 
 
     private int PriceMinuteOffset => Math.Clamp(
@@ -47,12 +48,14 @@ public class WakettPriceFetcher
         IConfiguration config,
         ILogger<WakettPriceFetcher> logger,
         IDatabaseObjectNameProvider databaseNameProvider,
+        IPriceProcessingProcedureExecutor priceProcedures,
         IOptions<WakettAutomationOptions>? automationOptions = null)
     {
         _client = client;
         _context = context;
         _config = config;
         _logger = logger;
+        _priceProcedures = priceProcedures;
         _automationOptions = automationOptions?.Value;
         _stageHistCloseTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketStageHistClose);
         _flatBarStagingTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayStagingFlatBar);
@@ -732,7 +735,7 @@ public class WakettPriceFetcher
 
         if (recordList.Count > 0)
         {
-            await PriceProcessingProcedures.LoadRawFromStageAsync(connection, 60, cancellationToken);
+            await _priceProcedures.LoadRawFromStageAsync(connection, 60, cancellationToken);
 
             var minuteOffset = PriceMinuteOffset;
             var selectRaw = _priceBarSelectWithOffsetSql;
@@ -795,7 +798,7 @@ public class WakettPriceFetcher
                 }
             }
 
-            await PriceProcessingProcedures.LoadFlatFromMinimalAsync(connection, 60, cancellationToken);
+            await _priceProcedures.LoadFlatFromMinimalAsync(connection, 60, cancellationToken);
         }
     }
 
