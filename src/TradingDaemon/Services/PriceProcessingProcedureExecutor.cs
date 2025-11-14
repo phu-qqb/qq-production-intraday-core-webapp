@@ -6,7 +6,7 @@ using TradingDaemon.Data;
 
 namespace TradingDaemon.Services;
 
-internal interface IPriceProcessingProcedureExecutor
+public interface IPriceProcessingProcedureExecutor
 {
     Task LoadRawFromStageAsync(
         IDbConnection connection,
