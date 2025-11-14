@@ -86,7 +86,7 @@ public class WeightCalculator
             }
             _logger.LogInformation("Price export script completed successfully for {Universe}: {Output}", universe, sbOut.ToString());
 
-            var exportDir = Path.Combine("/home/data/historical_data", $"Univ{universeId}");
+            var exportDir = ResolveHomePath(Path.Combine("/home/data/historical_data", $"Univ{universeId}"));
             foreach (var name in new[] { "A", "H", "I" })
             {
                 var path = Path.Combine(exportDir, $"{name}.txt");
@@ -103,9 +103,9 @@ public class WeightCalculator
 
             var executables = new List<(string Path, string Args)>
             {
-                (_config["Executables:GenBinariesExecutable"] ?? string.Empty, $"{universe} {universeId}"),
-                (_config["Executables:GenTimeSeriesExecutable"] ?? string.Empty, $"{universe}"),
-                (_config["Executables:ProdManagerExecutable"] ?? string.Empty, $"{universe} account={universe}")
+                (ResolveHomePath(_config["Executables:GenBinariesExecutable"] ?? string.Empty), $"{universe} {universeId}"),
+                (ResolveHomePath(_config["Executables:GenTimeSeriesExecutable"] ?? string.Empty), $"{universe}"),
+                (ResolveHomePath(_config["Executables:ProdManagerExecutable"] ?? string.Empty), $"{universe} account={universe}")
             };
 
             string stdout = string.Empty;
@@ -138,7 +138,7 @@ public class WeightCalculator
                 stdout = outText;
             }
 
-            var weightsFile = Path.Combine(@"C:\home\prod", universe, "AggregatedWeights.txt");
+            var weightsFile = ResolveHomePath(Path.Combine(@"C:\home\prod", universe, "AggregatedWeights.txt"));
             if (File.Exists(weightsFile))
             {
                 var lines = await File.ReadAllLinesAsync(weightsFile);
@@ -621,6 +621,62 @@ END";
     private static decimal AdjustWeightForUsdBase(long securityId, decimal weight, HashSet<long> usdBaseIds)
     {
         return usdBaseIds.Contains(securityId) ? -weight : weight;
+    }
+
+    private static string ResolveHomePath(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return path ?? string.Empty;
+        }
+
+        var resolved = path;
+
+        var unixRoot = Environment.GetEnvironmentVariable("HOME_ROOT");
+        if (!string.IsNullOrEmpty(unixRoot))
+        {
+            const string unixPrefix = "/home";
+            if (string.Equals(resolved, unixPrefix, StringComparison.Ordinal) ||
+                string.Equals(resolved, unixPrefix + "/", StringComparison.Ordinal))
+            {
+                resolved = unixRoot;
+            }
+            else if (resolved.StartsWith(unixPrefix + "/", StringComparison.Ordinal))
+            {
+                resolved = CombinePath(unixRoot, resolved.Substring(unixPrefix.Length + 1));
+            }
+        }
+
+        var windowsRoot = Environment.GetEnvironmentVariable("WINDOWS_HOME_ROOT");
+        if (!string.IsNullOrEmpty(windowsRoot))
+        {
+            foreach (var prefix in new[] { @"C:\\home\\", @"C:/home/", @"C:\\home", @"C:/home" })
+            {
+                if (resolved.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    var relative = resolved.Length > prefix.Length
+                        ? resolved.Substring(prefix.Length).TrimStart('/', '\\')
+                        : string.Empty;
+                    resolved = CombinePath(windowsRoot, relative);
+                    break;
+                }
+            }
+        }
+
+        return resolved;
+    }
+
+    private static string CombinePath(string root, string? relative)
+    {
+        if (string.IsNullOrEmpty(relative))
+        {
+            return root;
+        }
+
+        var segments = relative
+            .Split(new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries);
+
+        return segments.Aggregate(root, Path.Combine);
     }
 
     private sealed class WeightRow
