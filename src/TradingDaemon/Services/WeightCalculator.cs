@@ -633,6 +633,17 @@ END";
         var resolved = path;
 
         var unixRoot = Environment.GetEnvironmentVariable("HOME_ROOT");
+        if (string.IsNullOrEmpty(unixRoot))
+        {
+            var environmentName =
+                Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ??
+                Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT");
+
+            if (string.Equals(environmentName, "Test", StringComparison.OrdinalIgnoreCase))
+            {
+                unixRoot = "/home_test";
+            }
+        }
         if (!string.IsNullOrEmpty(unixRoot))
         {
             const string unixPrefix = "/home";
