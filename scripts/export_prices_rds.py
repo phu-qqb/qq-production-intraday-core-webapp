@@ -7,6 +7,7 @@ from an MS SQL database instead of parquet files in S3.
 from __future__ import annotations
 import argparse
 import json
+import os
 import pathlib
 import sys
 from datetime import time
@@ -237,8 +238,9 @@ if args.start:
 universe_id, universe_name, members_df = get_universe_info(engine, args.universe)
 universe_ids = members_df["SecurityId"].unique().tolist()
 # Save exported price files to a fixed directory for downstream processes
-# that expect universes to reside under ``/home/data/historical_data``.
-output_dir = pathlib.Path("/home/data/historical_data") / f"Univ{universe_id}"
+# that expect universes to reside under the ``HOME_ROOT`` directory.
+home_root = pathlib.Path(os.environ.get("HOME_ROOT", "/home"))
+output_dir = home_root / "data" / "historical_data" / f"Univ{universe_id}"
 output_dir.mkdir(parents=True, exist_ok=True)
 OUT = {k: output_dir / f"{k}.txt" for k in "ABCDEFGHI"}
 for path in OUT.values():
