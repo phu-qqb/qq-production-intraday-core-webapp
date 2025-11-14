@@ -88,6 +88,7 @@ public class OrderSenderTests
             0);
         Assert.Equal(OrderSender.FormatTimestamp(expectedOrderTimestampUtc), root.GetProperty("ts").GetString());
         Assert.Equal(2_500_000d, root.GetProperty("aum").GetDouble());
+        Assert.False(root.TryGetProperty("execution", out _));
 
         var orders = root.GetProperty("orders");
         Assert.Equal(2, orders.GetArrayLength());
@@ -177,6 +178,9 @@ public class OrderSenderTests
             "US",
             60,
             0);
+
+        Assert.True(root.TryGetProperty("execution", out var execution));
+        Assert.Equal("EOF", execution.GetString());
 
         var orders = root.GetProperty("orders");
         Assert.Equal(2, orders.GetArrayLength());

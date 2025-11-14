@@ -198,7 +198,7 @@ public class OrderSender
                 StringComparer.OrdinalIgnoreCase);
 
         var submissionTimeUtc = _timeProvider.GetUtcNow().UtcDateTime;
-            var response = await _wakettApiClient.SendOrdersAsync(request);
+        var response = await _wakettApiClient.SendOrdersAsync(request);
         var receivedAtUtc = _timeProvider.GetUtcNow().UtcDateTime;
 
         if (response?.Orders is { Count: > 0 })
@@ -663,7 +663,6 @@ VALUES
 
         var nextSessionStart = AlignNextSessionStart(
             sessionStart,
-            local,
             barInterval,
             offsetMinutes,
             barSizeMinutes);
@@ -682,8 +681,8 @@ VALUES
             return null;
         }
 
+        var baseMinute = Math.Max(0, barSizeMinutes ?? 0);
         var step = offsetMinutes.Value;
-        var baseMinute = ResolveScheduleBaseMinute(local, step, barSizeMinutes);
 
         if (barSizeMinutes is > 0 && offsetMinutes.Value < barSizeMinutes.Value)
         {
@@ -717,7 +716,6 @@ VALUES
 
     private static DateTime AlignNextSessionStart(
         DateTime sessionStart,
-        DateTime lastBarLocal,
         TimeSpan barInterval,
         int? offsetMinutes,
         int? barSizeMinutes)
@@ -726,7 +724,6 @@ VALUES
 
         if (offsetMinutes is > 0)
         {
-
             var step = offsetMinutes.Value;
             var baseMinute = Math.Max(0, barSizeMinutes ?? 0);
 
@@ -756,7 +753,6 @@ VALUES
         return nextSessionStart.AddMinutes(delta);
     }
 
-
     private static DateTime SkipWeekend(DateTime candidate)
     {
         while (candidate.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday)
@@ -765,7 +761,6 @@ VALUES
         }
 
         return candidate;
-
     }
 
     private static DateTime GetNextScheduledLocal(
