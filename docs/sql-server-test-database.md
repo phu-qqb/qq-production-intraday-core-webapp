@@ -49,8 +49,10 @@ mirroring production objects (tables, stored procedures, functions, etc.).
    }
    ```
 3. If you store credentials in AWS Secrets Manager instead of using an inline connection string,
-   create a dedicated secret (for example `qq-intraday-test-credentials`) and place its name under
-   `Database → Environments → Test → SecretName`.
+   create a dedicated secret. By convention the application will look for
+   `qq-intraday-test-credentials` when the active environment is `Test`, so you only need to set a
+   custom value if you deviate from that pattern. Otherwise place the secret name under
+   `Database → Environments → Test → SecretName` to override the default.
 4. Redeploy or restart the service so that the new configuration is picked up.
 
 ## 5. Keep the Test Database Current

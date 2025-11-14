@@ -64,4 +64,35 @@ public class DapperContextTests
             "Server=.;Database=TopLevel;User Id=top;Password=top;",
             connection.ConnectionString);
     }
+
+    [Fact]
+    public void InfersSecretNameForTestEnvironmentWhenNotConfigured()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Database:ActiveEnvironment"] = "Test"
+            })
+            .Build();
+
+        var secretName = DapperContext.ResolveSecretName(configuration, "Test");
+
+        Assert.Equal("qq-intraday-test-credentials", secretName);
+    }
+
+    [Fact]
+    public void ReturnsTopLevelSecretWhenProvided()
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Database:ActiveEnvironment"] = "Test",
+                ["Database:SecretName"] = "custom-secret"
+            })
+            .Build();
+
+        var secretName = DapperContext.ResolveSecretName(configuration, "Test");
+
+        Assert.Equal("custom-secret", secretName);
+    }
 }

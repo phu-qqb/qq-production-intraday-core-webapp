@@ -95,7 +95,7 @@ public class DapperContext
         return string.IsNullOrWhiteSpace(connectionString) ? null : connectionString;
     }
 
-    private static string ResolveSecretName(IConfiguration configuration, string? activeEnvironment)
+    internal static string ResolveSecretName(IConfiguration configuration, string? activeEnvironment)
     {
         var secretName = configuration["Database:SecretName"];
 
@@ -106,8 +106,35 @@ public class DapperContext
             {
                 return environmentSecretName;
             }
+
+            if (string.IsNullOrWhiteSpace(secretName))
+            {
+                var inferredSecretName = InferSecretName(activeEnvironment);
+                if (!string.IsNullOrWhiteSpace(inferredSecretName))
+                {
+                    return inferredSecretName;
+                }
+            }
         }
 
         return string.IsNullOrWhiteSpace(secretName) ? "qq-intraday-credentials" : secretName;
+    }
+
+    private static string? InferSecretName(string environment)
+    {
+        if (string.IsNullOrWhiteSpace(environment))
+        {
+            return null;
+        }
+
+        var normalized = environment.Trim();
+
+        if (string.Equals(normalized, "Prod", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(normalized, "Production", StringComparison.OrdinalIgnoreCase))
+        {
+            return "qq-intraday-credentials";
+        }
+
+        return $"qq-intraday-{normalized.ToLowerInvariant()}-credentials";
     }
 }
