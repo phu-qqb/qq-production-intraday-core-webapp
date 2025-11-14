@@ -12,7 +12,18 @@ The [`RefreshTestTables.sql`](./RefreshTestTables.sql) script truncates each tes
 
 ### Before you run the script
 
-1. **Review the table pairs** declared near the top of the script. Each row has a `ProdQualified` (source) and `TestQualified` (target) table name. Edit that list if new tables have been duplicated or if a table should be skipped.
+1. **Review the table pairs** declared near the top of the script. Each row has a `ProdQualified` (source) and `TestQualified` (target) table name. Edit that list if new tables have been duplicated or if a table should be skipped. The default list currently covers:
+   - `Intraday.model.NettedWeight`
+   - `Intraday.model.Model`
+   - `Intraday.core.Security`
+   - `Intraday.mkt.PriceBar`
+   - `Intraday.mkt.FlatBar`
+   - `Intraday.mkt.Stage_HistClose`
+   - `Intraday.dbo.mkt_FlatBar_Staging`
+   - `Intraday.wakett.Fill`
+   - `Intraday.wakett.TradingLimit`
+   - `Intraday.wakett.TradingLimitBreachReport`
+   - `Intraday.wakett.Order`
 2. **Confirm you have the required permissions.** You need rights to truncate and insert into the test tables and to read from the production tables. The script will create missing schemas/tables by issuing `CREATE SCHEMA` and `SELECT INTO`, so the account must also be able to create objects in the target database. If foreign keys reference a target table, disable those constraints temporarily or swap `TRUNCATE TABLE` for `DELETE FROM` inside the script.
 3. **Back up the target tables** if you want to keep their current contents. The script truncates them before copying.
 

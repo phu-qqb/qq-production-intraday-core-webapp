@@ -18,6 +18,7 @@ public sealed class DatabaseObjectNameProvider : IDatabaseObjectNameProvider
         [DatabaseObjects.IntradayModel.Key] = "[Intraday].[model].[Model]",
         [DatabaseObjects.IntradayCoreSecurity.Key] = "[Intraday].[core].[Security]",
         [DatabaseObjects.IntradayMarketPriceBar.Key] = "[Intraday].[mkt].[PriceBar]",
+        [DatabaseObjects.IntradayMarketFlatBar.Key] = "[Intraday].[mkt].[FlatBar]",
         [DatabaseObjects.IntradayMarketStageHistClose.Key] = "[Intraday].[mkt].[Stage_HistClose]",
         [DatabaseObjects.IntradayStagingFlatBar.Key] = "[Intraday].[dbo].[mkt_FlatBar_Staging]",
         [DatabaseObjects.WakettFill.Key] = "[wakett].[Fill]",

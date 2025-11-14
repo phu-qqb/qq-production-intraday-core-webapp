@@ -37,6 +37,7 @@ BEGIN TRY
         (N'Intraday.model.Model',                   N'Intraday.model_test.Model'),
         (N'Intraday.core.Security',                 N'Intraday.core_test.Security'),
         (N'Intraday.mkt.PriceBar',                  N'Intraday.mkt_test.PriceBar'),
+        (N'Intraday.mkt.FlatBar',                   N'Intraday.mkt_test.FlatBar'),
         (N'Intraday.mkt.Stage_HistClose',           N'Intraday.mkt_test.Stage_HistClose'),
         (N'Intraday.dbo.mkt_FlatBar_Staging',       N'Intraday.dbo_test.mkt_FlatBar_Staging'),
         (N'Intraday.wakett.Fill',                   N'Intraday.wakett_test.Fill'),
