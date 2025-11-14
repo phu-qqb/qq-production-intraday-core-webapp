@@ -156,6 +156,36 @@ public class WeightCalculatorTests
         }
     }
 
+    [Fact]
+    public void ResolveHomePath_DefaultsToTestRootWhenEnvironmentIsTest()
+    {
+        var method = typeof(WeightCalculator).GetMethod(
+            "ResolveHomePath",
+            BindingFlags.NonPublic | BindingFlags.Static);
+        Assert.NotNull(method);
+
+        var originalHomeRoot = Environment.GetEnvironmentVariable("HOME_ROOT");
+        var originalAspNetEnv = Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT");
+        var originalDotnetEnv = Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT");
+
+        try
+        {
+            Environment.SetEnvironmentVariable("HOME_ROOT", null);
+            Environment.SetEnvironmentVariable("ASPNETCORE_ENVIRONMENT", "Test");
+            Environment.SetEnvironmentVariable("DOTNET_ENVIRONMENT", null);
+
+            var result = (string?)method!.Invoke(null, new object?[] { "/home/data/file.txt" });
+
+            Assert.Equal("/home_test/data/file.txt", result);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("HOME_ROOT", originalHomeRoot);
+            Environment.SetEnvironmentVariable("ASPNETCORE_ENVIRONMENT", originalAspNetEnv);
+            Environment.SetEnvironmentVariable("DOTNET_ENVIRONMENT", originalDotnetEnv);
+        }
+    }
+
     private static void AddRow(IList rows, Type weightRowType, DateTime barTimeUtc, decimal weight)
     {
         var ctor = weightRowType.GetConstructor(new[] { typeof(DateTime), typeof(decimal?[]) });

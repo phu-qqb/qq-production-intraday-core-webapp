@@ -31,6 +31,23 @@ SESSION_HOURS_NY = {
 }
 
 
+def resolve_home_root() -> pathlib.Path:
+    env_root = os.environ.get("HOME_ROOT")
+    if env_root:
+        return pathlib.Path(env_root)
+
+    environment = (
+        os.environ.get("ASPNETCORE_ENVIRONMENT")
+        or os.environ.get("DOTNET_ENVIRONMENT")
+        or ""
+    ).lower()
+
+    if environment == "test":
+        return pathlib.Path("/home_test")
+
+    return pathlib.Path("/home")
+
+
 def get_conn_from_secret(
     secret_name: str, region_name: str, default_driver: str
 ) -> str:
@@ -239,7 +256,7 @@ universe_id, universe_name, members_df = get_universe_info(engine, args.universe
 universe_ids = members_df["SecurityId"].unique().tolist()
 # Save exported price files to a fixed directory for downstream processes
 # that expect universes to reside under the ``HOME_ROOT`` directory.
-home_root = pathlib.Path(os.environ.get("HOME_ROOT", "/home"))
+home_root = resolve_home_root()
 output_dir = home_root / "data" / "historical_data" / f"Univ{universe_id}"
 output_dir.mkdir(parents=True, exist_ok=True)
 OUT = {k: output_dir / f"{k}.txt" for k in "ABCDEFGHI"}
