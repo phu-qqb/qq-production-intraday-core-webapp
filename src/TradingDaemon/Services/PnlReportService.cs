@@ -47,7 +47,7 @@ WHEN NOT MATCHED THEN
     INSERT (TradingDate, CalculatedAtUtc, PnL)
     VALUES (source.TradingDate, source.CalculatedAtUtc, source.PnL);";
 
-    private const string PnlFillsSql = @"
+    private const string PnlFillsSqlTemplate = @"
 WITH FillWithSecurity AS (
     SELECT
         f.ExecuteSize,
@@ -57,14 +57,14 @@ WITH FillWithSecurity AS (
         f.SymbolId,
         f.Symbol,
         COALESCE(secById.SecurityId, secBySymbol.SecurityId) AS SecurityId
-    FROM [wakett].[Fill] f
+    FROM {WakettFill} f
     OUTER APPLY (
         SELECT
             TRY_CAST(NULLIF(LTRIM(RTRIM(f.SymbolId)), '') AS bigint) AS SymbolSecurityId,
             UPPER(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(f.Symbol)), '/', ''), '-', ''), '_', ''), ' ', '')) AS NormalizedSymbol
     ) parsed
-    LEFT JOIN [Intraday].[core].[Security] secById ON secById.SecurityId = parsed.SymbolSecurityId
-    LEFT JOIN [Intraday].[core].[Security] secBySymbol ON secById.SecurityId IS NULL
+    LEFT JOIN {IntradayCoreSecurity} secById ON secById.SecurityId = parsed.SymbolSecurityId
+    LEFT JOIN {IntradayCoreSecurity} secBySymbol ON secById.SecurityId IS NULL
         AND parsed.NormalizedSymbol IS NOT NULL
         AND UPPER(REPLACE(REPLACE(REPLACE(REPLACE(LTRIM(RTRIM(secBySymbol.Symbol)), '/', ''), '-', ''), '_', ''), ' ', '')) = parsed.NormalizedSymbol
     WHERE
@@ -82,28 +82,28 @@ FROM FillWithSecurity;
 ";
 
 
-    private const string SymbolSql = @"SELECT SecurityId, Symbol
-FROM [Intraday].[core].[Security]
+    private const string SymbolSqlTemplate = @"SELECT SecurityId, Symbol
+FROM {IntradayCoreSecurity}
 WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
-    private const string LatestPricesSql = @"SELECT SecurityId, [Close]
+    private const string LatestPricesSqlTemplate = @"SELECT SecurityId, [Close]
 FROM (
     SELECT
         pb.SecurityId,
         pb.[Close],
         ROW_NUMBER() OVER (PARTITION BY pb.SecurityId ORDER BY pb.BarTimeUtc DESC) AS rn
-    FROM [Intraday].[mkt].[PriceBar] pb
+    FROM {IntradayMarketPriceBar} pb
         WHERE pb.TimeframeMinute = 60 AND pb.SecurityId IN @SecurityIds
 ) src
 WHERE src.rn = 1;";
 
-    private const string LatestPricesForDaySql = @"SELECT SecurityId, [Close]
+    private const string LatestPricesForDaySqlTemplate = @"SELECT SecurityId, [Close]
 FROM (
     SELECT
         pb.SecurityId,
         pb.[Close],
         ROW_NUMBER() OVER (PARTITION BY pb.SecurityId ORDER BY pb.BarTimeUtc DESC) AS rn
-    FROM [Intraday].[mkt].[PriceBar] pb
+    FROM {IntradayMarketPriceBar} pb
     WHERE
         pb.TimeframeMinute = 60
         AND pb.SecurityId IN @SecurityIds
@@ -111,7 +111,7 @@ FROM (
 ) src
 WHERE src.rn = 1;";
 
-    private const string PositionsSql = @"WITH Aggregated AS (
+    private const string PositionsSqlTemplate = @"WITH Aggregated AS (
     SELECT
         f.SymbolId,
         MAX(f.Symbol) AS Symbol,
@@ -122,7 +122,7 @@ WHERE src.rn = 1;";
                 ELSE CASE WHEN f.ExecuteSize < 0 THEN -1 ELSE 1 END
             END * COALESCE(f.ExecuteSize, 0)
         ) AS NetQuantity
-    FROM [wakett].[Fill] f
+    FROM {WakettFill} f
     WHERE
         f.TradeTimestamp >= @StartUtc
         AND f.TradeTimestamp < @EndUtc
@@ -133,7 +133,7 @@ WHERE src.rn = 1;";
         f.Symbol,
         COALESCE(f.ExecutePrice, 0) AS ExecutePrice,
         ROW_NUMBER() OVER (PARTITION BY f.SymbolId ORDER BY f.TradeTimestamp DESC) AS rn
-    FROM [wakett].[Fill] f
+    FROM {WakettFill} f
     WHERE
         f.TradeTimestamp >= @StartUtc
         AND f.TradeTimestamp < @EndUtc
@@ -147,10 +147,30 @@ FROM Aggregated a
 LEFT JOIN LatestFill lf ON lf.SymbolId = a.SymbolId AND lf.rn = 1
 WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
 
-    public PnlReportService(DapperContext context, ILogger<PnlReportService> logger)
+    private readonly string _pnlFillsSql;
+    private readonly string _symbolSql;
+    private readonly string _latestPricesSql;
+    private readonly string _latestPricesForDaySql;
+    private readonly string _positionsSql;
+    private readonly string _fillTable;
+    private readonly string _securityTable;
+    private readonly string _priceBarTable;
+
+    public PnlReportService(
+        DapperContext context,
+        ILogger<PnlReportService> logger,
+        IDatabaseObjectNameProvider databaseNameProvider)
     {
         _context = context;
         _logger = logger;
+        _fillTable = databaseNameProvider.GetObjectName(DatabaseObjects.WakettFill);
+        _securityTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayCoreSecurity);
+        _priceBarTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketPriceBar);
+        _pnlFillsSql = FormatSql(PnlFillsSqlTemplate);
+        _symbolSql = FormatSql(SymbolSqlTemplate);
+        _latestPricesSql = FormatSql(LatestPricesSqlTemplate);
+        _latestPricesForDaySql = FormatSql(LatestPricesForDaySqlTemplate);
+        _positionsSql = FormatSql(PositionsSqlTemplate);
     }
 
     public async Task<PnlReport> ComputeAndStoreCurrentDayPnlAsync(DateTime? clock = null, CancellationToken cancellationToken = default)
@@ -239,7 +259,7 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
 
     private async Task<Dictionary<string, SymbolInfo>> LoadSymbolInfosAsync(IDbConnection connection, CancellationToken cancellationToken)
     {
-        var definition = new CommandDefinition(SymbolSql, cancellationToken: cancellationToken);
+        var definition = new CommandDefinition(_symbolSql, cancellationToken: cancellationToken);
         var rows = await connection.QueryAsync<SecuritySymbolRow>(definition);
 
         var result = new Dictionary<string, SymbolInfo>(StringComparer.OrdinalIgnoreCase);
@@ -283,7 +303,7 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
     private async Task<IReadOnlyCollection<PnlFillRow>> LoadPnlFillRowsAsync(IDbConnection connection, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken)
     {
         var definition = new CommandDefinition(
-            PnlFillsSql,
+            _pnlFillsSql,
             new { StartUtc = startUtc, EndUtc = endUtc },
             cancellationToken: cancellationToken);
         var rows = await connection.QueryAsync<PnlFillRow>(definition);
@@ -298,7 +318,7 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
             return new Dictionary<long, decimal?>();
         }
 
-        var definition = new CommandDefinition(LatestPricesSql, new { SecurityIds = ids }, cancellationToken: cancellationToken);
+        var definition = new CommandDefinition(_latestPricesSql, new { SecurityIds = ids }, cancellationToken: cancellationToken);
         var rows = await connection.QueryAsync<LatestPriceRow>(definition);
 
         return rows.ToDictionary(row => row.SecurityId, row => row.Close);
@@ -313,7 +333,7 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
         }
 
         var definition = new CommandDefinition(
-            LatestPricesForDaySql,
+            _latestPricesForDaySql,
             new { SecurityIds = ids, EndUtc = endUtc },
             cancellationToken: cancellationToken);
         var rows = await connection.QueryAsync<LatestPriceRow>(definition);
@@ -323,7 +343,7 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
 
     private async Task<IReadOnlyCollection<PositionRow>> LoadPositionsAsync(IDbConnection connection, DateTime startUtc, DateTime endUtc, CancellationToken cancellationToken)
     {
-        var definition = new CommandDefinition(PositionsSql, new { StartUtc = startUtc, EndUtc = endUtc }, cancellationToken: cancellationToken);
+        var definition = new CommandDefinition(_positionsSql, new { StartUtc = startUtc, EndUtc = endUtc }, cancellationToken: cancellationToken);
         var rows = await connection.QueryAsync<PositionRow>(definition);
         return rows.ToList();
     }
@@ -655,6 +675,12 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
         rate = 0m;
         return false;
     }
+
+    private string FormatSql(string template)
+        => template
+            .Replace("{WakettFill}", _fillTable)
+            .Replace("{IntradayCoreSecurity}", _securityTable)
+            .Replace("{IntradayMarketPriceBar}", _priceBarTable);
 
     private sealed record PnlFillRow(
         decimal? ExecuteSize,
