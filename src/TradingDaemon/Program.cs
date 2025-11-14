@@ -17,6 +17,11 @@ ConfigurationEnvironmentExtensions.ApplyEnvironmentOverrides(
     "ExternalApis",
     builder.Configuration["Database:ActiveEnvironment"]);
 
+ConfigurationEnvironmentExtensions.ApplyEnvironmentOverrides(
+    builder.Configuration,
+    "Automation",
+    builder.Configuration["Database:ActiveEnvironment"]);
+
 SerilogConfig.Configure(builder.Configuration);
 builder.Host.UseSerilog();
 
