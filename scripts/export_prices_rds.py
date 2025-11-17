@@ -157,7 +157,7 @@ def read_price_bars(
         "SELECT BarTimeUtc AS timestamp, [Close] AS [close] "
         "FROM mkt.PriceBar "
         "WHERE SecurityId = :sid AND TimeframeMinute = :tf "
-        "AND DATEPART(MINUTE, BarTimeUtc) = 6"
+        "AND DATEPART(MINUTE, BarTimeUtc) % :tf = 6"
     )
     if start:
         sql += " AND BarTimeUtc >= :start"
@@ -187,7 +187,7 @@ def read_flat_bars(
         "SELECT BarTimeUtc AS timestamp, [Close] AS [close] "
         "FROM mkt.FlatBar "
         "WHERE SecurityId = :sid AND TimeframeMinute = :tf "
-        "AND DATEPART(MINUTE, BarTimeUtc) = 6"
+        "AND DATEPART(MINUTE, BarTimeUtc) % :tf = 6"
     )
     if start:
         sql += " AND BarTimeUtc >= :start"
