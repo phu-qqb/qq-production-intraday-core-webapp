@@ -13,7 +13,8 @@
             "args": [
                 "--universe", "INFX1",
                 "--timeframe", "15",
-                "--secret-name", "qq-intraday-test-credentials"
+                "--secret-name", "qq-intraday-test-credentials",
+                "--session","EU"
             ]
         }
     ]
