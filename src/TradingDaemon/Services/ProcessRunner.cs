@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.Text;
 
@@ -5,13 +6,23 @@ namespace TradingDaemon.Services;
 
 public static class ProcessRunner
 {
-    public static async Task<(string StdOut, string StdErr, int ExitCode)> RunAsync(
+    public static Task<(string StdOut, string StdErr, int ExitCode)> RunAsync(
         string fileName,
         string arguments,
         Action<string>? onOutput = null,
-        Action<string>? onError = null)
+        Action<string>? onError = null) =>
+        RunAsync(CreateProcess(fileName, arguments), onOutput, onError);
+
+    public static Task<(string StdOut, string StdErr, int ExitCode)> RunAsync(
+        string fileName,
+        IEnumerable<string> arguments,
+        Action<string>? onOutput = null,
+        Action<string>? onError = null) =>
+        RunAsync(CreateProcess(fileName, arguments), onOutput, onError);
+
+    private static Process CreateProcess(string fileName, string arguments)
     {
-        var process = new Process
+        return new Process
         {
             StartInfo = new ProcessStartInfo
             {
@@ -21,7 +32,36 @@ public static class ProcessRunner
                 RedirectStandardError = true
             }
         };
+    }
 
+    private static Process CreateProcess(string fileName, IEnumerable<string> arguments)
+    {
+        var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = fileName,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            }
+        };
+
+        foreach (var argument in arguments)
+        {
+            if (!string.IsNullOrWhiteSpace(argument))
+            {
+                process.StartInfo.ArgumentList.Add(argument);
+            }
+        }
+
+        return process;
+    }
+
+    private static async Task<(string StdOut, string StdErr, int ExitCode)> RunAsync(
+        Process process,
+        Action<string>? onOutput,
+        Action<string>? onError)
+    {
         var stdOut = new StringBuilder();
         var stdErr = new StringBuilder();
         var outTcs = new TaskCompletionSource<bool>();
@@ -58,7 +98,6 @@ public static class ProcessRunner
         process.BeginErrorReadLine();
 
         await Task.WhenAll(process.WaitForExitAsync(), outTcs.Task, errTcs.Task);
-
         return (stdOut.ToString(), stdErr.ToString(), process.ExitCode);
     }
 }
