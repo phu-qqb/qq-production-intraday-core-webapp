@@ -15,6 +15,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using TradingDaemon.Data;
 using TradingDaemon.Models;
+using TradingDaemon.Options;
 
 namespace TradingDaemon.Services;
 
@@ -34,13 +35,12 @@ public class WakettPriceFetcher
     private readonly string _stageInsertSql;
     private readonly string _priceBarTable;
     private readonly IPriceProcessingProcedureExecutor _priceProcedures;
+    private readonly PriceBarOptions _priceBarOptions;
 
 
-    private int PriceMinuteOffset => Math.Clamp(
-        _config.GetValue<int?>("ExternalApis:WakettApi:PriceMinuteOffset")
-            ?? 6,
-        0,
-        59);
+    private IReadOnlyList<int>? _priceMinuteOffsets;
+
+    private IReadOnlyList<int> PriceMinuteOffsets => _priceMinuteOffsets ??= LoadMinuteOffsets();
 
     public WakettPriceFetcher(
         WakettApiClient client,
@@ -49,7 +49,8 @@ public class WakettPriceFetcher
         ILogger<WakettPriceFetcher> logger,
         IDatabaseObjectNameProvider databaseNameProvider,
         IPriceProcessingProcedureExecutor priceProcedures,
-        IOptions<WakettAutomationOptions>? automationOptions = null)
+        IOptions<WakettAutomationOptions>? automationOptions = null,
+        IOptions<PriceBarOptions>? priceBarOptions = null)
     {
         _client = client;
         _context = context;
@@ -57,13 +58,33 @@ public class WakettPriceFetcher
         _logger = logger;
         _priceProcedures = priceProcedures;
         _automationOptions = automationOptions?.Value;
+        _priceBarOptions = priceBarOptions?.Value ?? new PriceBarOptions();
         _stageHistCloseTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketStageHistClose);
         _flatBarStagingTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayStagingFlatBar);
         _priceBarTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketPriceBar);
-        _priceBarWindowQuery = $"SELECT SecurityId, BarTimeUtc FROM {_priceBarTable} WHERE TimeframeMinute = 60 AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset AND BarTimeUtc BETWEEN @StartUtc AND @EndUtc";
-        _priceBarSelectWithOffsetSql = $"SELECT SecurityId, BarTimeUtc, [Close] FROM {_priceBarTable} WHERE TimeframeMinute = 60 AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset";
+        _priceBarWindowQuery = $"SELECT SecurityId, BarTimeUtc FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset AND BarTimeUtc BETWEEN @StartUtc AND @EndUtc";
+        _priceBarSelectWithOffsetSql = $"SELECT SecurityId, BarTimeUtc, [Close] FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset";
         _stageDeleteSql = $"DELETE FROM {_stageHistCloseTable} WHERE BarTimeUtc = @BarTimeUtc AND SecurityId IN @SecurityIds";
         _stageInsertSql = $"INSERT INTO {_stageHistCloseTable} (SecurityId, BarTimeUtc, [Close]) VALUES (@SecurityId, @BarTimeUtc, @Close)";
+    }
+
+    private IReadOnlyList<int> LoadMinuteOffsets()
+    {
+        var configuredOffsets = _config
+            .GetSection("ExternalApis:WakettApi:PriceMinuteOffsets")
+            .Get<int[]>()
+            ?.Select(offset => Math.Clamp(offset, 0, 59))
+            .Distinct()
+            .OrderBy(offset => offset)
+            .ToArray();
+
+        if (configuredOffsets is { Length: > 0 })
+        {
+            return configuredOffsets;
+        }
+
+        var fallback = _config.GetValue<int?>("ExternalApis:WakettApi:PriceMinuteOffset") ?? 6;
+        return new[] { Math.Clamp(fallback, 0, 59) };
     }
 
     public async Task<WakettPriceUploadResult?> FetchAndStoreAsync(
@@ -74,10 +95,19 @@ public class WakettPriceFetcher
             return null;
         }
 
-        var missingBars = await FindMissingBarTimestampsAsync(allSecurityIds, cancellationToken);
+        var missingBars = new List<(int MinuteOffset, DateTime BarTimeUtc)>();
+        foreach (var minuteOffset in PriceMinuteOffsets)
+        {
+            var missingForOffset = await FindMissingBarTimestampsAsync(
+                allSecurityIds,
+                minuteOffset,
+                cancellationToken);
+            missingBars.AddRange(missingForOffset.Select(bar => (minuteOffset, bar)));
+        }
+
         if (missingBars.Count == 0)
         {
-            _logger.LogInformation("No missing Wakett price bars detected in the last 24 hours.");
+            _logger.LogInformation("No missing Wakett price bars detected in the last 24 hours for configured minute offsets.");
             return null;
         }
 
@@ -87,11 +117,11 @@ public class WakettPriceFetcher
 
         var nowUtc = DateTimeOffset.UtcNow;
 
-        foreach (var barTimeUtc in missingBars.OrderBy(t => t))
+        foreach (var (minuteOffset, barTimeUtc) in missingBars
+            .OrderBy(entry => entry.BarTimeUtc.AddMinutes(entry.MinuteOffset)))
         {
 
             var baseTimestamp = new DateTimeOffset(barTimeUtc, TimeSpan.Zero);
-            var minuteOffset = PriceMinuteOffset;
             var requestTimestamp = baseTimestamp.AddMinutes(minuteOffset);
             var expectedBarTimestamp = baseTimestamp.AddMinutes(minuteOffset);
 
@@ -175,7 +205,7 @@ public class WakettPriceFetcher
                 continue;
             }
 
-            await StoreAsync(dbRecords.Values, cancellationToken);
+            await StoreAsync(dbRecords.Values, minuteOffset, cancellationToken);
 
             var ordered = uploadItems.Values
                 .OrderBy(i => i.SecurityId)
@@ -199,21 +229,37 @@ public class WakettPriceFetcher
             return false;
         }
 
-        var missingBars = await FindMissingBarTimestampsAsync(securityIds, cancellationToken);
-        if (missingBars.Count == 0)
+        var missingByOffset = new List<(int MinuteOffset, IReadOnlyList<DateTime> Missing)>();
+        foreach (var minuteOffset in PriceMinuteOffsets)
+        {
+            var missingBars = await FindMissingBarTimestampsAsync(securityIds, minuteOffset, cancellationToken);
+            if (missingBars.Count > 0)
+            {
+                missingByOffset.Add((minuteOffset, missingBars));
+            }
+        }
+
+        if (missingByOffset.Count == 0)
         {
             _logger.LogInformation("All Wakett prices are present for the last 24 trading hours.");
             return true;
         }
 
-        _logger.LogWarning(
-            "Detected {Count} missing Wakett price bar(s) within the last 24 trading hours.",
-            missingBars.Count);
-        _logger.LogWarning(
-            "Missing bar timestamps (UTC): {BarTimes}",
-            string.Join(", ", missingBars
-                .OrderBy(t => t)
-                .Select(t => t.ToString("yyyy-MM-dd HH:mm"))));
+        foreach (var (minuteOffset, missingBars) in missingByOffset)
+        {
+            _logger.LogWarning(
+                "Detected {Count} missing Wakett price bar(s) at minute offset {MinuteOffset} within the last 24 trading hours.",
+                missingBars.Count,
+                minuteOffset);
+            _logger.LogWarning(
+                "Missing bar timestamps (UTC): {BarTimes}",
+                string.Join(
+                    ", ",
+                    missingBars
+                        .OrderBy(t => t)
+                        .Select(t => t.ToString("yyyy-MM-dd HH:mm"))));
+        }
+
         return false;
     }
 
@@ -529,6 +575,7 @@ public class WakettPriceFetcher
 
     private async Task<IReadOnlyList<DateTime>> FindMissingBarTimestampsAsync(
         IReadOnlyCollection<int> securityIds,
+        int minuteOffset,
         CancellationToken cancellationToken)
     {
         if (securityIds.Count == 0)
@@ -542,7 +589,6 @@ public class WakettPriceFetcher
             return Array.Empty<DateTime>();
         }
 
-        var minuteOffset = PriceMinuteOffset;
         var startHourUtc = expectedTimestamps[0];
         var endHourUtc = expectedTimestamps[^1];
         var startUtc = startHourUtc.AddMinutes(minuteOffset);
@@ -687,6 +733,7 @@ public class WakettPriceFetcher
 
     private async Task StoreAsync(
         IEnumerable<DbPriceRecord> records,
+        int minuteOffset,
         CancellationToken cancellationToken)
     {
         var recordList = records.ToList();
@@ -735,9 +782,8 @@ public class WakettPriceFetcher
 
         if (recordList.Count > 0)
         {
-            await _priceProcedures.LoadRawFromStageAsync(connection, 60, cancellationToken);
+            await _priceProcedures.LoadRawFromStageAsync(connection, PriceTimeframeMinute, cancellationToken);
 
-            var minuteOffset = PriceMinuteOffset;
             var selectRaw = _priceBarSelectWithOffsetSql;
             var existing = (await connection.QueryAsync<HistClose>(selectRaw, new { SecurityIds = securityKeys, MinuteOffset = minuteOffset }))
                 .GroupBy(r => (r.SecurityId, r.BarTimeUtc))
@@ -748,7 +794,7 @@ public class WakettPriceFetcher
             foreach (var grp in existing.GroupBy(r => r.SecurityId))
             {
                 var ordered = grp.OrderBy(r => r.BarTimeUtc).ToList();
-                var rawEu = RawNMin(ordered, 60, "EU", minuteOffset);
+                var rawEu = RawNMin(ordered, PriceTimeframeMinute, "EU", minuteOffset);
                 var flatEu = Flatten(rawEu, SessionBounds["EU"].Zone)
                     .Select(r => new FlatPrice
                     {
@@ -759,7 +805,7 @@ public class WakettPriceFetcher
                     });
                 flatRecords.AddRange(flatEu);
 
-                var rawUs = RawNMin(ordered, 60, "US", minuteOffset);
+                var rawUs = RawNMin(ordered, PriceTimeframeMinute, "US", minuteOffset);
                 var flatUs = Flatten(rawUs, SessionBounds["US"].Zone)
                     .Select(r => new FlatPrice
                     {
@@ -798,8 +844,10 @@ public class WakettPriceFetcher
                 }
             }
 
-            await _priceProcedures.LoadFlatFromMinimalAsync(connection, 60, cancellationToken);
-        }
+            await _priceProcedures.LoadFlatFromMinimalAsync(connection, PriceTimeframeMinute, cancellationToken);
+    }
+
+    private int PriceTimeframeMinute => Math.Max(1, _priceBarOptions.TimeframeMinute);
     }
 
     private static readonly Dictionary<string, (TimeZoneInfo Zone, TimeSpan Start, TimeSpan End)> SessionBounds = new()

@@ -8,8 +8,10 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using Dapper;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Options;
 using TradingDaemon.Data;
 using TradingDaemon.Models;
+using TradingDaemon.Options;
 
 namespace TradingDaemon.Services;
 
@@ -55,6 +57,7 @@ public class OrderSender
     private readonly string _tradingLimitTable;
     private readonly string _orderTable;
     private readonly string _tradingLimitBreachTable;
+    private readonly PriceBarOptions _priceBarOptions;
 
     public OrderSender(
         WakettApiClient wakettApiClient,
@@ -62,13 +65,15 @@ public class OrderSender
         ILogger<OrderSender> logger,
         IConfiguration configuration,
         IDatabaseObjectNameProvider databaseNameProvider,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        IOptions<PriceBarOptions>? priceBarOptions = null)
     {
         _wakettApiClient = wakettApiClient;
         _context = context;
         _logger = logger;
         _configuration = configuration;
         _timeProvider = timeProvider ?? TimeProvider.System;
+        _priceBarOptions = priceBarOptions?.Value ?? new PriceBarOptions();
         _nettedWeightTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayModelNettedWeight);
         _modelTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayModel);
         _securityTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayCoreSecurity);
@@ -89,15 +94,14 @@ public class OrderSender
 
         var latestBarTimeUtc = latest[0].BarTimeUtc;
         var utcNow = _timeProvider.GetUtcNow().UtcDateTime;
+        var barInterval = ResolveBarInterval(latest, latestBarTimeUtc);
 
-        if (!IsBarRecentEnough(latestBarTimeUtc, utcNow))
+        if (!IsBarRecentEnough(latestBarTimeUtc, utcNow, barInterval))
         {
             return;
         }
 
         var latestWeights = latest.Where(w => w.BarTimeUtc == latestBarTimeUtc).ToList();
-
-        var barInterval = ResolveBarInterval(latest, latestBarTimeUtc);
         var session = ResolveTradingSession(latestBarTimeUtc);
         var schedule = await LoadModelScheduleAsync(connection, cancellationToken);
         var orderTimestampUtc = CalculateOrderTimestamp(
@@ -837,7 +841,8 @@ VALUES
             return TimeSpan.FromMinutes(programmeMinutes);
         }
 
-        return TimeSpan.FromHours(1);
+        var fallbackMinutes = Math.Max(1, _priceBarOptions.TimeframeMinute);
+        return TimeSpan.FromMinutes(fallbackMinutes);
     }
 
     private string ResolveTradingSession(DateTime barTimeUtc)
@@ -983,7 +988,7 @@ ORDER BY TradingLimitId DESC;";
         return row;
     }
 
-    private bool IsBarRecentEnough(DateTime barTimeUtc, DateTime utcNow)
+    private bool IsBarRecentEnough(DateTime barTimeUtc, DateTime utcNow, TimeSpan barInterval)
     {
         var zone = CentralEuropeZone;
         var barLocal = TimeZoneInfo.ConvertTimeFromUtc(barTimeUtc, zone);
@@ -997,7 +1002,11 @@ ORDER BY TradingLimitId DESC;";
             return true;
         }
 
-        if (utcNow - barTimeUtc > TimeSpan.FromMinutes(60))
+        var allowedStaleness = barInterval > TimeSpan.Zero
+            ? barInterval
+            : TimeSpan.FromMinutes(Math.Max(1, _priceBarOptions.TimeframeMinute));
+
+        if (utcNow - barTimeUtc > allowedStaleness)
         {
             _logger.LogWarning(
                 "Latest netted weights are stale. Last bar: {BarTimeUtc:O}, now: {NowUtc:O}.",
