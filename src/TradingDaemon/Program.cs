@@ -72,6 +72,7 @@ builder.Services.AddTransient<TradingJob>();
 
 builder.Services.Configure<WakettAutomationOptions>(builder.Configuration.GetSection("Automation:Wakett"));
 builder.Services.Configure<TradingOptions>(builder.Configuration.GetSection("Trading"));
+builder.Services.Configure<PriceBarOptions>(builder.Configuration.GetSection("PriceBars"));
 builder.Services.AddHostedService<WakettAutomationService>();
 
 builder.Services.AddSingleton<IEmailNotificationService, EmailNotificationService>();

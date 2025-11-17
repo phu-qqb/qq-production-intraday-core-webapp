@@ -7,8 +7,10 @@ using System.Threading;
 using Dapper;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using TradingDaemon.Data;
 using TradingDaemon.Models;
+using TradingDaemon.Options;
 using TradingDaemon.Utils;
 
 namespace TradingDaemon.Services;
@@ -93,7 +95,7 @@ FROM (
         pb.[Close],
         ROW_NUMBER() OVER (PARTITION BY pb.SecurityId ORDER BY pb.BarTimeUtc DESC) AS rn
     FROM {IntradayMarketPriceBar} pb
-        WHERE pb.TimeframeMinute = 60 AND pb.SecurityId IN @SecurityIds
+        WHERE pb.TimeframeMinute = {TimeframeMinute} AND pb.SecurityId IN @SecurityIds
 ) src
 WHERE src.rn = 1;";
 
@@ -105,7 +107,7 @@ FROM (
         ROW_NUMBER() OVER (PARTITION BY pb.SecurityId ORDER BY pb.BarTimeUtc DESC) AS rn
     FROM {IntradayMarketPriceBar} pb
     WHERE
-        pb.TimeframeMinute = 60
+        pb.TimeframeMinute = {TimeframeMinute}
         AND pb.SecurityId IN @SecurityIds
         AND pb.BarTimeUtc < @EndUtc
 ) src
@@ -155,14 +157,19 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
     private readonly string _fillTable;
     private readonly string _securityTable;
     private readonly string _priceBarTable;
+    private readonly PriceBarOptions _priceBarOptions;
+    private readonly string _timeframeLiteral;
 
     public PnlReportService(
         DapperContext context,
         ILogger<PnlReportService> logger,
-        IDatabaseObjectNameProvider databaseNameProvider)
+        IDatabaseObjectNameProvider databaseNameProvider,
+        IOptions<PriceBarOptions>? priceBarOptions = null)
     {
         _context = context;
         _logger = logger;
+        _priceBarOptions = priceBarOptions?.Value ?? new PriceBarOptions();
+        _timeframeLiteral = Math.Max(1, _priceBarOptions.TimeframeMinute).ToString(CultureInfo.InvariantCulture);
         _fillTable = databaseNameProvider.GetObjectName(DatabaseObjects.WakettFill);
         _securityTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayCoreSecurity);
         _priceBarTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketPriceBar);
@@ -680,7 +687,8 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
         => template
             .Replace("{WakettFill}", _fillTable)
             .Replace("{IntradayCoreSecurity}", _securityTable)
-            .Replace("{IntradayMarketPriceBar}", _priceBarTable);
+            .Replace("{IntradayMarketPriceBar}", _priceBarTable)
+            .Replace("{TimeframeMinute}", _timeframeLiteral);
 
     private sealed record PnlFillRow(
         decimal? ExecuteSize,
