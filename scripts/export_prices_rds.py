@@ -109,8 +109,8 @@ def get_universe_info(
     query = sa.text(
         """
         SELECT u.UniverseId, u.Name, um.SecurityId, um.EffectiveFromUtc, um.EffectiveToUtc
-        FROM Intraday.univ.Universe u
-        JOIN Intraday.univ.UniverseMember um ON u.UniverseId = um.UniverseId
+        FROM univ.Universe u
+        JOIN univ.UniverseMember um ON u.UniverseId = um.UniverseId
         WHERE u.Name = :desc
         """
     )
@@ -127,7 +127,7 @@ def get_subuniverse_data(
 ) -> tuple[List[int], pd.DataFrame]:
     sub_df = pd.read_sql(
         sa.text(
-            "SELECT SubUniverseId FROM Intraday.univ.SubUniverse WHERE UniverseId = :uid"
+            "SELECT SubUniverseId FROM univ.SubUniverse WHERE UniverseId = :uid"
         ),
         engine,
         params={"uid": universe_id},
@@ -138,7 +138,7 @@ def get_subuniverse_data(
     ids_str = ",".join(str(i) for i in sub_ids)
     members_df = pd.read_sql(
         sa.text(
-            "SELECT SubUniverseId, SecurityId FROM Intraday.univ.SubUniverseMember "
+            "SELECT SubUniverseId, SecurityId FROM univ.SubUniverseMember "
             f"WHERE SubUniverseId IN ({ids_str})"
         ),
         engine,
@@ -155,7 +155,7 @@ def read_price_bars(
     params = {"sid": security_id, "tf": timeframe}
     sql = (
         "SELECT BarTimeUtc AS timestamp, [Close] AS [close] "
-        "FROM Intraday.mkt.PriceBar "
+        "FROM mkt.PriceBar "
         "WHERE SecurityId = :sid AND TimeframeMinute = :tf "
         "AND DATEPART(MINUTE, BarTimeUtc) = 6"
     )
@@ -185,7 +185,7 @@ def read_flat_bars(
     params = {"sid": security_id, "tf": timeframe}
     sql = (
         "SELECT BarTimeUtc AS timestamp, [Close] AS [close] "
-        "FROM Intraday.mkt.FlatBar "
+        "FROM mkt.FlatBar "
         "WHERE SecurityId = :sid AND TimeframeMinute = :tf "
         "AND DATEPART(MINUTE, BarTimeUtc) = 6"
     )
