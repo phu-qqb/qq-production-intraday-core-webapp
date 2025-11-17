@@ -69,9 +69,34 @@ public class WeightCalculator
                 modelSessions[modelId] = tradingSession.Trim();
             }
 
-            var scriptArgs = string.IsNullOrEmpty(universe)
-                ? scriptPath
-                : $"{scriptPath} --universe {universe} --session {tradingSession} --timeframe {timeFrame} --start {startDate}";
+            if (string.IsNullOrWhiteSpace(universe))
+            {
+                _logger.LogWarning("Skipping price export: model {ModelId} does not define a universe", modelId);
+                continue;
+            }
+
+            var scriptArgs = new List<string>
+            {
+                scriptPath,
+                "--universe",
+                universe
+            };
+
+            if (!string.IsNullOrWhiteSpace(tradingSession))
+            {
+                scriptArgs.AddRange(new[] { "--session", tradingSession });
+            }
+
+            scriptArgs.AddRange(new[]
+            {
+                "--timeframe",
+                timeFrameInt.ToString(CultureInfo.InvariantCulture)
+            });
+
+            if (!string.IsNullOrWhiteSpace(startDate))
+            {
+                scriptArgs.AddRange(new[] { "--start", startDate });
+            }
 
             var sbOut = new StringBuilder();
             var sbErr = new StringBuilder();
