@@ -845,10 +845,11 @@ public class WakettPriceFetcher
             }
 
             await _priceProcedures.LoadFlatFromMinimalAsync(connection, PriceTimeframeMinute, cancellationToken);
+        }
     }
 
     private int PriceTimeframeMinute => Math.Max(1, _priceBarOptions.TimeframeMinute);
-    }
+
 
     private static readonly Dictionary<string, (TimeZoneInfo Zone, TimeSpan Start, TimeSpan End)> SessionBounds = new()
     {
