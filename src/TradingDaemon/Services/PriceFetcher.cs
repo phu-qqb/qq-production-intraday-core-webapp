@@ -5,9 +5,11 @@ using System.Linq;
 using System.IO;
 using System.Data;
 using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Options;
 using Dapper;
 using TradingDaemon.Data;
 using TradingDaemon.Models;
+using TradingDaemon.Options;
 
 namespace TradingDaemon.Services;
 
@@ -22,23 +24,26 @@ public class PriceFetcher
     private readonly string _selectRawSql;
     private readonly string _priceBarTable;
     private readonly IPriceProcessingProcedureExecutor _priceProcedures;
+    private readonly PriceBarOptions _priceBarOptions;
 
     public PriceFetcher(
         DapperContext context,
         ILogger<PriceFetcher> logger,
         IConfiguration config,
         IDatabaseObjectNameProvider databaseNameProvider,
-        IPriceProcessingProcedureExecutor priceProcedures)
+        IPriceProcessingProcedureExecutor priceProcedures,
+        IOptions<PriceBarOptions>? priceBarOptions = null)
     {
         _context = context;
         _logger = logger;
         _config = config;
         _priceProcedures = priceProcedures;
+        _priceBarOptions = priceBarOptions?.Value ?? new PriceBarOptions();
         _stageHistCloseTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketStageHistClose);
         _flatBarStagingTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayStagingFlatBar);
         _priceBarTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketPriceBar);
         _stageInsertSql = $"INSERT INTO {_stageHistCloseTable} (SecurityId, BarTimeUtc, [Close]) VALUES (@SecurityId, @BarTimeUtc, @Close)";
-        _selectRawSql = $"SELECT SecurityId, BarTimeUtc, [Close] FROM {_priceBarTable} WHERE TimeframeMinute = 60 AND SecurityId IN @SecurityIds";
+        _selectRawSql = $"SELECT SecurityId, BarTimeUtc, [Close] FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds";
     }
 
     public async Task FetchAndStoreAsync()
@@ -81,7 +86,7 @@ public class PriceFetcher
 
         // Load newly staged raw bars into the PriceBar table so that subsequent
         // queries include the latest data.
-        await _priceProcedures.LoadRawFromStageAsync(connection, 60);
+        await _priceProcedures.LoadRawFromStageAsync(connection, PriceTimeframeMinute);
 
         // Retrieve all existing raw bars for the affected securities so that
         // flat bars can be recomputed over the full history instead of only
@@ -100,12 +105,12 @@ public class PriceFetcher
         foreach (var grp in allBars.GroupBy(r => r.SecurityId))
         {
             var ordered = grp.OrderBy(r => r.BarTimeUtc).ToList();
-            var rawEU = RawNMin(ordered, 60, "EU", 0);
+            var rawEU = RawNMin(ordered, PriceTimeframeMinute, "EU", 0);
             var flatEU = Flatten(rawEU, SessionBounds["EU"].Zone)
                 .Select(r => new FlatPrice { SecurityId = grp.Key, BarTimeUtc = r.TimestampUtc, Close = r.Close, Session = "EU" });
             flatRecords.AddRange(flatEU);
 
-            var rawUS = RawNMin(ordered, 60, "US", 0);
+            var rawUS = RawNMin(ordered, PriceTimeframeMinute, "US", 0);
             var flatUS = Flatten(rawUS, SessionBounds["US"].Zone)
                 .Select(r => new FlatPrice { SecurityId = grp.Key, BarTimeUtc = r.TimestampUtc, Close = r.Close, Session = "US" });
             flatRecords.AddRange(flatUS);
@@ -131,8 +136,8 @@ public class PriceFetcher
             }
 
             // Move staged flat bars into the main table for each session.
-            await _priceProcedures.LoadFlatFromMinimalAsync(connection, 60);
-        }
+            await _priceProcedures.LoadFlatFromMinimalAsync(connection, PriceTimeframeMinute);
+    }
     }
 
     private static readonly Dictionary<string, (TimeZoneInfo Zone, TimeSpan Start, TimeSpan End)> SessionBounds = new()
@@ -146,6 +151,8 @@ public class PriceFetcher
 
     private static TimeZoneInfo CentralEuropeZone => TimeZoneInfo.FindSystemTimeZoneById(
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Central European Standard Time" : "Europe/Berlin");
+
+    private int PriceTimeframeMinute => Math.Max(1, _priceBarOptions.TimeframeMinute);
 
     private static List<(DateTime TimestampUtc, decimal Close)> RawNMin(List<HistClose> series, int minutes, string session, int offset)
     {
