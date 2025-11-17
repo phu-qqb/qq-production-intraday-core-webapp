@@ -44,7 +44,7 @@ public class WeightCalculator
     public async Task CalculateAndStoreAsync()
     {
         var pythonExec = _config["Executables:PythonExecutable"] ?? "python3";
-        var scriptPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../scripts/export_prices_rds.py"));
+        var scriptPath = "C:\\repos\\qq-production-intraday-core-webapp\\scripts\\export_prices_rds.py";
 
         var modelTimeframes = new Dictionary<int, int>();
 

@@ -254,6 +254,7 @@ if args.start:
 
 universe_id, universe_name, members_df = get_universe_info(engine, args.universe)
 universe_ids = members_df["SecurityId"].unique().tolist()
+print("Universe ID:", universe_id)
 # Save exported price files to a fixed directory for downstream processes
 # that expect universes to reside under the ``HOME_ROOT`` directory.
 home_root = resolve_home_root()
