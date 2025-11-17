@@ -18,10 +18,10 @@ public sealed class WakettAutomationService : BackgroundService
     private static readonly TimeSpan SessionEnd = new(15, 59, 0);
     private static readonly TimeSpan SessionShutdownDelay = TimeSpan.FromHours(1);
 
-    private static readonly int[] PriceFetchMinutes = { 20, 50 };
-    private static readonly int[] WeightCalculationMinutes = { 25, 55 };
+    private static readonly int[] PriceFetchMinutes = { 6, 21, 36, 51 };
+    private static readonly int[] WeightCalculationMinutes = { 10, 25, 40, 55 };
     private static readonly int[] FillCheckMinutes = { 10, 40 };
-    private static readonly int[] OrderSubmissionMinutes = { 1 };
+    private static readonly int[] OrderSubmissionMinutes = { 1, 16, 31, 46 };
     private static readonly int[] PnlReportMinutes = { 15 };
 
     private readonly WakettPriceFetcher _priceFetcher;
