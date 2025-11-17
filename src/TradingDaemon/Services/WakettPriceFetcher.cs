@@ -15,6 +15,7 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using TradingDaemon.Data;
 using TradingDaemon.Models;
+using TradingDaemon.Options;
 
 namespace TradingDaemon.Services;
 
@@ -34,6 +35,7 @@ public class WakettPriceFetcher
     private readonly string _stageInsertSql;
     private readonly string _priceBarTable;
     private readonly IPriceProcessingProcedureExecutor _priceProcedures;
+    private readonly PriceBarOptions _priceBarOptions;
 
 
     private IReadOnlyList<int>? _priceMinuteOffsets;
@@ -47,7 +49,8 @@ public class WakettPriceFetcher
         ILogger<WakettPriceFetcher> logger,
         IDatabaseObjectNameProvider databaseNameProvider,
         IPriceProcessingProcedureExecutor priceProcedures,
-        IOptions<WakettAutomationOptions>? automationOptions = null)
+        IOptions<WakettAutomationOptions>? automationOptions = null,
+        IOptions<PriceBarOptions>? priceBarOptions = null)
     {
         _client = client;
         _context = context;
@@ -55,11 +58,12 @@ public class WakettPriceFetcher
         _logger = logger;
         _priceProcedures = priceProcedures;
         _automationOptions = automationOptions?.Value;
+        _priceBarOptions = priceBarOptions?.Value ?? new PriceBarOptions();
         _stageHistCloseTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketStageHistClose);
         _flatBarStagingTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayStagingFlatBar);
         _priceBarTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketPriceBar);
-        _priceBarWindowQuery = $"SELECT SecurityId, BarTimeUtc FROM {_priceBarTable} WHERE TimeframeMinute = 60 AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset AND BarTimeUtc BETWEEN @StartUtc AND @EndUtc";
-        _priceBarSelectWithOffsetSql = $"SELECT SecurityId, BarTimeUtc, [Close] FROM {_priceBarTable} WHERE TimeframeMinute = 60 AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset";
+        _priceBarWindowQuery = $"SELECT SecurityId, BarTimeUtc FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset AND BarTimeUtc BETWEEN @StartUtc AND @EndUtc";
+        _priceBarSelectWithOffsetSql = $"SELECT SecurityId, BarTimeUtc, [Close] FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset";
         _stageDeleteSql = $"DELETE FROM {_stageHistCloseTable} WHERE BarTimeUtc = @BarTimeUtc AND SecurityId IN @SecurityIds";
         _stageInsertSql = $"INSERT INTO {_stageHistCloseTable} (SecurityId, BarTimeUtc, [Close]) VALUES (@SecurityId, @BarTimeUtc, @Close)";
     }
@@ -778,7 +782,7 @@ public class WakettPriceFetcher
 
         if (recordList.Count > 0)
         {
-            await _priceProcedures.LoadRawFromStageAsync(connection, 60, cancellationToken);
+            await _priceProcedures.LoadRawFromStageAsync(connection, PriceTimeframeMinute, cancellationToken);
 
             var selectRaw = _priceBarSelectWithOffsetSql;
             var existing = (await connection.QueryAsync<HistClose>(selectRaw, new { SecurityIds = securityKeys, MinuteOffset = minuteOffset }))
@@ -790,7 +794,7 @@ public class WakettPriceFetcher
             foreach (var grp in existing.GroupBy(r => r.SecurityId))
             {
                 var ordered = grp.OrderBy(r => r.BarTimeUtc).ToList();
-                var rawEu = RawNMin(ordered, 60, "EU", minuteOffset);
+                var rawEu = RawNMin(ordered, PriceTimeframeMinute, "EU", minuteOffset);
                 var flatEu = Flatten(rawEu, SessionBounds["EU"].Zone)
                     .Select(r => new FlatPrice
                     {
@@ -801,7 +805,7 @@ public class WakettPriceFetcher
                     });
                 flatRecords.AddRange(flatEu);
 
-                var rawUs = RawNMin(ordered, 60, "US", minuteOffset);
+                var rawUs = RawNMin(ordered, PriceTimeframeMinute, "US", minuteOffset);
                 var flatUs = Flatten(rawUs, SessionBounds["US"].Zone)
                     .Select(r => new FlatPrice
                     {
@@ -840,9 +844,12 @@ public class WakettPriceFetcher
                 }
             }
 
-            await _priceProcedures.LoadFlatFromMinimalAsync(connection, 60, cancellationToken);
+            await _priceProcedures.LoadFlatFromMinimalAsync(connection, PriceTimeframeMinute, cancellationToken);
         }
     }
+
+    private int PriceTimeframeMinute => Math.Max(1, _priceBarOptions.TimeframeMinute);
+
 
     private static readonly Dictionary<string, (TimeZoneInfo Zone, TimeSpan Start, TimeSpan End)> SessionBounds = new()
     {
@@ -947,7 +954,7 @@ public class WakettPriceFetcher
         CurrencyPair Pair,
         decimal Rate);
 
-    private sealed record DbPriceRecord(
+    internal sealed record DbPriceRecord(
         int SecurityId,
         string SecurityKey,
         DateTime BarTimeUtc,

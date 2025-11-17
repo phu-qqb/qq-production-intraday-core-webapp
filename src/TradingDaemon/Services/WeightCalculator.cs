@@ -7,7 +7,9 @@ using System.Text;
 using System.Runtime.InteropServices;
 using System.Data;
 using Dapper;
+using Microsoft.Extensions.Options;
 using TradingDaemon.Data;
+using TradingDaemon.Options;
 
 namespace TradingDaemon.Services;
 
@@ -16,6 +18,7 @@ public class WeightCalculator
     private readonly DapperContext _context;
     private readonly IConfiguration _config;
     private readonly ILogger<WeightCalculator> _logger;
+    private readonly PriceBarOptions _priceBarOptions;
 
     private static readonly IReadOnlyDictionary<string, SessionInfo> SessionBounds =
         new Dictionary<string, SessionInfo>(StringComparer.OrdinalIgnoreCase)
@@ -26,11 +29,16 @@ public class WeightCalculator
                 TimeSpan.Parse("02:00"), TimeSpan.Parse("08:59"))
         };
 
-    public WeightCalculator(DapperContext context, IConfiguration config, ILogger<WeightCalculator> logger)
+    public WeightCalculator(
+        DapperContext context,
+        IConfiguration config,
+        ILogger<WeightCalculator> logger,
+        IOptions<PriceBarOptions>? priceBarOptions = null)
     {
         _context = context;
         _config = config;
         _logger = logger;
+        _priceBarOptions = priceBarOptions?.Value ?? new PriceBarOptions();
     }
 
     public async Task CalculateAndStoreAsync()
@@ -49,10 +57,11 @@ public class WeightCalculator
             var universe = model["Universe"] ?? string.Empty;
             var universeId = model["UniverseId"] ?? string.Empty;
             var tradingSession = model["Session"] ?? string.Empty;
-            var timeFrame = model["Timeframe"] ?? "60";
+            var defaultTimeframe = Math.Max(1, _priceBarOptions.TimeframeMinute);
+            var timeFrame = model["Timeframe"] ?? defaultTimeframe.ToString(CultureInfo.InvariantCulture);
             var startDate = model["StartDate"] ?? "2022-01-01";
             var modelId = int.Parse(model["ModelId"] ?? "0");
-            var timeFrameInt = int.TryParse(timeFrame, out var tfVal) ? tfVal : 60;
+            var timeFrameInt = int.TryParse(timeFrame, out var tfVal) ? tfVal : defaultTimeframe;
 
             modelTimeframes[modelId] = timeFrameInt;
             if (!string.IsNullOrWhiteSpace(tradingSession))
