@@ -953,7 +953,7 @@ public class WakettPriceFetcher
         CurrencyPair Pair,
         decimal Rate);
 
-    private sealed record DbPriceRecord(
+    internal sealed record DbPriceRecord(
         int SecurityId,
         string SecurityKey,
         DateTime BarTimeUtc,
