@@ -31,6 +31,7 @@ public class WakettPriceFetcher
     private readonly string _flatBarStagingTable;
     private readonly string _priceBarWindowQuery;
     private readonly string _priceBarSelectWithOffsetSql;
+    private readonly string _priceBarTimestampPresenceSql;
     private readonly string _stageDeleteSql;
     private readonly string _stageInsertSql;
     private readonly string _priceBarTable;
@@ -68,6 +69,7 @@ public class WakettPriceFetcher
         _securityTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayCoreSecurity);
         _priceBarWindowQuery = $"SELECT SecurityId, BarTimeUtc FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset AND BarTimeUtc BETWEEN @StartUtc AND @EndUtc";
         _priceBarSelectWithOffsetSql = $"SELECT SecurityId, BarTimeUtc, [Close] FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset";
+        _priceBarTimestampPresenceSql = $"SELECT SecurityId FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds AND BarTimeUtc = @BarTimeUtc";
         _stageDeleteSql = $"DELETE FROM {_stageHistCloseTable} WHERE BarTimeUtc = @BarTimeUtc AND SecurityId IN @SecurityIds";
         _stageInsertSql = $"INSERT INTO {_stageHistCloseTable} (SecurityId, BarTimeUtc, [Close]) VALUES (@SecurityId, @BarTimeUtc, @Close)";
     }
@@ -140,6 +142,7 @@ public class WakettPriceFetcher
             var baseTimestamp = new DateTimeOffset(barTimeUtc, TimeSpan.Zero);
             var requestTimestamp = baseTimestamp.AddMinutes(minuteOffset);
             var expectedBarTimestamp = baseTimestamp.AddMinutes(minuteOffset);
+            var expectedBarTimestampUtc = DateTime.SpecifyKind(expectedBarTimestamp.UtcDateTime, DateTimeKind.Utc);
 
             if (requestTimestamp > nowUtc)
             {
@@ -154,6 +157,14 @@ public class WakettPriceFetcher
                 _logger.LogInformation(
                     "Skipping Wakett price request for timestamp {TimestampUtc} because it is outside the 6-hour history window.",
                     requestTimestamp.UtcDateTime);
+                continue;
+            }
+
+            if (!await ArePricesMissingForTimestampAsync(allSecurityIds, expectedBarTimestampUtc, cancellationToken))
+            {
+                _logger.LogInformation(
+                    "Skipping Wakett price request for timestamp {TimestampUtc} because all price bars already exist.",
+                    expectedBarTimestampUtc);
                 continue;
             }
 
@@ -817,6 +828,48 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         }
 
         return missing;
+    }
+
+    private async Task<bool> ArePricesMissingForTimestampAsync(
+        IReadOnlyCollection<int> securityIds,
+        DateTime expectedBarTimestampUtc,
+        CancellationToken cancellationToken)
+    {
+        if (securityIds.Count == 0)
+        {
+            return false;
+        }
+
+        var ids = securityIds.ToArray();
+        using var connection = _context.CreateConnection();
+        if (connection is DbConnection dbConnection)
+        {
+            await dbConnection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            connection.Open();
+        }
+
+        var rows = await connection.QueryAsync<int>(
+            _priceBarTimestampPresenceSql,
+            new
+            {
+                SecurityIds = ids,
+                BarTimeUtc = expectedBarTimestampUtc
+            });
+
+        var present = new HashSet<int>();
+        foreach (var securityId in rows)
+        {
+            present.Add(securityId);
+            if (present.Count == ids.Length)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     internal static IReadOnlyList<DateTime> BuildExpectedBarHours(DateTime endHourUtc, int count)
