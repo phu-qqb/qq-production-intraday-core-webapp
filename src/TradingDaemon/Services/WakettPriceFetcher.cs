@@ -123,6 +123,7 @@ public class WakettPriceFetcher
         WakettPriceUploadResult? lastResult = null;
 
         var nowUtc = DateTimeOffset.UtcNow;
+        var historicalWindowStart = nowUtc.AddHours(-6);
 
         foreach (var (minuteOffset, barTimeUtc) in missingBars
             .OrderBy(entry => entry.BarTimeUtc.AddMinutes(entry.MinuteOffset)))
@@ -136,6 +137,14 @@ public class WakettPriceFetcher
             {
                 _logger.LogInformation(
                     "Skipping Wakett price request for timestamp {TimestampUtc} because it is ahead of the allowed window.",
+                    requestTimestamp.UtcDateTime);
+                continue;
+            }
+
+            if (requestTimestamp < historicalWindowStart)
+            {
+                _logger.LogInformation(
+                    "Skipping Wakett price request for timestamp {TimestampUtc} because it is outside the 6-hour history window.",
                     requestTimestamp.UtcDateTime);
                 continue;
             }
