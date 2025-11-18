@@ -41,6 +41,8 @@ public class WakettPriceFetcher
 
     private IReadOnlyList<int>? _priceMinuteOffsets;
 
+    private static readonly TimeSpan HistoricalWindow = TimeSpan.FromHours(6);
+
     private IReadOnlyList<int> PriceMinuteOffsets => _priceMinuteOffsets ??= LoadMinuteOffsets();
 
     public WakettPriceFetcher(
@@ -112,9 +114,18 @@ public class WakettPriceFetcher
             missingBars.AddRange(missingForOffset.Select(bar => (minuteOffset, bar)));
         }
 
-        if (missingBars.Count == 0)
+        var nowUtc = DateTimeOffset.UtcNow;
+        var historicalWindowStart = nowUtc.Subtract(HistoricalWindow);
+
+        var fetchableMissingBars = missingBars
+            .Where(entry => entry.BarTimeUtc.AddMinutes(entry.MinuteOffset) >= historicalWindowStart.UtcDateTime)
+            .ToList();
+
+        if (fetchableMissingBars.Count == 0)
         {
-            _logger.LogInformation("No missing Wakett price bars detected in the last 24 hours for configured minute offsets.");
+            _logger.LogInformation(
+                "No missing Wakett price bars detected within the last {Hours} hours for configured minute offsets.",
+                HistoricalWindow.TotalHours);
             return null;
         }
 
@@ -122,10 +133,7 @@ public class WakettPriceFetcher
         var wakettSymbols = BuildWakettRequestSymbols(baseSymbols);
         WakettPriceUploadResult? lastResult = null;
 
-        var nowUtc = DateTimeOffset.UtcNow;
-        var historicalWindowStart = nowUtc.AddHours(-6);
-
-        foreach (var (minuteOffset, barTimeUtc) in missingBars
+        foreach (var (minuteOffset, barTimeUtc) in fetchableMissingBars
             .OrderBy(entry => entry.BarTimeUtc.AddMinutes(entry.MinuteOffset)))
         {
 
@@ -248,13 +256,20 @@ public class WakettPriceFetcher
 
         var securityIds = symbolConfiguration.AllSecurityIds;
 
+        var nowUtc = DateTimeOffset.UtcNow;
+        var historicalWindowStart = nowUtc.Subtract(HistoricalWindow).UtcDateTime;
+
         var missingByOffset = new List<(int MinuteOffset, IReadOnlyList<DateTime> Missing)>();
         foreach (var minuteOffset in PriceMinuteOffsets)
         {
             var missingBars = await FindMissingBarTimestampsAsync(securityIds, minuteOffset, cancellationToken);
-            if (missingBars.Count > 0)
+            var relevantMissing = missingBars
+                .Where(bar => bar.AddMinutes(minuteOffset) >= historicalWindowStart)
+                .ToList();
+
+            if (relevantMissing.Count > 0)
             {
-                missingByOffset.Add((minuteOffset, missingBars));
+                missingByOffset.Add((minuteOffset, relevantMissing));
             }
         }
 
