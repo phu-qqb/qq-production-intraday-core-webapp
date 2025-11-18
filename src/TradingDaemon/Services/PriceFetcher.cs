@@ -100,24 +100,48 @@ public class PriceFetcher
             .Select(g => g.Last())
             .ToList();
 
-        await connection.ExecuteAsync($"DELETE FROM {_flatBarStagingTable}");
-        var flatRecords = new List<FlatPrice>();
-        foreach (var grp in allBars.GroupBy(r => r.SecurityId))
-        {
-            var ordered = grp.OrderBy(r => r.BarTimeUtc).ToList();
-            var rawEU = RawNMin(ordered, PriceTimeframeMinute, "EU", 0);
-            var flatEU = Flatten(rawEU, SessionBounds["EU"].Zone)
-                .Select(r => new FlatPrice { SecurityId = grp.Key, BarTimeUtc = r.TimestampUtc, Close = r.Close, Session = "EU" });
-            flatRecords.AddRange(flatEU);
+        var seriesBySecurity = allBars
+            .GroupBy(r => r.SecurityId)
+            .Select(g => new { SecurityId = g.Key, Series = g.OrderBy(r => r.BarTimeUtc).ToList() })
+            .ToList();
 
-            var rawUS = RawNMin(ordered, PriceTimeframeMinute, "US", 0);
-            var flatUS = Flatten(rawUS, SessionBounds["US"].Zone)
-                .Select(r => new FlatPrice { SecurityId = grp.Key, BarTimeUtc = r.TimestampUtc, Close = r.Close, Session = "US" });
-            flatRecords.AddRange(flatUS);
-        }
+        var flatBarBuilds = FlatBarBuildSpecificationFactory.CreateDefault(PriceTimeframeMinute, 0);
 
-        if (flatRecords.Count > 0)
+        foreach (var build in flatBarBuilds)
         {
+            var flatRecords = new List<FlatPrice>();
+            foreach (var grp in seriesBySecurity)
+            {
+                var rawEU = RawNMin(grp.Series, build.TimeframeMinute, "EU", build.OffsetMinute);
+                var flatEU = Flatten(rawEU, SessionBounds["EU"].Zone)
+                    .Select(r => new FlatPrice
+                    {
+                        SecurityId = grp.SecurityId,
+                        BarTimeUtc = r.TimestampUtc,
+                        Close = r.Close,
+                        Session = "EU"
+                    });
+                flatRecords.AddRange(flatEU);
+
+                var rawUS = RawNMin(grp.Series, build.TimeframeMinute, "US", build.OffsetMinute);
+                var flatUS = Flatten(rawUS, SessionBounds["US"].Zone)
+                    .Select(r => new FlatPrice
+                    {
+                        SecurityId = grp.SecurityId,
+                        BarTimeUtc = r.TimestampUtc,
+                        Close = r.Close,
+                        Session = "US"
+                    });
+                flatRecords.AddRange(flatUS);
+            }
+
+            if (flatRecords.Count == 0)
+            {
+                continue;
+            }
+
+            await connection.ExecuteAsync($"DELETE FROM {_flatBarStagingTable}");
+
             var table = new DataTable();
             table.Columns.Add("SecurityId", typeof(string));
             table.Columns.Add("BarTimeUtc", typeof(DateTime));
@@ -136,7 +160,8 @@ public class PriceFetcher
             }
 
             // Move staged flat bars into the main table for each session.
-            await _priceProcedures.LoadFlatFromMinimalAsync(connection, PriceTimeframeMinute);
+            await _priceProcedures.LoadFlatFromMinimalAsync(connection, build.TimeframeMinute);
+        }
     }
     }
 
