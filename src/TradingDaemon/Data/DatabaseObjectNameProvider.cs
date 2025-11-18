@@ -16,13 +16,29 @@ public sealed class DatabaseObjectNameProvider : IDatabaseObjectNameProvider
     private const string TestIntradayDatabaseName = "Intraday_Test";
     private const string IntradayDatabaseToken = "[Intraday]";
 
+    private static readonly IReadOnlyDictionary<string, string> DefaultNames = new Dictionary<string, string>(
+        StringComparer.OrdinalIgnoreCase)
+    {
+        [DatabaseObjects.IntradayModelNettedWeight.Key] = "[Intraday].[model].[NettedWeight]",
+        [DatabaseObjects.IntradayModel.Key] = "[Intraday].[model].[Model]",
+        [DatabaseObjects.IntradayCoreSecurity.Key] = "[Intraday].[core].[Security]",
+        [DatabaseObjects.IntradayMarketPriceBar.Key] = "[Intraday].[mkt].[PriceBar]",
+        [DatabaseObjects.IntradayMarketFlatBar.Key] = "[Intraday].[mkt].[FlatBar]",
+        [DatabaseObjects.IntradayMarketStageHistClose.Key] = "[Intraday].[mkt].[Stage_HistClose]",
+        [DatabaseObjects.IntradayStagingFlatBar.Key] = "[Intraday].[dbo].[mkt_FlatBar_Staging]",
+        [DatabaseObjects.IntradayMarketLoadRawFromStageProc.Key] = "[Intraday].[mkt].[LoadRawFromStage]",
+        [DatabaseObjects.IntradayMarketLoadFlatFromMinimalProc.Key] = "[Intraday].[mkt].[LoadFlatFromMinimal]",
+        [DatabaseObjects.WakettFill.Key] = "[wakett].[Fill]",
+        [DatabaseObjects.WakettTradingLimit.Key] = "[wakett].[TradingLimit]",
+        [DatabaseObjects.WakettTradingLimitBreachReport.Key] = "[wakett].[TradingLimitBreachReport]",
+        [DatabaseObjects.WakettOrder.Key] = "[wakett].[Order]"
+    };
+
     private readonly IReadOnlyDictionary<string, string> _names;
 
     public DatabaseObjectNameProvider(IOptions<DatabaseObjectNameOptions>? optionsAccessor = null)
     {
         var options = optionsAccessor?.Value;
-        var intradayDatabaseName = ResolveIntradayDatabaseName(options);
-        var names = CreateDefaultNames(intradayDatabaseName);
         DatabaseObjectNameEnvironment? environment = null;
 
         if (options is not null)
@@ -36,6 +52,7 @@ public sealed class DatabaseObjectNameProvider : IDatabaseObjectNameProvider
             }
         }
 
+        var intradayDatabaseName = ResolveIntradayDatabaseName(options);
         ApplyIntradayDatabaseName(names, intradayDatabaseName);
 
         _names = names;
@@ -69,28 +86,6 @@ public sealed class DatabaseObjectNameProvider : IDatabaseObjectNameProvider
         }
     }
 
-    private static Dictionary<string, string> CreateDefaultNames(string intradayDatabaseName)
-    {
-        var names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-        {
-            [DatabaseObjects.IntradayModelNettedWeight.Key] = BuildIntradayObjectName(intradayDatabaseName, "model", "NettedWeight"),
-            [DatabaseObjects.IntradayModel.Key] = BuildIntradayObjectName(intradayDatabaseName, "model", "Model"),
-            [DatabaseObjects.IntradayCoreSecurity.Key] = BuildIntradayObjectName(intradayDatabaseName, "core", "Security"),
-            [DatabaseObjects.IntradayMarketPriceBar.Key] = BuildIntradayObjectName(intradayDatabaseName, "mkt", "PriceBar"),
-            [DatabaseObjects.IntradayMarketFlatBar.Key] = BuildIntradayObjectName(intradayDatabaseName, "mkt", "FlatBar"),
-            [DatabaseObjects.IntradayMarketStageHistClose.Key] = BuildIntradayObjectName(intradayDatabaseName, "mkt", "Stage_HistClose"),
-            [DatabaseObjects.IntradayStagingFlatBar.Key] = BuildIntradayObjectName(intradayDatabaseName, "dbo", "mkt_FlatBar_Staging"),
-            [DatabaseObjects.IntradayMarketLoadRawFromStageProc.Key] = BuildIntradayObjectName(intradayDatabaseName, "mkt", "LoadRawFromStage"),
-            [DatabaseObjects.IntradayMarketLoadFlatFromMinimalProc.Key] = BuildIntradayObjectName(intradayDatabaseName, "mkt", "LoadFlatFromMinimal"),
-            [DatabaseObjects.WakettFill.Key] = "[wakett].[Fill]",
-            [DatabaseObjects.WakettTradingLimit.Key] = "[wakett].[TradingLimit]",
-            [DatabaseObjects.WakettTradingLimitBreachReport.Key] = "[wakett].[TradingLimitBreachReport]",
-            [DatabaseObjects.WakettOrder.Key] = "[wakett].[Order]"
-        };
-
-        return names;
-    }
-
     private static string ResolveIntradayDatabaseName(DatabaseObjectNameOptions? options)
     {
         return string.Equals(options?.ActiveEnvironment, "Test", StringComparison.OrdinalIgnoreCase)
@@ -112,11 +107,6 @@ public sealed class DatabaseObjectNameProvider : IDatabaseObjectNameProvider
         {
             names[key] = names[key].Replace(IntradayDatabaseToken, replacement, StringComparison.OrdinalIgnoreCase);
         }
-    }
-
-    private static string BuildIntradayObjectName(string databaseName, string schema, string objectName)
-    {
-        return $"[{databaseName}].[{schema}].[{objectName}]";
     }
 
     private static DatabaseObjectNameEnvironment? ResolveEnvironment(DatabaseObjectNameOptions options)
