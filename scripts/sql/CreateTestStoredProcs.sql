@@ -1,4 +1,4 @@
-USE [Intraday]
+USE [Intraday_Test]
 GO
 
 SET ANSI_NULLS ON
@@ -124,7 +124,7 @@ BEGIN
 END;
 GO
 
-USE [Intraday]
+USE [Intraday_Test]
 GO
 
 SET ANSI_NULLS ON
