@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using Microsoft.Extensions.Options;
 using TradingDaemon.Options;
@@ -11,6 +12,10 @@ public interface IDatabaseObjectNameProvider
 
 public sealed class DatabaseObjectNameProvider : IDatabaseObjectNameProvider
 {
+    private const string ProdIntradayDatabaseName = "Intraday";
+    private const string TestIntradayDatabaseName = "Intraday_Test";
+    private const string IntradayDatabaseToken = "[Intraday]";
+
     private static readonly IReadOnlyDictionary<string, string> DefaultNames = new Dictionary<string, string>(
         StringComparer.OrdinalIgnoreCase)
     {
@@ -35,17 +40,21 @@ public sealed class DatabaseObjectNameProvider : IDatabaseObjectNameProvider
     {
         var names = new Dictionary<string, string>(DefaultNames, StringComparer.OrdinalIgnoreCase);
         var options = optionsAccessor?.Value;
+        DatabaseObjectNameEnvironment? environment = null;
 
         if (options is not null)
         {
+            environment = ResolveEnvironment(options);
             Merge(names, options.Objects);
 
-            var environment = ResolveEnvironment(options);
             if (environment?.Objects is not null)
             {
                 Merge(names, environment.Objects);
             }
         }
+
+        var intradayDatabaseName = ResolveIntradayDatabaseName(options);
+        ApplyIntradayDatabaseName(names, intradayDatabaseName);
 
         _names = names;
     }
@@ -75,6 +84,29 @@ public sealed class DatabaseObjectNameProvider : IDatabaseObjectNameProvider
             }
 
             target[pair.Key] = pair.Value;
+        }
+    }
+
+    private static string ResolveIntradayDatabaseName(DatabaseObjectNameOptions? options)
+    {
+        return string.Equals(options?.ActiveEnvironment, "Test", StringComparison.OrdinalIgnoreCase)
+            ? TestIntradayDatabaseName
+            : ProdIntradayDatabaseName;
+    }
+
+    private static void ApplyIntradayDatabaseName(Dictionary<string, string> names, string databaseName)
+    {
+        if (string.Equals(databaseName, ProdIntradayDatabaseName, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        var replacement = $"[{databaseName}]";
+        var keys = new List<string>(names.Keys);
+
+        foreach (var key in keys)
+        {
+            names[key] = names[key].Replace(IntradayDatabaseToken, replacement, StringComparison.OrdinalIgnoreCase);
         }
     }
 
