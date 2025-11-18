@@ -1101,7 +1101,11 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
     private sealed record SecuritySymbolDefinition(int SecurityId, CurrencyPair Pair);
 
-    private sealed record SecuritySymbolRow(int SecurityId, string? Symbol);
+    private sealed class SecuritySymbolRow
+    {
+        public int SecurityId { get; set; }
+        public string? Symbol { get; set; }
+    }
 
     internal readonly record struct CurrencyPair(string Base, string Quote);
 
