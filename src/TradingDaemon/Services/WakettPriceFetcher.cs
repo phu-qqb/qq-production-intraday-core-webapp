@@ -290,6 +290,9 @@ public class WakettPriceFetcher
         var nowUtc = DateTimeOffset.UtcNow;
         var historicalWindowStart = nowUtc.Subtract(HistoricalWindow).UtcDateTime;
 
+        var nowUtc = DateTimeOffset.UtcNow;
+        var historicalWindowStart = nowUtc.Subtract(HistoricalWindow).UtcDateTime;
+
         var missingByOffset = new List<(int MinuteOffset, IReadOnlyList<DateTime> Missing)>();
         foreach (var minuteOffset in PriceMinuteOffsets)
         {

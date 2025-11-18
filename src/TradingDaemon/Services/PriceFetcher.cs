@@ -163,7 +163,6 @@ public class PriceFetcher
             await _priceProcedures.LoadFlatFromMinimalAsync(connection, build.TimeframeMinute);
         }
     }
-    }
 
     private static readonly Dictionary<string, (TimeZoneInfo Zone, TimeSpan Start, TimeSpan End)> SessionBounds = new()
     {
