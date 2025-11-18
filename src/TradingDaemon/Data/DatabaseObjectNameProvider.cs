@@ -38,7 +38,6 @@ public sealed class DatabaseObjectNameProvider : IDatabaseObjectNameProvider
 
     public DatabaseObjectNameProvider(IOptions<DatabaseObjectNameOptions>? optionsAccessor = null)
     {
-        var names = new Dictionary<string, string>(DefaultNames, StringComparer.OrdinalIgnoreCase);
         var options = optionsAccessor?.Value;
         DatabaseObjectNameEnvironment? environment = null;
 
