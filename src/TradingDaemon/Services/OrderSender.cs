@@ -128,14 +128,7 @@ public class OrderSender
             return;
         }
 
-        var allowedSymbols = LoadAllowedSymbols();
-        if (allowedSymbols.Count == 0)
-        {
-            _logger.LogWarning("No allowed Wakett symbols configured. Aborting order submission.");
-            return;
-        }
-
-        var builtOrders = BuildOrders(latestWeights, symbolMap, allowedSymbols, orderTimestampUtc);
+        var builtOrders = BuildOrders(latestWeights, symbolMap, orderTimestampUtc);
         var isFlatOrderRequest = builtOrders.Count == 0
             || builtOrders.All(order => order.Order.size?.value == 0d);
         if (isFlatOrderRequest)
@@ -1050,44 +1043,9 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         return map;
     }
 
-    private HashSet<string> LoadAllowedSymbols()
-    {
-        var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var item in EnumerateConfiguredSymbols("ExternalApis:WakettApi:Symbols"))
-        {
-            allowed.Add(item);
-        }
-
-        foreach (var item in EnumerateConfiguredSymbols("ExternalApis:WakettApi:MissingSymbols"))
-        {
-            allowed.Add(item);
-        }
-
-        return allowed;
-    }
-
-    private IEnumerable<string> EnumerateConfiguredSymbols(string section)
-    {
-        var configured = _configuration
-            .GetSection(section)
-            .Get<List<WakettSecuritySymbol>>() ?? new();
-
-        foreach (var symbol in configured)
-        {
-            var requestSymbol = WakettSymbolPatch.GetRequestSymbol(symbol.SecurityId, symbol.Symbol);
-
-            if (SymbolInfo.TryCreate(symbol.SecurityId, requestSymbol, out var info))
-            {
-                yield return info.FormattedSymbol;
-            }
-        }
-    }
-
     private static List<(int SecurityId, WakettOrderItem Order)> BuildOrders(
         IEnumerable<NettedWeightRow> weights,
         IReadOnlyDictionary<int, string> symbolMap,
-        ISet<string> allowedSymbols,
         DateTime orderTimestampUtc)
     {
         var parsedSymbols = symbolMap
@@ -1121,7 +1079,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
         if (exposures.Count == 0)
         {
-            return BuildFlatOrders(weights, parsedSymbols, allowedSymbols, orderTimestampUtc);
+            return BuildFlatOrders(weights, parsedSymbols, orderTimestampUtc);
         }
 
         var usdBasePairs = parsedSymbols.Values
@@ -1177,20 +1135,6 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
             var side = order.Weight > 0 ? "BUY" : "SELL";
             var value = Math.Abs((double)order.Weight);
 
-            if (!allowedSymbols.Contains(formatted))
-            {
-                var reversed = order.Info.ReversedFormattedSymbol;
-                if (allowedSymbols.Contains(reversed))
-                {
-                    formatted = reversed;
-                    side = side == "BUY" ? "SELL" : "BUY";
-                }
-                else
-                {
-                    continue;
-                }
-            }
-
             var orderCode = BuildOrderCode(order.SecurityId, orderTimestampUtc);
 
             result.Add((order.SecurityId, new WakettOrderItem
@@ -1212,7 +1156,6 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
     private static List<(int SecurityId, WakettOrderItem Order)> BuildFlatOrders(
         IEnumerable<NettedWeightRow> weights,
         IReadOnlyDictionary<int, SymbolInfo> parsedSymbols,
-        ISet<string> allowedSymbols,
         DateTime orderTimestampUtc)
     {
         var result = new List<(int SecurityId, WakettOrderItem Order)>();
@@ -1228,17 +1171,6 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         foreach (var symbol in orderedSymbols)
         {
             var formatted = symbol.FormattedSymbol;
-
-            if (!allowedSymbols.Contains(formatted))
-            {
-                var reversed = symbol.ReversedFormattedSymbol;
-                if (!allowedSymbols.Contains(reversed))
-                {
-                    continue;
-                }
-
-                formatted = reversed;
-            }
 
             result.Add((symbol.SecurityId, new WakettOrderItem
             {

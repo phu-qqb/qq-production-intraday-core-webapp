@@ -34,6 +34,7 @@ public class WakettPriceFetcher
     private readonly string _stageDeleteSql;
     private readonly string _stageInsertSql;
     private readonly string _priceBarTable;
+    private readonly string _securityTable;
     private readonly IPriceProcessingProcedureExecutor _priceProcedures;
     private readonly PriceBarOptions _priceBarOptions;
 
@@ -62,6 +63,7 @@ public class WakettPriceFetcher
         _stageHistCloseTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketStageHistClose);
         _flatBarStagingTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayStagingFlatBar);
         _priceBarTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketPriceBar);
+        _securityTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayCoreSecurity);
         _priceBarWindowQuery = $"SELECT SecurityId, BarTimeUtc FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset AND BarTimeUtc BETWEEN @StartUtc AND @EndUtc";
         _priceBarSelectWithOffsetSql = $"SELECT SecurityId, BarTimeUtc, [Close] FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset";
         _stageDeleteSql = $"DELETE FROM {_stageHistCloseTable} WHERE BarTimeUtc = @BarTimeUtc AND SecurityId IN @SecurityIds";
@@ -90,10 +92,15 @@ public class WakettPriceFetcher
     public async Task<WakettPriceUploadResult?> FetchAndStoreAsync(
         CancellationToken cancellationToken = default)
     {
-        if (!TryLoadConfiguredSymbols(out var baseSymbols, out var missingSymbols, out var allSecurityIds))
+        var symbolConfiguration = await LoadSymbolConfigurationAsync(cancellationToken);
+        if (symbolConfiguration is null)
         {
             return null;
         }
+
+        var baseSymbols = symbolConfiguration.BaseSymbols;
+        var missingSymbols = symbolConfiguration.MissingSymbols;
+        var allSecurityIds = symbolConfiguration.AllSecurityIds;
 
         var missingBars = new List<(int MinuteOffset, DateTime BarTimeUtc)>();
         foreach (var minuteOffset in PriceMinuteOffsets)
@@ -224,10 +231,13 @@ public class WakettPriceFetcher
 
     public async Task<bool> AreRecentPricesCompleteAsync(CancellationToken cancellationToken = default)
     {
-        if (!TryLoadConfiguredSymbols(out _, out _, out var securityIds))
+        var symbolConfiguration = await LoadSymbolConfigurationAsync(cancellationToken);
+        if (symbolConfiguration is null)
         {
             return false;
         }
+
+        var securityIds = symbolConfiguration.AllSecurityIds;
 
         var missingByOffset = new List<(int MinuteOffset, IReadOnlyList<DateTime> Missing)>();
         foreach (var minuteOffset in PriceMinuteOffsets)
@@ -514,34 +524,171 @@ public class WakettPriceFetcher
         inverse[pair.Base] = 1m / rate;
     }
 
-    private bool TryLoadConfiguredSymbols(
-        out IReadOnlyList<WakettSecuritySymbol> baseSymbols,
-        out IReadOnlyList<WakettSecuritySymbol> missingSymbols,
-        out int[] allSecurityIds)
+    private async Task<SymbolConfiguration?> LoadSymbolConfigurationAsync(CancellationToken cancellationToken)
     {
-        baseSymbols = _config
-            .GetSection("ExternalApis:WakettApi:Symbols")
-            .Get<List<WakettSecuritySymbol>>() ?? new();
+        var basePairs = LoadConfiguredBasePairs();
+        if (basePairs.Count == 0)
+        {
+            _logger.LogWarning("No Wakett base pairs configured. Aborting Wakett price processing.");
+            return null;
+        }
+
+        var allowedCurrencies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in basePairs)
+        {
+            allowedCurrencies.Add(pair.Base);
+            allowedCurrencies.Add(pair.Quote);
+        }
+
+        var securityDefinitions = await LoadSecurityDefinitionsAsync(allowedCurrencies, cancellationToken);
+        if (securityDefinitions.Count == 0)
+        {
+            _logger.LogWarning(
+                "No FX securities were found in {Table} for the configured Wakett currencies.",
+                _securityTable);
+            return null;
+        }
+
+        var baseSymbols = new List<WakettSecuritySymbol>();
+        var baseSecurityIds = new HashSet<int>();
+
+        foreach (var pair in basePairs)
+        {
+            var match = securityDefinitions.FirstOrDefault(def => PairMatches(def.Pair, pair));
+            if (match is null)
+            {
+                _logger.LogWarning(
+                    "Unable to locate security for Wakett base pair {Base}/{Quote}.",
+                    pair.Base,
+                    pair.Quote);
+                continue;
+            }
+
+            baseSecurityIds.Add(match.SecurityId);
+            baseSymbols.Add(new WakettSecuritySymbol
+            {
+                SecurityId = match.SecurityId,
+                Symbol = FormatCurrencyPair(pair)
+            });
+        }
 
         if (baseSymbols.Count == 0)
         {
-            _logger.LogWarning("No Wakett symbols configured. Aborting Wakett price processing.");
-            missingSymbols = Array.Empty<WakettSecuritySymbol>();
-            allSecurityIds = Array.Empty<int>();
-            return false;
+            _logger.LogWarning("None of the configured Wakett base pairs are present in the security table.");
+            return null;
         }
 
-        missingSymbols = _config
-            .GetSection("ExternalApis:WakettApi:MissingSymbols")
-            .Get<List<WakettSecuritySymbol>>() ?? new();
+        var missingSymbols = securityDefinitions
+            .Where(def => !baseSecurityIds.Contains(def.SecurityId))
+            .Select(def => new WakettSecuritySymbol
+            {
+                SecurityId = def.SecurityId,
+                Symbol = FormatCurrencyPair(def.Pair)
+            })
+            .ToList();
 
-        allSecurityIds = baseSymbols
-            .Concat(missingSymbols)
-            .Select(s => s.SecurityId)
+        var allSecurityIds = baseSecurityIds
+            .Concat(missingSymbols.Select(symbol => symbol.SecurityId))
             .Distinct()
             .ToArray();
 
-        return true;
+        return new SymbolConfiguration(baseSymbols, missingSymbols, allSecurityIds);
+    }
+
+    private IReadOnlyList<CurrencyPair> LoadConfiguredBasePairs()
+    {
+        var configured = _config
+            .GetSection("ExternalApis:WakettApi:BasePairs")
+            .Get<string[]>() ?? Array.Empty<string>();
+
+        var pairs = new List<CurrencyPair>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var entry in configured)
+        {
+            if (!TryParsePair(entry, out var pair))
+            {
+                _logger.LogWarning(
+                    "Skipping invalid Wakett base pair configuration value '{Value}'.",
+                    entry);
+                continue;
+            }
+
+            var key = FormatCurrencyPair(pair);
+            if (!seen.Add(key))
+            {
+                continue;
+            }
+
+            pairs.Add(pair);
+        }
+
+        return pairs;
+    }
+
+    private async Task<List<SecuritySymbolDefinition>> LoadSecurityDefinitionsAsync(
+        ISet<string> allowedCurrencies,
+        CancellationToken cancellationToken)
+    {
+        if (allowedCurrencies.Count == 0)
+        {
+            return new List<SecuritySymbolDefinition>();
+        }
+
+        var sql = $@"SELECT SecurityId, Symbol
+FROM {_securityTable}
+WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
+
+        using var connection = _context.CreateConnection();
+        if (connection is DbConnection dbConnection)
+        {
+            await dbConnection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            connection.Open();
+        }
+
+        var definition = new CommandDefinition(sql, cancellationToken: cancellationToken);
+        var rows = await connection.QueryAsync<SecuritySymbolRow>(definition);
+        var definitions = new List<SecuritySymbolDefinition>();
+
+        foreach (var row in rows)
+        {
+            if (string.IsNullOrWhiteSpace(row.Symbol))
+            {
+                continue;
+            }
+
+            var normalized = NormalizeSymbol(row.Symbol);
+            if (normalized.Length != 6)
+            {
+                continue;
+            }
+
+            var pair = new CurrencyPair(normalized[..3], normalized.Substring(3, 3));
+            if (!allowedCurrencies.Contains(pair.Base) || !allowedCurrencies.Contains(pair.Quote))
+            {
+                continue;
+            }
+
+            definitions.Add(new SecuritySymbolDefinition(row.SecurityId, pair));
+        }
+
+        return definitions;
+    }
+
+    private static string FormatCurrencyPair(CurrencyPair pair) => $"{pair.Base}/{pair.Quote}";
+
+    private static bool PairMatches(CurrencyPair candidate, CurrencyPair target)
+    {
+        if (candidate.Equals(target))
+        {
+            return true;
+        }
+
+        return candidate.Base.Equals(target.Quote, StringComparison.OrdinalIgnoreCase)
+            && candidate.Quote.Equals(target.Base, StringComparison.OrdinalIgnoreCase);
     }
 
     private static IReadOnlyList<WakettSecuritySymbol> BuildWakettRequestSymbols(
@@ -707,7 +854,7 @@ public class WakettPriceFetcher
         if (ids.Length == 0)
             return new Dictionary<int, CurrencyPair>();
 
-        const string sql = "SELECT SecurityId, BloombergTicker FROM core.Security WHERE SecurityId IN @Ids";
+        var sql = $"SELECT SecurityId, BloombergTicker FROM {_securityTable} WHERE SecurityId IN @Ids";
         using var connection = _context.CreateConnection();
         if (connection is DbConnection dbConnection)
         {
@@ -945,6 +1092,19 @@ public class WakettPriceFetcher
         for (int i = 0; i < px.Count; i++)
             result.Add((times[i], flat[i]));
         return result;
+    }
+
+    private sealed record SymbolConfiguration(
+        IReadOnlyList<WakettSecuritySymbol> BaseSymbols,
+        IReadOnlyList<WakettSecuritySymbol> MissingSymbols,
+        int[] AllSecurityIds);
+
+    private sealed record SecuritySymbolDefinition(int SecurityId, CurrencyPair Pair);
+
+    private sealed class SecuritySymbolRow
+    {
+        public int SecurityId { get; set; }
+        public string? Symbol { get; set; }
     }
 
     internal readonly record struct CurrencyPair(string Base, string Quote);

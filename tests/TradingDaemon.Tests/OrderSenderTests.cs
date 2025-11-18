@@ -900,21 +900,7 @@ public class OrderSenderTests
         {
             ["Programmes:0:ModelId"] = "1",
             ["Programmes:0:Session"] = "EUUS",
-            ["Programmes:0:Timeframe"] = "60",
-            ["ExternalApis:WakettApi:Symbols:0:SecurityId"] = "58",
-            ["ExternalApis:WakettApi:Symbols:0:Symbol"] = "EUR/USD",
-            ["ExternalApis:WakettApi:Symbols:1:SecurityId"] = "61",
-            ["ExternalApis:WakettApi:Symbols:1:Symbol"] = "EUR/CHF",
-            ["ExternalApis:WakettApi:Symbols:2:SecurityId"] = "62",
-            ["ExternalApis:WakettApi:Symbols:2:Symbol"] = "CAD/JPY",
-            ["ExternalApis:WakettApi:Symbols:3:SecurityId"] = "64",
-            ["ExternalApis:WakettApi:Symbols:3:Symbol"] = "USD/CAD",
-            ["ExternalApis:WakettApi:Symbols:4:SecurityId"] = "65",
-            ["ExternalApis:WakettApi:Symbols:4:Symbol"] = "USD/JPY",
-            ["ExternalApis:WakettApi:Symbols:5:SecurityId"] = "66",
-            ["ExternalApis:WakettApi:Symbols:5:Symbol"] = "EUR/USD",
-            ["ExternalApis:WakettApi:Symbols:6:SecurityId"] = "136",
-            ["ExternalApis:WakettApi:Symbols:6:Symbol"] = "USD/CHF"
+            ["Programmes:0:Timeframe"] = "60"
         };
 
         foreach (var kvp in values)
