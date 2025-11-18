@@ -946,35 +946,46 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
                 .Select(g => g.Last())
                 .ToList();
 
-            var flatRecords = new List<FlatPrice>();
-            foreach (var grp in existing.GroupBy(r => r.SecurityId))
-            {
-                var ordered = grp.OrderBy(r => r.BarTimeUtc).ToList();
-                var rawEu = RawNMin(ordered, PriceTimeframeMinute, "EU", minuteOffset);
-                var flatEu = Flatten(rawEu, SessionBounds["EU"].Zone)
-                    .Select(r => new FlatPrice
-                    {
-                        SecurityId = grp.Key,
-                        BarTimeUtc = r.TimestampUtc,
-                        Close = r.Close,
-                        Session = "EU"
-                    });
-                flatRecords.AddRange(flatEu);
+            var seriesBySecurity = existing
+                .GroupBy(r => r.SecurityId)
+                .Select(g => new { SecurityId = g.Key, Series = g.OrderBy(r => r.BarTimeUtc).ToList() })
+                .ToList();
 
-                var rawUs = RawNMin(ordered, PriceTimeframeMinute, "US", minuteOffset);
-                var flatUs = Flatten(rawUs, SessionBounds["US"].Zone)
-                    .Select(r => new FlatPrice
-                    {
-                        SecurityId = grp.Key,
-                        BarTimeUtc = r.TimestampUtc,
-                        Close = r.Close,
-                        Session = "US"
-                    });
-                flatRecords.AddRange(flatUs);
-            }
+            var flatBarBuilds = FlatBarBuildSpecificationFactory.CreateDefault(PriceTimeframeMinute, minuteOffset);
 
-            if (flatRecords.Count > 0)
+            foreach (var build in flatBarBuilds)
             {
+                var flatRecords = new List<FlatPrice>();
+                foreach (var grp in seriesBySecurity)
+                {
+                    var rawEu = RawNMin(grp.Series, build.TimeframeMinute, "EU", build.OffsetMinute);
+                    var flatEu = Flatten(rawEu, SessionBounds["EU"].Zone)
+                        .Select(r => new FlatPrice
+                        {
+                            SecurityId = grp.SecurityId,
+                            BarTimeUtc = r.TimestampUtc,
+                            Close = r.Close,
+                            Session = "EU"
+                        });
+                    flatRecords.AddRange(flatEu);
+
+                    var rawUs = RawNMin(grp.Series, build.TimeframeMinute, "US", build.OffsetMinute);
+                    var flatUs = Flatten(rawUs, SessionBounds["US"].Zone)
+                        .Select(r => new FlatPrice
+                        {
+                            SecurityId = grp.SecurityId,
+                            BarTimeUtc = r.TimestampUtc,
+                            Close = r.Close,
+                            Session = "US"
+                        });
+                    flatRecords.AddRange(flatUs);
+                }
+
+                if (flatRecords.Count == 0)
+                {
+                    continue;
+                }
+
                 await connection.ExecuteAsync($"DELETE FROM {_flatBarStagingTable}");
 
                 var table = new DataTable();
@@ -998,9 +1009,9 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
                 {
                     throw new InvalidOperationException("Expected SqlConnection for bulk copy operations.");
                 }
-            }
 
-            await _priceProcedures.LoadFlatFromMinimalAsync(connection, PriceTimeframeMinute, cancellationToken);
+                await _priceProcedures.LoadFlatFromMinimalAsync(connection, build.TimeframeMinute, cancellationToken);
+            }
         }
     }
 
