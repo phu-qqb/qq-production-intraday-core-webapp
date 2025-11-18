@@ -238,6 +238,10 @@ cli.add_argument(
     help="Bar timeframe in minutes (TimeframeMinute)",
 )
 args = cli.parse_args()
+print("timeframe:", args.timeframe)
+print("session:", args.session)
+print("universe:", args.universe)
+print("secrets:", args.secret_name)
 
 conn_str = args.conn or get_conn_from_secret(args.secret_name, args.region, args.driver)
 engine = sa.create_engine(conn_str)

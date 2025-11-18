@@ -97,6 +97,10 @@ public class WeightCalculator
             {
                 scriptArgs.AddRange(new[] { "--start", startDate });
             }
+            if (!string.IsNullOrWhiteSpace(startDate))
+            {
+                scriptArgs.AddRange(new[] { "--secret-name", "qq-intraday-test-credentials" });
+            }
 
             var sbOut = new StringBuilder();
             var sbErr = new StringBuilder();
