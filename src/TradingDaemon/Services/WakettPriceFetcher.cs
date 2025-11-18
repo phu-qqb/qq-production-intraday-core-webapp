@@ -105,12 +105,20 @@ public class WakettPriceFetcher
         var baseSymbols = symbolConfiguration.BaseSymbols;
         var missingSymbols = symbolConfiguration.MissingSymbols;
         var allSecurityIds = symbolConfiguration.AllSecurityIds;
+        var uploadSecurityIds = symbolConfiguration.NonBaseSecurityIds;
+        var uploadSecurityIdSet = new HashSet<int>(uploadSecurityIds);
+
+        if (uploadSecurityIds.Length == 0)
+        {
+            _logger.LogInformation("No non-base Wakett securities require database uploads.");
+            return null;
+        }
 
         var missingBars = new List<(int MinuteOffset, DateTime BarTimeUtc)>();
         foreach (var minuteOffset in PriceMinuteOffsets)
         {
             var missingForOffset = await FindMissingBarTimestampsAsync(
-                allSecurityIds,
+                uploadSecurityIds,
                 minuteOffset,
                 cancellationToken);
             missingBars.AddRange(missingForOffset.Select(bar => (minuteOffset, bar)));
@@ -160,7 +168,7 @@ public class WakettPriceFetcher
                 continue;
             }
 
-            if (!await ArePricesMissingForTimestampAsync(allSecurityIds, expectedBarTimestampUtc, cancellationToken))
+            if (!await ArePricesMissingForTimestampAsync(uploadSecurityIds, expectedBarTimestampUtc, cancellationToken))
             {
                 _logger.LogInformation(
                     "Skipping Wakett price request for timestamp {TimestampUtc} because all price bars already exist.",
@@ -193,6 +201,11 @@ public class WakettPriceFetcher
 
             foreach (var rate in computedRates)
             {
+                if (!uploadSecurityIdSet.Contains(rate.Definition.SecurityId))
+                {
+                    continue;
+                }
+
                 if (!TryParsePair(rate.Definition.Symbol, out var configPair))
                 {
                     _logger.LogWarning(
@@ -266,6 +279,16 @@ public class WakettPriceFetcher
         }
 
         var securityIds = symbolConfiguration.AllSecurityIds;
+        var uploadSecurityIds = symbolConfiguration.NonBaseSecurityIds;
+
+        if (uploadSecurityIds.Length == 0)
+        {
+            _logger.LogInformation("No non-base Wakett securities require database uploads.");
+            return true;
+        }
+
+        var nowUtc = DateTimeOffset.UtcNow;
+        var historicalWindowStart = nowUtc.Subtract(HistoricalWindow).UtcDateTime;
 
         var nowUtc = DateTimeOffset.UtcNow;
         var historicalWindowStart = nowUtc.Subtract(HistoricalWindow).UtcDateTime;
@@ -273,7 +296,7 @@ public class WakettPriceFetcher
         var missingByOffset = new List<(int MinuteOffset, IReadOnlyList<DateTime> Missing)>();
         foreach (var minuteOffset in PriceMinuteOffsets)
         {
-            var missingBars = await FindMissingBarTimestampsAsync(securityIds, minuteOffset, cancellationToken);
+            var missingBars = await FindMissingBarTimestampsAsync(uploadSecurityIds, minuteOffset, cancellationToken);
             var relevantMissing = missingBars
                 .Where(bar => bar.AddMinutes(minuteOffset) >= historicalWindowStart)
                 .ToList();
@@ -627,7 +650,12 @@ public class WakettPriceFetcher
             .Distinct()
             .ToArray();
 
-        return new SymbolConfiguration(baseSymbols, missingSymbols, allSecurityIds);
+        var nonBaseSecurityIds = missingSymbols
+            .Select(symbol => symbol.SecurityId)
+            .Distinct()
+            .ToArray();
+
+        return new SymbolConfiguration(baseSymbols, missingSymbols, allSecurityIds, nonBaseSecurityIds);
     }
 
     private IReadOnlyList<CurrencyPair> LoadConfiguredBasePairs()
@@ -1185,7 +1213,8 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
     private sealed record SymbolConfiguration(
         IReadOnlyList<WakettSecuritySymbol> BaseSymbols,
         IReadOnlyList<WakettSecuritySymbol> MissingSymbols,
-        int[] AllSecurityIds);
+        int[] AllSecurityIds,
+        int[] NonBaseSecurityIds);
 
     private sealed record SecuritySymbolDefinition(int SecurityId, CurrencyPair Pair);
 
