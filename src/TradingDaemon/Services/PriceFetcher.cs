@@ -170,7 +170,7 @@ public class PriceFetcher
     private static readonly Dictionary<string, (TimeZoneInfo Zone, TimeSpan Start, TimeSpan End)> SessionBounds = new()
     {
         ["US"] = (NewYorkZone, TimeSpan.Parse("09:00"), TimeSpan.Parse("15:59")),
-        ["EU"] = (NewYorkZone, TimeSpan.Parse("02:00"), TimeSpan.Parse("08:59"))
+        ["EU"] = (CentralEuropeZone, TimeSpan.Parse("07:06"), TimeSpan.Parse("13:51"))
     };
 
     private static TimeZoneInfo NewYorkZone => TimeZoneInfo.FindSystemTimeZoneById(
@@ -232,13 +232,12 @@ public class PriceFetcher
             throw new ArgumentOutOfRangeException(nameof(minutes), "Aggregation interval must be positive.");
         }
 
-        if (sessionStart == TimeSpan.Zero)
+        if (sessionStart < TimeSpan.Zero)
         {
-            return TimeSpan.Zero;
+            throw new ArgumentOutOfRangeException(nameof(sessionStart), "Session start cannot be negative.");
         }
 
-        var totalMinutes = (int)Math.Ceiling(sessionStart.TotalMinutes / minutes) * minutes;
-        return TimeSpan.FromMinutes(totalMinutes);
+        return sessionStart;
     }
 
     private static List<(DateTime TimestampUtc, decimal Close)> Flatten(List<(DateTime TimestampUtc, decimal Close)> raw, TimeZoneInfo zone)
