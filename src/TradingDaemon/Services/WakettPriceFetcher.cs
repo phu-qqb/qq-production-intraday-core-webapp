@@ -1031,7 +1031,11 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
         if (recordList.Count > 0)
         {
-            await _priceProcedures.LoadRawFromStageAsync(connection, PriceTimeframeMinute, cancellationToken);
+            await _priceProcedures.LoadRawFromStageAsync(
+                connection,
+                PriceTimeframeMinute,
+                _priceBarOptions.SourceId,
+                cancellationToken);
 
             var selectRaw = _priceBarSelectWithOffsetSql;
             var existing = (await connection.QueryAsync<HistClose>(selectRaw, new { SecurityIds = securityKeys, MinuteOffset = minuteOffset }))

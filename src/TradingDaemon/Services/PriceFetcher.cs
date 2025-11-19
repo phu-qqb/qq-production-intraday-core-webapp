@@ -86,7 +86,10 @@ public class PriceFetcher
 
         // Load newly staged raw bars into the PriceBar table so that subsequent
         // queries include the latest data.
-        await _priceProcedures.LoadRawFromStageAsync(connection, PriceTimeframeMinute);
+        await _priceProcedures.LoadRawFromStageAsync(
+            connection,
+            PriceTimeframeMinute,
+            _priceBarOptions.SourceId);
 
         // Retrieve all existing raw bars for the affected securities so that
         // flat bars can be recomputed over the full history instead of only

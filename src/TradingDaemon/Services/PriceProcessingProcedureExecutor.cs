@@ -11,6 +11,7 @@ public interface IPriceProcessingProcedureExecutor
     Task LoadRawFromStageAsync(
         IDbConnection connection,
         int timeframeMinute,
+        int sourceId,
         CancellationToken cancellationToken = default);
 
     Task LoadFlatFromMinimalAsync(
@@ -33,11 +34,12 @@ internal sealed class PriceProcessingProcedureExecutor : IPriceProcessingProcedu
     public Task LoadRawFromStageAsync(
         IDbConnection connection,
         int timeframeMinute,
+        int sourceId,
         CancellationToken cancellationToken = default)
     {
         var command = new CommandDefinition(
             _loadRawFromStageProc,
-            new { TimeframeMinute = timeframeMinute },
+            new { TimeframeMinute = timeframeMinute, Source = sourceId },
             commandType: CommandType.StoredProcedure,
             cancellationToken: cancellationToken);
 
