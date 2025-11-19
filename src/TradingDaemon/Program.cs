@@ -5,6 +5,7 @@ using Serilog;
 using TradingDaemon.Controllers;
 using TradingDaemon.Data;
 using TradingDaemon.Logging;
+using TradingDaemon.Middleware;
 using TradingDaemon.Services;
 using TradingDaemon.Models;
 using TradingDaemon.Utils;
@@ -97,6 +98,8 @@ var app = builder.Build();
         c.RoutePrefix = string.Empty;  // Swagger accessible à la racine
     });
 }
+
+app.UseMiddleware<SqlTimeoutLoggingMiddleware>();
 
 app.MapFillEndpoints();
 app.MapPriceEndpoints();
