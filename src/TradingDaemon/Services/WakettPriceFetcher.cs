@@ -68,7 +68,7 @@ public class WakettPriceFetcher
         _priceBarTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketPriceBar);
         _securityTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayCoreSecurity);
         _priceBarWindowQuery = $"SELECT SecurityId, BarTimeUtc FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset AND BarTimeUtc BETWEEN @StartUtc AND @EndUtc";
-        _priceBarSelectWithOffsetSql = $"SELECT SecurityId, BarTimeUtc, [Close] FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset";
+        _priceBarSelectWithOffsetSql = $"SELECT SecurityId, BarTimeUtc, [Close] FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds";
         _priceBarTimestampPresenceSql = $"SELECT SecurityId FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds AND BarTimeUtc = @BarTimeUtc";
         _stageDeleteSql = $"DELETE FROM {_stageHistCloseTable} WHERE BarTimeUtc = @BarTimeUtc AND SecurityId IN @SecurityIds";
         _stageInsertSql = $"INSERT INTO {_stageHistCloseTable} (SecurityId, BarTimeUtc, [Close]) VALUES (@SecurityId, @BarTimeUtc, @Close)";
@@ -1033,7 +1033,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
                 cancellationToken);
 
             var selectRaw = _priceBarSelectWithOffsetSql;
-            var existing = (await connection.QueryAsync<HistClose>(selectRaw, new { SecurityIds = securityKeys, MinuteOffset = minuteOffset }))
+            var existing = (await connection.QueryAsync<HistClose>(selectRaw, new { SecurityIds = securityKeys }))
                 .GroupBy(r => (r.SecurityId, r.BarTimeUtc))
                 .Select(g => g.Last())
                 .ToList();
@@ -1181,28 +1181,49 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
     private static List<(DateTime TimestampUtc, decimal Close)> Flatten(List<(DateTime TimestampUtc, decimal Close)> raw, TimeZoneInfo zone)
     {
-        if (raw.Count == 0) return new();
-        var times = raw.Select(r => r.TimestampUtc).ToList();
-        var px = raw.Select(r => r.Close).ToList();
-        var localTimes = times.Select(t => TimeZoneInfo.ConvertTimeFromUtc(t, zone)).ToList();
-        var ret = new decimal[px.Count];
-        for (int i = 1; i < px.Count; i++)
+        if (raw.Count == 0)
         {
-            var prev = px[i - 1];
-            ret[i] = prev != 0 ? (px[i] - prev) / prev : 0m;
-            if (localTimes[i].Date != localTimes[i - 1].Date)
-                ret[i] = 0m;
+            return new();
         }
-        var flat = new decimal[px.Count];
-        flat[px.Count - 1] = px[px.Count - 1];
-        for (int i = px.Count - 2; i >= 0; i--)
+
+        var ordered = raw
+            .OrderBy(r => r.TimestampUtc)
+            .ToList();
+        var count = ordered.Count;
+
+        var localDates = ordered
+            .Select(r => TimeZoneInfo.ConvertTimeFromUtc(r.TimestampUtc, zone).Date)
+            .ToArray();
+
+        var returns = new decimal[count];
+        for (var i = 1; i < count; i++)
         {
-            var inc = ret[i + 1];
-            flat[i] = flat[i + 1] / (1 + inc);
+            var prevClose = ordered[i - 1].Close;
+            returns[i] = prevClose != 0 ? (ordered[i].Close / prevClose) - 1m : 0m;
         }
-        var result = new List<(DateTime, decimal)>();
-        for (int i = 0; i < px.Count; i++)
-            result.Add((times[i], flat[i]));
+
+        for (var i = 1; i < count; i++)
+        {
+            if (localDates[i] != localDates[i - 1])
+            {
+                returns[i] = 0m;
+            }
+        }
+
+        var flattenedCloses = new decimal[count];
+        flattenedCloses[count - 1] = ordered[count - 1].Close;
+        for (var i = count - 2; i >= 0; i--)
+        {
+            var inc = returns[i + 1];
+            flattenedCloses[i] = flattenedCloses[i + 1] / (1 + inc);
+        }
+
+        var result = new List<(DateTime TimestampUtc, decimal Close)>(count);
+        for (var i = 0; i < count; i++)
+        {
+            result.Add((ordered[i].TimestampUtc, flattenedCloses[i]));
+        }
+
         return result;
     }
 
