@@ -176,9 +176,6 @@ public class PriceFetcher
     private static TimeZoneInfo NewYorkZone => TimeZoneInfo.FindSystemTimeZoneById(
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York");
 
-    private static TimeZoneInfo CentralEuropeZone => TimeZoneInfo.FindSystemTimeZoneById(
-        RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Central European Standard Time" : "Europe/Berlin");
-
     private int PriceTimeframeMinute => Math.Max(1, _priceBarOptions.TimeframeMinute);
 
     private static List<(DateTime TimestampUtc, decimal Close)> RawNMin(List<HistClose> series, int minutes, string session, int offset)

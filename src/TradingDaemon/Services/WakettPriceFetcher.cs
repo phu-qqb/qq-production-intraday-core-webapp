@@ -68,7 +68,7 @@ public class WakettPriceFetcher
         _priceBarTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketPriceBar);
         _securityTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayCoreSecurity);
         _priceBarWindowQuery = $"SELECT SecurityId, BarTimeUtc FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset AND BarTimeUtc BETWEEN @StartUtc AND @EndUtc";
-        _priceBarSelectWithOffsetSql = $"SELECT SecurityId, BarTimeUtc, [Close] FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset";
+        _priceBarSelectWithOffsetSql = $"SELECT SecurityId, BarTimeUtc, [Close] FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds";
         _priceBarTimestampPresenceSql = $"SELECT SecurityId FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds AND BarTimeUtc = @BarTimeUtc";
         _stageDeleteSql = $"DELETE FROM {_stageHistCloseTable} WHERE BarTimeUtc = @BarTimeUtc AND SecurityId IN @SecurityIds";
         _stageInsertSql = $"INSERT INTO {_stageHistCloseTable} (SecurityId, BarTimeUtc, [Close]) VALUES (@SecurityId, @BarTimeUtc, @Close)";
@@ -1033,7 +1033,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
                 cancellationToken);
 
             var selectRaw = _priceBarSelectWithOffsetSql;
-            var existing = (await connection.QueryAsync<HistClose>(selectRaw, new { SecurityIds = securityKeys, MinuteOffset = minuteOffset }))
+            var existing = (await connection.QueryAsync<HistClose>(selectRaw, new { SecurityIds = securityKeys }))
                 .GroupBy(r => (r.SecurityId, r.BarTimeUtc))
                 .Select(g => g.Last())
                 .ToList();
