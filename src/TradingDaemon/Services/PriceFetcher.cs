@@ -170,7 +170,7 @@ public class PriceFetcher
     private static readonly Dictionary<string, (TimeZoneInfo Zone, TimeSpan Start, TimeSpan End)> SessionBounds = new()
     {
         ["US"] = (NewYorkZone, TimeSpan.Parse("09:00"), TimeSpan.Parse("15:59")),
-        ["EU"] = (CentralEuropeZone, TimeSpan.Parse("07:06"), TimeSpan.Parse("13:51"))
+        ["EU"] = (NewYorkZone, TimeSpan.Parse("02:00"), TimeSpan.Parse("08:59"))
     };
 
     private static TimeZoneInfo NewYorkZone => TimeZoneInfo.FindSystemTimeZoneById(
