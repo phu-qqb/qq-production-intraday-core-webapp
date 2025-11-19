@@ -105,12 +105,12 @@ public class WakettPriceFetcher
         var baseSymbols = symbolConfiguration.BaseSymbols;
         var missingSymbols = symbolConfiguration.MissingSymbols;
         var allSecurityIds = symbolConfiguration.AllSecurityIds;
-        var uploadSecurityIds = symbolConfiguration.NonBaseSecurityIds;
+        var uploadSecurityIds = symbolConfiguration.AllSecurityIds;
         var uploadSecurityIdSet = new HashSet<int>(uploadSecurityIds);
 
         if (uploadSecurityIds.Length == 0)
         {
-            _logger.LogInformation("No non-base Wakett securities require database uploads.");
+            _logger.LogInformation("No Wakett securities require database uploads.");
             return null;
         }
 
@@ -279,11 +279,11 @@ public class WakettPriceFetcher
         }
 
         var securityIds = symbolConfiguration.AllSecurityIds;
-        var uploadSecurityIds = symbolConfiguration.NonBaseSecurityIds;
+        var uploadSecurityIds = symbolConfiguration.AllSecurityIds;
 
         if (uploadSecurityIds.Length == 0)
         {
-            _logger.LogInformation("No non-base Wakett securities require database uploads.");
+            _logger.LogInformation("No Wakett securities require database uploads.");
             return true;
         }
 
@@ -647,12 +647,7 @@ public class WakettPriceFetcher
             .Distinct()
             .ToArray();
 
-        var nonBaseSecurityIds = missingSymbols
-            .Select(symbol => symbol.SecurityId)
-            .Distinct()
-            .ToArray();
-
-        return new SymbolConfiguration(baseSymbols, missingSymbols, allSecurityIds, nonBaseSecurityIds);
+        return new SymbolConfiguration(baseSymbols, missingSymbols, allSecurityIds);
     }
 
     private IReadOnlyList<CurrencyPair> LoadConfiguredBasePairs()
@@ -1214,8 +1209,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
     private sealed record SymbolConfiguration(
         IReadOnlyList<WakettSecuritySymbol> BaseSymbols,
         IReadOnlyList<WakettSecuritySymbol> MissingSymbols,
-        int[] AllSecurityIds,
-        int[] NonBaseSecurityIds);
+        int[] AllSecurityIds);
 
     private sealed record SecuritySymbolDefinition(int SecurityId, CurrencyPair Pair);
 
