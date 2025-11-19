@@ -175,4 +175,36 @@ public class PriceFetcherTests
         Assert.Contains(new TimeSpan(10, 0, 0), times);
         Assert.Contains(new TimeSpan(15, 0, 0), times);
     }
+
+    [Fact]
+    public void Flatten_ZeroesOvernightReturnsAndPreservesIntraday()
+    {
+        var raw = new List<(DateTime TimestampUtc, decimal Close)>
+        {
+            (new DateTime(2024, 1, 1, 10, 0, 0, DateTimeKind.Utc), 100m),
+            (new DateTime(2024, 1, 1, 11, 0, 0, DateTimeKind.Utc), 105m),
+            (new DateTime(2024, 1, 2, 10, 0, 0, DateTimeKind.Utc), 110m),
+            (new DateTime(2024, 1, 2, 11, 0, 0, DateTimeKind.Utc), 121m)
+        };
+
+        var zone = TimeZoneInfo.Utc;
+
+        var flat = (List<(DateTime TimestampUtc, decimal Close)>)typeof(PriceFetcher)
+            .GetMethod("Flatten", BindingFlags.NonPublic | BindingFlags.Static)!
+            .Invoke(null, new object[] { raw, zone })!;
+
+        static decimal ReturnBetween((DateTime TimestampUtc, decimal Close) prev, (DateTime TimestampUtc, decimal Close) next)
+            => prev.Close != 0 ? (next.Close - prev.Close) / prev.Close : 0m;
+
+        var expectedIntradayFirst = ReturnBetween(raw[0], raw[1]);
+        var expectedIntradaySecond = ReturnBetween(raw[2], raw[3]);
+
+        var flattenedFirst = ReturnBetween(flat[0], flat[1]);
+        var flattenedOvernight = ReturnBetween(flat[1], flat[2]);
+        var flattenedSecond = ReturnBetween(flat[2], flat[3]);
+
+        Assert.Equal(expectedIntradayFirst, flattenedFirst);
+        Assert.Equal(0m, flattenedOvernight);
+        Assert.Equal(expectedIntradaySecond, flattenedSecond);
+    }
 }
