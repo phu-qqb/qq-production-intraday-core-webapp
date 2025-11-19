@@ -14,12 +14,17 @@ GO
 ----------------------------------------------*/
 CREATE OR ALTER PROCEDURE [mkt_test].[LoadRawFromStage]
   @TimeframeMinute  SMALLINT,                   -- e.g. 60
-  @Source           NVARCHAR(32) = N'HistImport',
+  @Source           TINYINT = NULL,
   @FromUtc          DATETIME2(3) = NULL,        -- optional filter on BarTimeUtc (>=)
   @ToUtc            DATETIME2(3) = NULL         -- optional filter on BarTimeUtc (<)
 AS
 BEGIN
   SET NOCOUNT ON;
+
+  IF @Source IS NULL
+  BEGIN
+      THROW 50021, 'Source identifier is required.', 1;
+  END;
 
   -- Buffer rows to upsert into the duplicated price bar table
   DECLARE @Rows TABLE (
@@ -31,7 +36,7 @@ BEGIN
       [Low]           DECIMAL(18, 8) NOT NULL,
       [Close]         DECIMAL(18, 8) NOT NULL,
       Volume          BIGINT         NULL,
-      Source          NVARCHAR(32)   NOT NULL
+      Source          TINYINT        NOT NULL
   );
 
   ;WITH ImportDeDup AS (
