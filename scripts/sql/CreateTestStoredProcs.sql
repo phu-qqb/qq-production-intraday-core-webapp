@@ -192,18 +192,22 @@ BEGIN
       l.SecurityId,
       l.BarTimeUtc,
       @TimeframeMinute                AS TimeframeMinute,
-      l.CloseVal                      AS [Open],
-      l.CloseVal                      AS High,
-      l.CloseVal                      AS [Low],
-      l.CloseVal                      AS [Close],
-      CAST(NULL AS bigint)            AS Volume,
-      @Source                         AS Source,
-      CASE WHEN l.prev_ts IS NULL
-                OR DATEADD(MINUTE, @TimeframeMinute, l.prev_ts) <> l.BarTimeUtc
-           THEN 1 ELSE 0 END         AS IsSessionOpen,
-      CASE WHEN l.prev_ts IS NULL
-                OR DATEADD(MINUTE, @TimeframeMinute, l.prev_ts) <> l.BarTimeUtc
-           THEN NULL ELSE l.prev_close END AS PrevCloseInSess,
+      CAST(l.CloseVal AS decimal(18,8))      AS [Open],
+      CAST(l.CloseVal AS decimal(18,8))      AS High,
+      CAST(l.CloseVal AS decimal(18,8))      AS [Low],
+      CAST(l.CloseVal AS decimal(18,8))      AS [Close],
+      CAST(NULL AS bigint)                  AS Volume,
+      CAST(@Source AS nvarchar(32))         AS Source,
+      CAST(
+           CASE WHEN l.prev_ts IS NULL
+                     OR DATEADD(MINUTE, @TimeframeMinute, l.prev_ts) <> l.BarTimeUtc
+                THEN 1 ELSE 0 END
+           AS bit)                         AS IsSessionOpen,
+      CAST(
+           CASE WHEN l.prev_ts IS NULL
+                     OR DATEADD(MINUTE, @TimeframeMinute, l.prev_ts) <> l.BarTimeUtc
+                THEN NULL ELSE l.prev_close END
+           AS decimal(18,8))              AS PrevCloseInSess,
       @FlattenVersion                 AS FlattenVersion,
       SUSER_SNAME()                   AS CreatedBy,
       l.SessionCode                   AS SessionCode
