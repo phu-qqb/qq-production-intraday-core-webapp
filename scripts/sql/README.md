@@ -2,6 +2,15 @@
 
 This folder contains utility scripts for managing the Wakett and intraday database schema.
 
+## Creating staging tables on demand
+
+Use [`EnsureStageTables.sql`](./EnsureStageTables.sql) when provisioning a
+fresh environment. It checks for the `mkt.Stage_HistClose` and
+`mkt.Stage_HistClose_Flat` tables inside the currently selected database and
+creates them if they are missing. Run the script while connected to either the
+production or duplicated test database so the stage tables always exist before
+running the data loaders.
+
 ## Refreshing test tables from production
 
 The [`RefreshTestTables.sql`](./RefreshTestTables.sql) script truncates each test table and reloads it from the production equivalent so that the duplicated environment stays in sync. It:
