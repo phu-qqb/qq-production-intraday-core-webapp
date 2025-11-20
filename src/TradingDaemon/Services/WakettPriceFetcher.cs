@@ -1125,19 +1125,24 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
                 timestamp,
                 loadRawTimer.ElapsedMilliseconds);
 
-            var selectRaw = _priceBarSelectWithOffsetSql;
+            var windowStartUtc = DateTime.SpecifyKind(timestamp!.Value.Date.AddDays(-2), DateTimeKind.Utc);
+            var windowEndUtc = DateTime.SpecifyKind(timestamp.Value.Date.AddDays(1), DateTimeKind.Utc);
+
+            var selectRaw = $"{_priceBarSelectWithOffsetSql} AND BarTimeUtc BETWEEN @StartUtc AND @EndUtc";
             var queryExistingTimer = Stopwatch.StartNew();
-            var existing = (await connection.QueryAsync<HistClose>(selectRaw, new { SecurityIds = securityKeys }))
+            var existing = (await connection.QueryAsync<HistClose>(selectRaw, new { SecurityIds = securityKeys, StartUtc = windowStartUtc, EndUtc = windowEndUtc }))
                 .GroupBy(r => (r.SecurityId, r.BarTimeUtc))
                 .Select(g => g.Last())
                 .ToList();
 
             queryExistingTimer.Stop();
             _logger.LogInformation(
-                "[Wakett] Retrieved {Count} raw bars for flat processing of {TimestampUtc} in {ElapsedMs} ms.",
+                "[Wakett] Retrieved {Count} raw bars for flat processing of {TimestampUtc} in {ElapsedMs} ms using window {WindowStart} - {WindowEnd}.",
                 existing.Count,
                 timestamp,
-                queryExistingTimer.ElapsedMilliseconds);
+                queryExistingTimer.ElapsedMilliseconds,
+                windowStartUtc,
+                windowEndUtc);
 
             var seriesBySecurity = existing
                 .GroupBy(r => r.SecurityId)
