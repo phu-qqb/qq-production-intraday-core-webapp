@@ -114,6 +114,37 @@ public class PriceFetcherTests
     }
 
     [Fact]
+    public void RawNMin_UsesEasternTimeForEUUSSession()
+    {
+        var zoneId = RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
+            ? "Eastern Standard Time"
+            : "America/New_York";
+        var zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
+
+        DateTime EtLocal(int hour, int minute) => new DateTime(2024, 1, 2, hour, minute, 0, DateTimeKind.Unspecified);
+        DateTime ToUtc(int hour, int minute) => TimeZoneInfo.ConvertTimeToUtc(EtLocal(hour, minute), zone);
+
+        var series = new List<HistClose>
+        {
+            new HistClose { BarTimeUtc = ToUtc(1, 0), Close = 0.5m }, // 01:00 ET (pre session)
+            new HistClose { BarTimeUtc = ToUtc(2, 0), Close = 1m },   // 02:00 ET (session start)
+            new HistClose { BarTimeUtc = ToUtc(5, 0), Close = 2m },   // 05:00 ET (mid-session)
+            new HistClose { BarTimeUtc = ToUtc(11, 0), Close = 3m },  // 11:00 ET (session end bucket)
+            new HistClose { BarTimeUtc = ToUtc(12, 0), Close = 4m }   // 12:00 ET (post session)
+        };
+
+        var method = typeof(PriceFetcher).GetMethod("RawNMin", BindingFlags.NonPublic | BindingFlags.Static)!;
+        var result = (List<(DateTime TimestampUtc, decimal Close)>)method.Invoke(null, new object[] { series, 60, "EUUS", 0 })!;
+
+        var times = result.Select(r => TimeZoneInfo.ConvertTimeFromUtc(r.TimestampUtc, zone).TimeOfDay).ToList();
+
+        Assert.Contains(new TimeSpan(2, 0, 0), times);
+        Assert.Contains(new TimeSpan(11, 0, 0), times);
+        Assert.DoesNotContain(new TimeSpan(1, 0, 0), times);
+        Assert.DoesNotContain(new TimeSpan(12, 0, 0), times);
+    }
+
+    [Fact]
     public void Flatten_FiltersBarsToEUSession()
     {
         var series = new List<HistClose>
