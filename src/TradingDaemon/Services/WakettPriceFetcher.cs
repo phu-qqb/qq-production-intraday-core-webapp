@@ -32,7 +32,9 @@ public class WakettPriceFetcher
     private readonly string _priceBarWindowQuery;
     private readonly string _priceBarSelectWithOffsetSql;
     private readonly string _priceBarTimestampPresenceSql;
+    private readonly string _stageClearSql;
     private readonly string _stageDeleteSql;
+    private readonly string _flatStageClearSql;
     private readonly string _stageInsertSql;
     private readonly string _priceBarTable;
     private readonly string _securityTable;
@@ -70,7 +72,9 @@ public class WakettPriceFetcher
         _priceBarWindowQuery = $"SELECT SecurityId, BarTimeUtc FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset AND BarTimeUtc BETWEEN @StartUtc AND @EndUtc";
         _priceBarSelectWithOffsetSql = $"SELECT SecurityId, BarTimeUtc, [Close] FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds";
         _priceBarTimestampPresenceSql = $"SELECT SecurityId FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds AND BarTimeUtc = @BarTimeUtc";
+        _stageClearSql = $"DELETE FROM {_stageHistCloseTable}";
         _stageDeleteSql = $"DELETE FROM {_stageHistCloseTable} WHERE BarTimeUtc = @BarTimeUtc AND SecurityId IN @SecurityIds";
+        _flatStageClearSql = $"DELETE FROM {_flatBarStagingTable}";
         _stageInsertSql = $"INSERT INTO {_stageHistCloseTable} (SecurityId, BarTimeUtc, [Close]) VALUES (@SecurityId, @BarTimeUtc, @Close)";
     }
 
@@ -113,6 +117,8 @@ public class WakettPriceFetcher
             _logger.LogInformation("No Wakett securities require database uploads.");
             return null;
         }
+
+        await ClearStageTablesAsync(cancellationToken);
 
         var missingBars = new List<(int MinuteOffset, DateTime BarTimeUtc)>();
         foreach (var minuteOffset in PriceMinuteOffsets)
@@ -1097,6 +1103,22 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
                 await _priceProcedures.LoadFlatFromMinimalAsync(connection, build.TimeframeMinute, cancellationToken);
             }
         }
+    }
+
+    private async Task ClearStageTablesAsync(CancellationToken cancellationToken)
+    {
+        using var connection = _context.CreateConnection();
+        if (connection is DbConnection dbConnection)
+        {
+            await dbConnection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            connection.Open();
+        }
+
+        await connection.ExecuteAsync(_stageClearSql);
+        await connection.ExecuteAsync(_flatStageClearSql);
     }
 
     private int PriceTimeframeMinute => Math.Max(1, _priceBarOptions.TimeframeMinute);
