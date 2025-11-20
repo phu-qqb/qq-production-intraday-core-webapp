@@ -118,7 +118,9 @@ public class WakettPriceFetcher
             return null;
         }
 
-        await ClearStageTablesAsync(cancellationToken);
+        using var connection = await OpenConnectionAsync(cancellationToken);
+
+        await ClearStageTablesAsync(connection, cancellationToken);
 
         var missingBars = new List<(int MinuteOffset, DateTime BarTimeUtc)>();
         foreach (var minuteOffset in PriceMinuteOffsets)
@@ -126,6 +128,7 @@ public class WakettPriceFetcher
             var missingForOffset = await FindMissingBarTimestampsAsync(
                 uploadSecurityIds,
                 minuteOffset,
+                connection,
                 cancellationToken);
             missingBars.AddRange(missingForOffset.Select(bar => (minuteOffset, bar)));
         }
@@ -145,7 +148,7 @@ public class WakettPriceFetcher
             return null;
         }
 
-        var securityPairs = await LoadSecurityPairsAsync(allSecurityIds, cancellationToken);
+        var securityPairs = await LoadSecurityPairsAsync(allSecurityIds, connection, cancellationToken);
         var wakettSymbols = BuildWakettRequestSymbols(baseSymbols);
         WakettPriceUploadResult? lastResult = null;
 
@@ -174,7 +177,11 @@ public class WakettPriceFetcher
                 continue;
             }
 
-            if (!await ArePricesMissingForTimestampAsync(uploadSecurityIds, expectedBarTimestampUtc, cancellationToken))
+            if (!await ArePricesMissingForTimestampAsync(
+                uploadSecurityIds,
+                expectedBarTimestampUtc,
+                connection,
+                cancellationToken))
             {
                 _logger.LogInformation(
                     "Skipping Wakett price request for timestamp {TimestampUtc} because all price bars already exist.",
@@ -259,7 +266,7 @@ public class WakettPriceFetcher
                 continue;
             }
 
-            await StoreAsync(dbRecords.Values, minuteOffset, cancellationToken);
+            await StoreAsync(connection, dbRecords.Values, minuteOffset, cancellationToken);
 
             var ordered = uploadItems.Values
                 .OrderBy(i => i.SecurityId)
@@ -297,9 +304,15 @@ public class WakettPriceFetcher
         var historicalWindowStart = nowUtc.Subtract(HistoricalWindow).UtcDateTime;
 
         var missingByOffset = new List<(int MinuteOffset, IReadOnlyList<DateTime> Missing)>();
+        using var connection = await OpenConnectionAsync(cancellationToken);
+
         foreach (var minuteOffset in PriceMinuteOffsets)
         {
-            var missingBars = await FindMissingBarTimestampsAsync(uploadSecurityIds, minuteOffset, cancellationToken);
+            var missingBars = await FindMissingBarTimestampsAsync(
+                uploadSecurityIds,
+                minuteOffset,
+                connection,
+                cancellationToken);
             var relevantMissing = missingBars
                 .Where(bar => bar.AddMinutes(minuteOffset) >= historicalWindowStart)
                 .ToList();
@@ -784,6 +797,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
     private async Task<IReadOnlyList<DateTime>> FindMissingBarTimestampsAsync(
         IReadOnlyCollection<int> securityIds,
         int minuteOffset,
+        IDbConnection? connection,
         CancellationToken cancellationToken)
     {
         if (securityIds.Count == 0)
@@ -802,63 +816,67 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         var startUtc = startHourUtc.AddMinutes(minuteOffset);
         var endUtc = endHourUtc.AddMinutes(minuteOffset);
 
-        using var connection = _context.CreateConnection();
-        if (connection is DbConnection dbConnection)
-        {
-            await dbConnection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            connection.Open();
-        }
+        var ownsConnection = connection is null;
+        connection ??= await OpenConnectionAsync(cancellationToken);
 
-        var rows = await connection.QueryAsync<(int SecurityId, DateTime BarTimeUtc)>(
-        _priceBarWindowQuery,
-        new
+        try
         {
-            SecurityIds = securityIds.ToArray(),
-            StartUtc = startUtc,
-            EndUtc = endUtc,
-            MinuteOffset = minuteOffset
-        });
+            var rows = await connection.QueryAsync<(int SecurityId, DateTime BarTimeUtc)>(
+                _priceBarWindowQuery,
+                new
+                {
+                    SecurityIds = securityIds.ToArray(),
+                    StartUtc = startUtc,
+                    EndUtc = endUtc,
+                    MinuteOffset = minuteOffset
+                });
 
-        var existing = new Dictionary<DateTime, HashSet<int>>();
-        foreach (var row in rows)
-        {
-            var normalized = DateTime.SpecifyKind(row.BarTimeUtc, DateTimeKind.Utc);
-            normalized = new DateTime(
-                normalized.Year,
-                normalized.Month,
-                normalized.Day,
-                normalized.Hour,
-                0,
-                0,
-                DateTimeKind.Utc);
-
-            if (!existing.TryGetValue(normalized, out var set))
+            var existing = new Dictionary<DateTime, HashSet<int>>();
+            foreach (var row in rows)
             {
-                set = new HashSet<int>();
-                existing[normalized] = set;
+                var normalized = DateTime.SpecifyKind(row.BarTimeUtc, DateTimeKind.Utc);
+                normalized = new DateTime(
+                    normalized.Year,
+                    normalized.Month,
+                    normalized.Day,
+                    normalized.Hour,
+                    0,
+                    0,
+                    DateTimeKind.Utc);
+
+                if (!existing.TryGetValue(normalized, out var set))
+                {
+                    set = new HashSet<int>();
+                    existing[normalized] = set;
+                }
+
+                set.Add(row.SecurityId);
             }
 
-            set.Add(row.SecurityId);
-        }
-
-        var missing = new List<DateTime>();
-        foreach (var timestamp in expectedTimestamps)
-        {
-            if (!existing.TryGetValue(timestamp, out var set) || set.Count < securityIds.Count)
+            var missing = new List<DateTime>();
+            foreach (var timestamp in expectedTimestamps)
             {
-                missing.Add(timestamp);
+                if (!existing.TryGetValue(timestamp, out var set) || set.Count < securityIds.Count)
+                {
+                    missing.Add(timestamp);
+                }
+            }
+
+            return missing;
+        }
+        finally
+        {
+            if (ownsConnection)
+            {
+                connection.Dispose();
             }
         }
-
-        return missing;
     }
 
     private async Task<bool> ArePricesMissingForTimestampAsync(
         IReadOnlyCollection<int> securityIds,
         DateTime expectedBarTimestampUtc,
+        IDbConnection? connection,
         CancellationToken cancellationToken)
     {
         if (securityIds.Count == 0)
@@ -867,35 +885,38 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         }
 
         var ids = securityIds.ToArray();
-        using var connection = _context.CreateConnection();
-        if (connection is DbConnection dbConnection)
-        {
-            await dbConnection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            connection.Open();
-        }
+        var ownsConnection = connection is null;
+        connection ??= await OpenConnectionAsync(cancellationToken);
 
-        var rows = await connection.QueryAsync<int>(
-            _priceBarTimestampPresenceSql,
-            new
-            {
-                SecurityIds = ids,
-                BarTimeUtc = expectedBarTimestampUtc
-            });
-
-        var present = new HashSet<int>();
-        foreach (var securityId in rows)
+        try
         {
-            present.Add(securityId);
-            if (present.Count == ids.Length)
+            var rows = await connection.QueryAsync<int>(
+                _priceBarTimestampPresenceSql,
+                new
+                {
+                    SecurityIds = ids,
+                    BarTimeUtc = expectedBarTimestampUtc
+                });
+
+            var present = new HashSet<int>();
+            foreach (var securityId in rows)
             {
-                return false;
+                present.Add(securityId);
+                if (present.Count == ids.Length)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+        finally
+        {
+            if (ownsConnection)
+            {
+                connection.Dispose();
             }
         }
-
-        return true;
     }
 
     internal static IReadOnlyList<DateTime> BuildExpectedBarHours(DateTime endHourUtc, int count)
@@ -951,6 +972,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
     private async Task<Dictionary<int, CurrencyPair>> LoadSecurityPairsAsync(
         IEnumerable<int> securityIds,
+        IDbConnection? connection,
         CancellationToken cancellationToken)
     {
         var ids = securityIds.Distinct().ToArray();
@@ -958,30 +980,34 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
             return new Dictionary<int, CurrencyPair>();
 
         var sql = $"SELECT SecurityId, BloombergTicker FROM {_securityTable} WHERE SecurityId IN @Ids";
-        using var connection = _context.CreateConnection();
-        if (connection is DbConnection dbConnection)
-        {
-            await dbConnection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            connection.Open();
-        }
+        var ownsConnection = connection is null;
+        connection ??= await OpenConnectionAsync(cancellationToken);
 
         var pairs = new Dictionary<int, CurrencyPair>();
-        var rows = await connection.QueryAsync<(int SecurityId, string? Ticker)>(sql, new { Ids = ids });
-        foreach (var row in rows)
+        try
         {
-            if (!string.IsNullOrWhiteSpace(row.Ticker) && TryParsePair(row.Ticker, out var pair))
+            var rows = await connection.QueryAsync<(int SecurityId, string? Ticker)>(sql, new { Ids = ids });
+            foreach (var row in rows)
             {
-                pairs[row.SecurityId] = pair;
+                if (!string.IsNullOrWhiteSpace(row.Ticker) && TryParsePair(row.Ticker, out var pair))
+                {
+                    pairs[row.SecurityId] = pair;
+                }
+            }
+
+            return pairs;
+        }
+        finally
+        {
+            if (ownsConnection)
+            {
+                connection.Dispose();
             }
         }
-
-        return pairs;
     }
 
     private async Task StoreAsync(
+        IDbConnection connection,
         IEnumerable<DbPriceRecord> records,
         int minuteOffset,
         CancellationToken cancellationToken)
@@ -992,16 +1018,6 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
             .Select(r => r.SecurityKey)
             .Distinct()
             .ToArray();
-
-        using var connection = _context.CreateConnection();
-        if (connection is DbConnection dbConnection)
-        {
-            await dbConnection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            connection.Open();
-        }
 
         IDbTransaction? transaction = null;
 
@@ -1105,9 +1121,9 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         }
     }
 
-    private async Task ClearStageTablesAsync(CancellationToken cancellationToken)
+    private async Task<IDbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
     {
-        using var connection = _context.CreateConnection();
+        var connection = _context.CreateConnection();
         if (connection is DbConnection dbConnection)
         {
             await dbConnection.OpenAsync(cancellationToken).ConfigureAwait(false);
@@ -1117,6 +1133,11 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
             connection.Open();
         }
 
+        return connection;
+    }
+
+    private async Task ClearStageTablesAsync(IDbConnection connection, CancellationToken cancellationToken)
+    {
         await connection.ExecuteAsync(_stageClearSql);
         await connection.ExecuteAsync(_flatStageClearSql);
     }
