@@ -85,41 +85,25 @@ public class OrderSender
     public async Task SendOrdersAsync(double? aumOverride = null, CancellationToken cancellationToken = default)
     {
         using var connection = _context.CreateConnection();
-        var latest = await LoadLatestNettedWeightsAsync(connection, cancellationToken);
+        var modelDefinitions = LoadModelDefinitions();
+        var modelIds = modelDefinitions.Keys.ToArray();
+
+        var latest = await LoadLatestNettedWeightsAsync(connection, modelIds, cancellationToken);
         if (latest.Count == 0)
         {
-            _logger.LogWarning("No netted weights found for model {ModelId}.", TargetModelId);
+            _logger.LogWarning("No netted weights found for models {ModelIds}.", string.Join(", ", modelIds));
             return;
         }
 
-        var latestBarTimeUtc = latest[0].BarTimeUtc;
         var utcNow = _timeProvider.GetUtcNow().UtcDateTime;
-        var barInterval = ResolveBarInterval(latest, latestBarTimeUtc);
-
-        if (!IsBarRecentEnough(latestBarTimeUtc, utcNow, barInterval))
+        var modelSnapshots = BuildModelSnapshots(latest, modelDefinitions, utcNow);
+        if (modelSnapshots.Count == 0)
         {
+            _logger.LogWarning("No recent netted weights available for configured models {ModelIds}.", string.Join(", ", modelIds));
             return;
         }
 
-        var latestWeights = latest.Where(w => w.BarTimeUtc == latestBarTimeUtc).ToList();
-        var session = ResolveTradingSession(latestBarTimeUtc);
-        var schedule = await LoadModelScheduleAsync(connection, cancellationToken);
-        var orderTimestampUtc = CalculateOrderTimestamp(
-            latestBarTimeUtc,
-            barInterval,
-            session,
-            schedule?.Offset,
-            schedule?.BarSize);
-
-        var latestBarLocal = TimeZoneInfo.ConvertTimeFromUtc(latestBarTimeUtc, NewYorkZone);
-        var orderTimestampLocal = TimeZoneInfo.ConvertTimeFromUtc(orderTimestampUtc, NewYorkZone);
-        if (orderTimestampLocal.Date > latestBarLocal.Date)
-        {
-            _logger.LogInformation(
-                "Calculated Wakett order timestamp {OrderTimestamp} falls on the next trading day relative to the latest bar {BarTimestamp}. Proceeding with submission.",
-                orderTimestampLocal,
-                latestBarLocal);
-        }
+        var orderTimestampUtc = await ResolveOrderTimestampAsync(connection, modelSnapshots, utcNow, cancellationToken);
 
         var symbolMap = await LoadSymbolMapAsync(connection, cancellationToken);
         if (symbolMap.Count == 0)
@@ -128,7 +112,8 @@ public class OrderSender
             return;
         }
 
-        var builtOrders = BuildOrders(latestWeights, symbolMap, orderTimestampUtc);
+        var aggregatedWeights = AggregateModelWeights(modelSnapshots, orderTimestampUtc);
+        var builtOrders = BuildOrders(aggregatedWeights, symbolMap, orderTimestampUtc);
         var isFlatOrderRequest = builtOrders.Count == 0
             || builtOrders.All(order => order.Order.size?.value == 0d);
         if (isFlatOrderRequest)
@@ -248,6 +233,141 @@ public class OrderSender
         var utc = DateTime.SpecifyKind(orderTimestampUtc, DateTimeKind.Utc);
         var local = TimeZoneInfo.ConvertTimeFromUtc(utc, NewYorkZone);
         return $"QQB-{securityId}-{local:yyyyMMddHHmm}";
+    }
+
+    private IReadOnlyDictionary<int, ModelDefinition> LoadModelDefinitions()
+    {
+        var definitions = new Dictionary<int, ModelDefinition>();
+        var defaultTimeframe = Math.Max(1, _priceBarOptions.TimeframeMinute);
+
+        foreach (var model in _configuration.GetSection("Programmes").GetChildren())
+        {
+            if (!int.TryParse(model["ModelId"], out var modelId) || modelId <= 0)
+            {
+                continue;
+            }
+
+            int? timeframeMinutes = null;
+            if (int.TryParse(model["Timeframe"], NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedTimeframe)
+                && parsedTimeframe > 0)
+            {
+                timeframeMinutes = parsedTimeframe;
+            }
+
+            var session = model["Session"];
+
+            definitions[modelId] = new ModelDefinition(modelId, timeframeMinutes ?? defaultTimeframe, session);
+        }
+
+        if (definitions.Count == 0)
+        {
+            definitions[TargetModelId] = new ModelDefinition(TargetModelId, defaultTimeframe, null);
+        }
+
+        return definitions;
+    }
+
+    private List<ModelSnapshot> BuildModelSnapshots(
+        IReadOnlyList<NettedWeightRow> weights,
+        IReadOnlyDictionary<int, ModelDefinition> modelDefinitions,
+        DateTime utcNow)
+    {
+        var snapshots = new List<ModelSnapshot>();
+
+        foreach (var group in weights.GroupBy(w => w.ModelId))
+        {
+            if (!group.Any())
+            {
+                continue;
+            }
+
+            var definition = modelDefinitions.TryGetValue(group.Key, out var modelDefinition)
+                ? modelDefinition
+                : new ModelDefinition(group.Key, null, null);
+
+            var ordered = group.OrderByDescending(w => w.BarTimeUtc).ToList();
+            var latestBarTimeUtc = ordered[0].BarTimeUtc;
+            var barInterval = ResolveBarInterval(ordered, latestBarTimeUtc, definition.TimeframeMinutes);
+
+            if (!IsBarRecentEnough(latestBarTimeUtc, utcNow, barInterval, definition.Session, group.Key))
+            {
+                continue;
+            }
+
+            var latestWeights = ordered.Where(w => w.BarTimeUtc == latestBarTimeUtc).ToList();
+            snapshots.Add(new ModelSnapshot(group.Key, definition.Session, definition.TimeframeMinutes, barInterval, latestBarTimeUtc, latestWeights));
+        }
+
+        return snapshots;
+    }
+
+    private static IReadOnlyList<NettedWeightRow> AggregateModelWeights(
+        IReadOnlyList<ModelSnapshot> snapshots,
+        DateTime orderTimestampUtc)
+    {
+        var aggregated = new Dictionary<int, decimal>();
+
+        foreach (var snapshot in snapshots)
+        {
+            foreach (var weight in snapshot.LatestWeights)
+            {
+                aggregated.TryGetValue(weight.SecurityId, out var existing);
+                aggregated[weight.SecurityId] = existing + weight.Weight;
+            }
+        }
+
+        return aggregated
+            .OrderBy(kvp => kvp.Key)
+            .Select(kvp => new NettedWeightRow
+            {
+                SecurityId = kvp.Key,
+                ModelId = TargetModelId,
+                BarTimeUtc = orderTimestampUtc,
+                ModelRunId = 0,
+                Weight = kvp.Value
+            })
+            .ToList();
+    }
+
+    private async Task<DateTime> ResolveOrderTimestampAsync(
+        IDbConnection connection,
+        IReadOnlyList<ModelSnapshot> snapshots,
+        DateTime utcNow,
+        CancellationToken cancellationToken)
+    {
+        var maxBarTimeUtc = snapshots.Max(snapshot => snapshot.BarTimeUtc);
+        var maxBarLocal = TimeZoneInfo.ConvertTimeFromUtc(maxBarTimeUtc, NewYorkZone);
+        var nowLocal = TimeZoneInfo.ConvertTimeFromUtc(utcNow, NewYorkZone);
+
+        if (maxBarLocal.Date < nowLocal.Date)
+        {
+            var anchor = snapshots
+                .OrderBy(snapshot => snapshot.BarInterval)
+                .ThenBy(snapshot => snapshot.ModelId)
+                .First();
+
+            var schedule = await LoadModelScheduleAsync(connection, anchor.ModelId, cancellationToken);
+            var anchorSession = anchor.SessionKey ?? ResolveTradingSession(maxBarTimeUtc);
+            var calculated = CalculateOrderTimestamp(
+                maxBarTimeUtc,
+                anchor.BarInterval,
+                anchorSession,
+                schedule?.Offset,
+                schedule?.BarSize);
+
+            var calculatedLocal = TimeZoneInfo.ConvertTimeFromUtc(calculated, NewYorkZone);
+            if (calculatedLocal.Date > maxBarLocal.Date)
+            {
+                _logger.LogInformation(
+                    "Calculated Wakett order timestamp {OrderTimestamp} falls on the next trading day relative to the latest bar {BarTimestamp}. Proceeding with submission.",
+                    calculatedLocal,
+                    maxBarLocal);
+            }
+
+            return calculated;
+        }
+
+        return maxBarTimeUtc;
     }
 
     private async Task PersistOrderResponseAsync(
@@ -804,7 +924,10 @@ VALUES
         return candidateDate + TimeSpan.FromMinutes(minuteOfDay);
     }
 
-    private TimeSpan ResolveBarInterval(IReadOnlyList<NettedWeightRow> weights, DateTime latestBarTimeUtc)
+    private TimeSpan ResolveBarInterval(
+        IReadOnlyList<NettedWeightRow> weights,
+        DateTime latestBarTimeUtc,
+        int? configuredMinutes = null)
     {
         foreach (var row in weights)
         {
@@ -818,20 +941,17 @@ VALUES
             }
         }
 
+        if (configuredMinutes is > 0)
+        {
+            return TimeSpan.FromMinutes(configuredMinutes.Value);
+        }
+
         var configured = Environment.GetEnvironmentVariable("WAKETT_BAR_INTERVAL_MINUTES")
             ?? _configuration["ExternalApis:WakettApi:BarIntervalMinutes"];
 
         if (int.TryParse(configured, NumberStyles.Integer, CultureInfo.InvariantCulture, out var minutes) && minutes > 0)
         {
             return TimeSpan.FromMinutes(minutes);
-        }
-
-        var programme = _configuration.GetSection("Programmes").GetChildren()
-            .FirstOrDefault(section => int.TryParse(section["ModelId"], out var id) && id == TargetModelId);
-
-        if (programme is not null && int.TryParse(programme["Timeframe"], NumberStyles.Integer, CultureInfo.InvariantCulture, out var programmeMinutes) && programmeMinutes > 0)
-        {
-            return TimeSpan.FromMinutes(programmeMinutes);
         }
 
         var fallbackMinutes = Math.Max(1, _priceBarOptions.TimeframeMinute);
@@ -915,21 +1035,27 @@ VALUES
 
     protected virtual async Task<IReadOnlyList<NettedWeightRow>> LoadLatestNettedWeightsAsync(
         IDbConnection connection,
+        IReadOnlyCollection<int> modelIds,
         CancellationToken cancellationToken)
     {
-        var sql = $@"SELECT TOP (1000)
+        if (modelIds.Count == 0)
+        {
+            return Array.Empty<NettedWeightRow>();
+        }
+
+        var sql = $@"SELECT TOP (5000)
     nw.SecurityId,
     nw.ModelId,
     nw.BarTimeUtc,
     nw.ModelRunId,
     nw.Weight
 FROM {_nettedWeightTable} nw
-WHERE nw.ModelId = @ModelId
+WHERE nw.ModelId IN @ModelIds
 ORDER BY nw.BarTimeUtc DESC, nw.SecurityId";
 
         var definition = new CommandDefinition(
             sql,
-            new { ModelId = TargetModelId },
+            new { ModelIds = modelIds },
             cancellationToken: cancellationToken);
 
         var rows = await connection.QueryAsync<NettedWeightRow>(definition);
@@ -938,6 +1064,7 @@ ORDER BY nw.BarTimeUtc DESC, nw.SecurityId";
 
     protected virtual async Task<ModelScheduleRow?> LoadModelScheduleAsync(
         IDbConnection connection,
+        int modelId,
         CancellationToken cancellationToken)
     {
         var sql = $@"SELECT TOP (1)
@@ -949,7 +1076,7 @@ ORDER BY ModelId";
 
         var definition = new CommandDefinition(
             sql,
-            new { ModelId = TargetModelId },
+            new { ModelId = modelId },
             cancellationToken: cancellationToken);
 
         var row = await connection.QueryFirstOrDefaultAsync<ModelScheduleRow>(definition);
@@ -981,7 +1108,12 @@ ORDER BY TradingLimitId DESC;";
         return row;
     }
 
-    private bool IsBarRecentEnough(DateTime barTimeUtc, DateTime utcNow, TimeSpan barInterval)
+    private bool IsBarRecentEnough(
+        DateTime barTimeUtc,
+        DateTime utcNow,
+        TimeSpan barInterval,
+        string? sessionKey = null,
+        int? modelId = null)
     {
         var zone = CentralEuropeZone;
         var barLocal = TimeZoneInfo.ConvertTimeFromUtc(barTimeUtc, zone);
@@ -1001,8 +1133,27 @@ ORDER BY TradingLimitId DESC;";
 
         if (utcNow - barTimeUtc > allowedStaleness)
         {
+            var sessionKeyNormalized = sessionKey?.Trim().ToUpperInvariant();
+            if (!string.IsNullOrWhiteSpace(sessionKeyNormalized) && SessionBounds.TryGetValue(sessionKeyNormalized, out var bounds))
+            {
+                var barLocalNy = TimeZoneInfo.ConvertTimeFromUtc(barTimeUtc, NewYorkZone);
+                var nowLocalNy = TimeZoneInfo.ConvertTimeFromUtc(utcNow, NewYorkZone);
+                var (_, sessionEnd) = GetSessionWindow(barLocalNy, bounds);
+
+                if (nowLocalNy > sessionEnd)
+                {
+                    _logger.LogInformation(
+                        "Using latest available netted weights from {BarTimeUtc:O} for model {ModelId} after session end {SessionEndLocal:O}.",
+                        barTimeUtc,
+                        modelId ?? TargetModelId,
+                        sessionEnd);
+                    return true;
+                }
+            }
+
             _logger.LogWarning(
-                "Latest netted weights are stale. Last bar: {BarTimeUtc:O}, now: {NowUtc:O}.",
+                "Latest netted weights are stale for model {ModelId}. Last bar: {BarTimeUtc:O}, now: {NowUtc:O}.",
+                modelId ?? TargetModelId,
                 barTimeUtc,
                 utcNow);
             return false;
@@ -1420,6 +1571,16 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
             exposures[currency] = updated;
         }
     }
+
+    private sealed record ModelDefinition(int ModelId, int? TimeframeMinutes, string? Session);
+
+    private sealed record ModelSnapshot(
+        int ModelId,
+        string? SessionKey,
+        int? TimeframeMinutes,
+        TimeSpan BarInterval,
+        DateTime BarTimeUtc,
+        IReadOnlyList<NettedWeightRow> LatestWeights);
 
     private sealed record SymbolInfo(int SecurityId, string Symbol, string BaseCurrency, string QuoteCurrency)
     {
