@@ -1125,34 +1125,33 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
                 timestamp,
                 loadRawTimer.ElapsedMilliseconds);
 
-            var windowStartUtc = DateTime.SpecifyKind(timestamp!.Value.Date.AddDays(-2), DateTimeKind.Utc);
-            var windowEndUtc = DateTime.SpecifyKind(timestamp.Value.Date.AddDays(1), DateTimeKind.Utc);
-
-            var selectRaw = $"{_priceBarSelectWithOffsetSql} AND BarTimeUtc BETWEEN @StartUtc AND @EndUtc";
-            var queryExistingTimer = Stopwatch.StartNew();
-            var existing = (await connection.QueryAsync<HistClose>(selectRaw, new { SecurityIds = securityKeys, StartUtc = windowStartUtc, EndUtc = windowEndUtc }))
-                .GroupBy(r => (r.SecurityId, r.BarTimeUtc))
-                .Select(g => g.Last())
-                .ToList();
-
-            queryExistingTimer.Stop();
-            _logger.LogInformation(
-                "[Wakett] Retrieved {Count} raw bars for flat processing of {TimestampUtc} in {ElapsedMs} ms using window {WindowStart} - {WindowEnd}.",
-                existing.Count,
-                timestamp,
-                queryExistingTimer.ElapsedMilliseconds,
-                windowStartUtc,
-                windowEndUtc);
-
-            var seriesBySecurity = existing
-                .GroupBy(r => r.SecurityId)
-                .Select(g => new { SecurityId = g.Key, Series = g.OrderBy(r => r.BarTimeUtc).ToList() })
-                .ToList();
-
             var flatBarBuilds = FlatBarBuildSpecificationFactory.CreateDefault(PriceTimeframeMinute, minuteOffset);
-
             foreach (var build in flatBarBuilds)
             {
+                var (windowStartUtc, windowEndUtc) = GetFlatBarWindow(timestamp!.Value, build.TimeframeMinute);
+                var selectRaw = $"{_priceBarSelectWithOffsetSql} AND BarTimeUtc BETWEEN @StartUtc AND @EndUtc";
+                var queryExistingTimer = Stopwatch.StartNew();
+                var existing = (await connection.QueryAsync<HistClose>(selectRaw, new { SecurityIds = securityKeys, StartUtc = windowStartUtc, EndUtc = windowEndUtc }))
+                    .GroupBy(r => (r.SecurityId, r.BarTimeUtc))
+                    .Select(g => g.Last())
+                    .ToList();
+
+                queryExistingTimer.Stop();
+                _logger.LogInformation(
+                    "[Wakett] Retrieved {Count} raw bars for flat processing of {TimestampUtc} in {ElapsedMs} ms using window {WindowStart} - {WindowEnd} (tf {Timeframe}m offset {Offset}).",
+                    existing.Count,
+                    timestamp,
+                    queryExistingTimer.ElapsedMilliseconds,
+                    windowStartUtc,
+                    windowEndUtc,
+                    build.TimeframeMinute,
+                    build.OffsetMinute);
+
+                var seriesBySecurity = existing
+                    .GroupBy(r => r.SecurityId)
+                    .Select(g => new { SecurityId = g.Key, Series = g.OrderBy(r => r.BarTimeUtc).ToList() })
+                    .ToList();
+
                 var buildTimer = Stopwatch.StartNew();
                 var flatRecords = new List<FlatPrice>();
                 foreach (var grp in seriesBySecurity)
@@ -1258,6 +1257,21 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
     }
 
     private int PriceTimeframeMinute => Math.Max(1, _priceBarOptions.TimeframeMinute);
+
+    private static (DateTime WindowStartUtc, DateTime WindowEndUtc) GetFlatBarWindow(DateTime timestampUtc, int timeframeMinute)
+    {
+        var lookbackDays = timeframeMinute switch
+        {
+            60 => 160,
+            30 => 80,
+            15 => 40,
+            _ => 40
+        };
+
+        var windowStartUtc = DateTime.SpecifyKind(timestampUtc.Date.AddDays(-lookbackDays), DateTimeKind.Utc);
+        var windowEndUtc = DateTime.SpecifyKind(timestampUtc.Date.AddDays(1), DateTimeKind.Utc);
+        return (windowStartUtc, windowEndUtc);
+    }
 
 
     private static readonly Dictionary<string, (TimeZoneInfo Zone, TimeSpan Start, TimeSpan End)> SessionBounds = new()
