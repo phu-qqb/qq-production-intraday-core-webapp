@@ -14,7 +14,7 @@
                 "--universe", "INFX1",
                 "--timeframe", "15",
                 "--secret-name", "qq-intraday-test-credentials",
-                "--session","EU",
+                "--session","US",
                 "--start", "2022-01-01"
             ]
         }
