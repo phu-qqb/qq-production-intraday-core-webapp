@@ -26,7 +26,9 @@ public class WeightCalculator
             ["US"] = new SessionInfo(ResolveTimeZone("Eastern Standard Time", "America/New_York"),
                 TimeSpan.Parse("09:00"), TimeSpan.Parse("15:59")),
             ["EU"] = new SessionInfo(ResolveTimeZone("Eastern Standard Time", "America/New_York"),
-                TimeSpan.Parse("02:00"), TimeSpan.Parse("08:59"))
+                TimeSpan.Parse("02:00"), TimeSpan.Parse("08:59")),
+            ["EUUS"] = new SessionInfo(ResolveTimeZone("Eastern Standard Time", "America/New_York"),
+                TimeSpan.Parse("02:00"), TimeSpan.Parse("11:59"))
         };
 
     public WeightCalculator(
