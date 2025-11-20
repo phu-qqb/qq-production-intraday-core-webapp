@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Runtime.InteropServices;
@@ -106,6 +107,7 @@ public class WakettPriceFetcher
             return null;
         }
 
+        var fetchStopwatch = Stopwatch.StartNew();
         var baseSymbols = symbolConfiguration.BaseSymbols;
         var missingSymbols = symbolConfiguration.MissingSymbols;
         var allSecurityIds = symbolConfiguration.AllSecurityIds;
@@ -120,18 +122,36 @@ public class WakettPriceFetcher
 
         using var connection = await OpenConnectionAsync(cancellationToken);
 
+        _logger.LogInformation("[Wakett] Beginning fetch cycle for {Count} securities.", uploadSecurityIds.Length);
+
+        var stageStopwatch = Stopwatch.StartNew();
         await ClearStageTablesAsync(connection, cancellationToken);
+        stageStopwatch.Stop();
+        _logger.LogInformation("[Wakett] Cleared staging tables in {ElapsedMs} ms.", stageStopwatch.ElapsedMilliseconds);
 
         var missingBars = new List<(int MinuteOffset, DateTime BarTimeUtc)>();
+        var missingDetection = Stopwatch.StartNew();
         foreach (var minuteOffset in PriceMinuteOffsets)
         {
+            var offsetTimer = Stopwatch.StartNew();
             var missingForOffset = await FindMissingBarTimestampsAsync(
                 uploadSecurityIds,
                 minuteOffset,
                 connection,
                 cancellationToken);
             missingBars.AddRange(missingForOffset.Select(bar => (minuteOffset, bar)));
+            offsetTimer.Stop();
+            _logger.LogInformation(
+                "[Wakett] Missing scan for offset {Offset} found {MissingCount} gaps in {ElapsedMs} ms.",
+                minuteOffset,
+                missingForOffset.Count,
+                offsetTimer.ElapsedMilliseconds);
         }
+        missingDetection.Stop();
+        _logger.LogInformation(
+            "[Wakett] Completed missing-bar discovery across {OffsetCount} offsets in {ElapsedMs} ms.",
+            PriceMinuteOffsets.Count,
+            missingDetection.ElapsedMilliseconds);
 
         var nowUtc = DateTimeOffset.UtcNow;
         var historicalWindowStart = nowUtc.Subtract(HistoricalWindow);
@@ -148,13 +168,20 @@ public class WakettPriceFetcher
             return null;
         }
 
+        var loadPairsTimer = Stopwatch.StartNew();
         var securityPairs = await LoadSecurityPairsAsync(allSecurityIds, connection, cancellationToken);
+        loadPairsTimer.Stop();
+        _logger.LogInformation(
+            "[Wakett] Loaded {Count} security pairs in {ElapsedMs} ms.",
+            securityPairs.Count,
+            loadPairsTimer.ElapsedMilliseconds);
         var wakettSymbols = BuildWakettRequestSymbols(baseSymbols);
         WakettPriceUploadResult? lastResult = null;
 
         foreach (var (minuteOffset, barTimeUtc) in fetchableMissingBars
             .OrderBy(entry => entry.BarTimeUtc.AddMinutes(entry.MinuteOffset)))
         {
+            var loopTimer = Stopwatch.StartNew();
 
             var baseTimestamp = new DateTimeOffset(barTimeUtc, TimeSpan.Zero);
             var requestTimestamp = baseTimestamp.AddMinutes(minuteOffset);
@@ -177,6 +204,7 @@ public class WakettPriceFetcher
                 continue;
             }
 
+            var presenceTimer = Stopwatch.StartNew();
             if (!await ArePricesMissingForTimestampAsync(
                 uploadSecurityIds,
                 expectedBarTimestampUtc,
@@ -188,12 +216,23 @@ public class WakettPriceFetcher
                     expectedBarTimestampUtc);
                 continue;
             }
+            presenceTimer.Stop();
+            _logger.LogInformation(
+                "[Wakett] Presence check for {TimestampUtc} took {ElapsedMs} ms.",
+                expectedBarTimestampUtc,
+                presenceTimer.ElapsedMilliseconds);
 
             _logger.LogInformation(
                 "Requesting Wakett prices for timestamp {TimestampUtc}.",
                 requestTimestamp.UtcDateTime);
 
-                var response = await _client.GetPricesAsync(wakettSymbols, requestTimestamp);
+            var apiTimer = Stopwatch.StartNew();
+            var response = await _client.GetPricesAsync(wakettSymbols, requestTimestamp);
+            apiTimer.Stop();
+            _logger.LogInformation(
+                "[Wakett] Wakett API call for {TimestampUtc} returned in {ElapsedMs} ms.",
+                requestTimestamp.UtcDateTime,
+                apiTimer.ElapsedMilliseconds);
             var computedRates = BuildComputedRates(baseSymbols, missingSymbols, response?.Prices, _logger);
             if (computedRates.Count == 0)
             {
@@ -266,7 +305,14 @@ public class WakettPriceFetcher
                 continue;
             }
 
+            var storeTimer = Stopwatch.StartNew();
             await StoreAsync(connection, dbRecords.Values, minuteOffset, cancellationToken);
+            storeTimer.Stop();
+            _logger.LogInformation(
+                "[Wakett] Stored {Count} records for {TimestampUtc} in {ElapsedMs} ms.",
+                dbRecords.Count,
+                timestampUtc,
+                storeTimer.ElapsedMilliseconds);
 
             var ordered = uploadItems.Values
                 .OrderBy(i => i.SecurityId)
@@ -278,8 +324,15 @@ public class WakettPriceFetcher
                 timestampUtc);
 
             lastResult = new WakettPriceUploadResult(timestampUtc, ordered);
+            loopTimer.Stop();
+            _logger.LogInformation(
+                "[Wakett] End-to-end handling for {TimestampUtc} completed in {ElapsedMs} ms.",
+                timestampUtc,
+                loopTimer.ElapsedMilliseconds);
         }
 
+        fetchStopwatch.Stop();
+        _logger.LogInformation("[Wakett] Fetch cycle completed in {ElapsedMs} ms.", fetchStopwatch.ElapsedMilliseconds);
         return lastResult;
     }
 
