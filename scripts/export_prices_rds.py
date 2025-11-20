@@ -22,12 +22,19 @@ from urllib.parse import quote_plus
 FMT = "%Y-%m-%d %H:%M"
 OUT: dict[str, pathlib.Path]
 
-# Session boundaries defined in New York time (handles daylight saving)
+# Session boundaries defined in New York time (handles daylight saving).
+# Keep these aligned with the TradingDaemon session configuration used by the
+# webapp (see PriceFetcher/WakettPriceFetcher/WeightCalculator). Those
+# components treat sessions as inclusive of the start minute and exclusive of
+# the minute after ``End``; the same convention is used here when filtering
+# bar timestamps.
 SESSION_HOURS_NY = {
-    "US": (time(9, 30), time(16, 5)),
-    "EU": (time(2, 0), time(9, 5)),
-    "EUUS": (time(2, 0), time(12, 5)),
-    "ALL": (time(2, 0), time(16, 5)),
+    "US": (time(9, 0), time(15, 59)),
+    "EU": (time(2, 0), time(8, 59)),
+    "EUUS": (time(2, 0), time(11, 59)),
+    # "ALL" is not used by the webapp but is kept here for completeness to
+    # cover the entire trading day handled by the other sessions.
+    "ALL": (time(2, 0), time(15, 59)),
 }
 
 
