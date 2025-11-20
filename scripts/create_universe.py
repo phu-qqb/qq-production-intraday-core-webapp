@@ -5,6 +5,7 @@ from urllib.parse import quote_plus
 import json
 import boto3
 from botocore.exceptions import ClientError
+import argparse
 
 # -------------------------------------------------------------------
 # 0) REUTILISATION DE TA FONCTION DE CONNEXION EXACTE
@@ -193,6 +194,15 @@ if __name__ == "__main__":
     region = "eu-west-2"
     driver = "ODBC Driver 17 for SQL Server"
 
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--universe", required=True, help="Universe name")
+    parser.add_argument("--timeframe", type=int, default=60)
+    parser.add_argument("--secret-name", default="qq-intraday-test-credentials")
+    parser.add_argument("--session", default="US")   # ou EU si tu préfères
+    parser.add_argument("--start", default="2022-01-01")
+
+    args = parser.parse_args()
+
     conn_str = get_conn_from_secret(secret, region, driver)
     engine = sa.create_engine(conn_str)
 
@@ -203,7 +213,7 @@ if __name__ == "__main__":
     virt_to_real = build_security_map(engine, pairs)
 
     # Universe
-    universe_id = create_universe(engine)
+    universe_id = create_universe(engine, args.universe)
     print(f"Created Universe {universe_id}")
 
     # Universe members
