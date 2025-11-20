@@ -1073,6 +1073,8 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
             .ToArray();
 
         IDbTransaction? transaction = null;
+        var timestamp = recordList.Count > 0 ? recordList[0].BarTimeUtc : (DateTime?)null;
+        var stageTimer = Stopwatch.StartNew();
 
         try
         {
@@ -1097,21 +1099,45 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         finally
         {
             transaction?.Dispose();
+            stageTimer.Stop();
+            if (timestamp is not null)
+            {
+                _logger.LogInformation(
+                    "[Wakett] Stage_HistClose delete/insert for {TimestampUtc} affected {Count} records in {ElapsedMs} ms.",
+                    timestamp.Value,
+                    recordList.Count,
+                    stageTimer.ElapsedMilliseconds);
+            }
         }
 
         if (recordList.Count > 0)
         {
+            var loadRawTimer = Stopwatch.StartNew();
             await _priceProcedures.LoadRawFromStageAsync(
                 connection,
                 PriceTimeframeMinute,
                 _priceBarOptions.SourceId,
                 cancellationToken);
 
+            loadRawTimer.Stop();
+            _logger.LogInformation(
+                "[Wakett] LoadRawFromStage completed for {TimestampUtc} in {ElapsedMs} ms.",
+                timestamp,
+                loadRawTimer.ElapsedMilliseconds);
+
             var selectRaw = _priceBarSelectWithOffsetSql;
+            var queryExistingTimer = Stopwatch.StartNew();
             var existing = (await connection.QueryAsync<HistClose>(selectRaw, new { SecurityIds = securityKeys }))
                 .GroupBy(r => (r.SecurityId, r.BarTimeUtc))
                 .Select(g => g.Last())
                 .ToList();
+
+            queryExistingTimer.Stop();
+            _logger.LogInformation(
+                "[Wakett] Retrieved {Count} raw bars for flat processing of {TimestampUtc} in {ElapsedMs} ms.",
+                existing.Count,
+                timestamp,
+                queryExistingTimer.ElapsedMilliseconds);
 
             var seriesBySecurity = existing
                 .GroupBy(r => r.SecurityId)
@@ -1122,6 +1148,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
             foreach (var build in flatBarBuilds)
             {
+                var buildTimer = Stopwatch.StartNew();
                 var flatRecords = new List<FlatPrice>();
                 foreach (var grp in seriesBySecurity)
                 {
@@ -1142,10 +1169,19 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
                 if (flatRecords.Count == 0)
                 {
+                    buildTimer.Stop();
+                    _logger.LogInformation(
+                        "[Wakett] Flat build {Timeframe}m offset {Offset} produced no records for {TimestampUtc} in {ElapsedMs} ms.",
+                        build.TimeframeMinute,
+                        build.OffsetMinute,
+                        timestamp,
+                        buildTimer.ElapsedMilliseconds);
                     continue;
                 }
 
+                var purgeTimer = Stopwatch.StartNew();
                 await connection.ExecuteAsync($"DELETE FROM {_flatBarStagingTable}");
+                purgeTimer.Stop();
 
                 var table = new DataTable();
                 table.Columns.Add("SecurityId", typeof(string));
@@ -1160,16 +1196,37 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
                 if (connection is SqlConnection sqlConnection)
                 {
+                    var bulkTimer = Stopwatch.StartNew();
                     using var bulkCopy = new SqlBulkCopy(sqlConnection);
                     bulkCopy.DestinationTableName = _flatBarStagingTable;
                     await bulkCopy.WriteToServerAsync(table);
+                    bulkTimer.Stop();
+                    _logger.LogInformation(
+                        "[Wakett] Bulk copied {Count} flat bars (tf {Timeframe}m offset {Offset}) for {TimestampUtc} in {ElapsedMs} ms (purge {PurgeMs} ms).",
+                        flatRecords.Count,
+                        build.TimeframeMinute,
+                        build.OffsetMinute,
+                        timestamp,
+                        bulkTimer.ElapsedMilliseconds,
+                        purgeTimer.ElapsedMilliseconds);
                 }
                 else
                 {
                     throw new InvalidOperationException("Expected SqlConnection for bulk copy operations.");
                 }
 
+                var flatLoadTimer = Stopwatch.StartNew();
                 await _priceProcedures.LoadFlatFromMinimalAsync(connection, build.TimeframeMinute, cancellationToken);
+                flatLoadTimer.Stop();
+                buildTimer.Stop();
+
+                _logger.LogInformation(
+                    "[Wakett] LoadFlatFromMinimal ({Timeframe}m offset {Offset}) completed for {TimestampUtc} in {ElapsedMs} ms (build pipeline {BuildMs} ms).",
+                    build.TimeframeMinute,
+                    build.OffsetMinute,
+                    timestamp,
+                    flatLoadTimer.ElapsedMilliseconds,
+                    buildTimer.ElapsedMilliseconds);
             }
         }
     }
