@@ -1050,27 +1050,19 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
                 var flatRecords = new List<FlatPrice>();
                 foreach (var grp in seriesBySecurity)
                 {
-                    var rawEu = RawNMin(grp.Series, build.TimeframeMinute, "EU", build.OffsetMinute);
-                    var flatEu = Flatten(rawEu, SessionBounds["EU"].Zone)
-                        .Select(r => new FlatPrice
-                        {
-                            SecurityId = grp.SecurityId,
-                            BarTimeUtc = r.TimestampUtc,
-                            Close = r.Close,
-                            Session = "EU"
-                        });
-                    flatRecords.AddRange(flatEu);
-
-                    var rawUs = RawNMin(grp.Series, build.TimeframeMinute, "US", build.OffsetMinute);
-                    var flatUs = Flatten(rawUs, SessionBounds["US"].Zone)
-                        .Select(r => new FlatPrice
-                        {
-                            SecurityId = grp.SecurityId,
-                            BarTimeUtc = r.TimestampUtc,
-                            Close = r.Close,
-                            Session = "US"
-                        });
-                    flatRecords.AddRange(flatUs);
+                    foreach (var session in new[] { "EU", "US", "EUUS" })
+                    {
+                        var raw = RawNMin(grp.Series, build.TimeframeMinute, session, build.OffsetMinute);
+                        var flat = Flatten(raw, SessionBounds[session].Zone)
+                            .Select(r => new FlatPrice
+                            {
+                                SecurityId = grp.SecurityId,
+                                BarTimeUtc = r.TimestampUtc,
+                                Close = r.Close,
+                                Session = session
+                            });
+                        flatRecords.AddRange(flat);
+                    }
                 }
 
                 if (flatRecords.Count == 0)
