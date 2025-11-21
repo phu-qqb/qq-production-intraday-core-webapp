@@ -1003,6 +1003,9 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         return local.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday;
     }
 
+    private static TimeZoneInfo NewYorkZone => TimeZoneInfo.FindSystemTimeZoneById(
+        RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York");
+
     private async Task<Dictionary<int, CurrencyPair>> LoadSecurityPairsAsync(
         IEnumerable<int> securityIds,
         IDbConnection? connection,
