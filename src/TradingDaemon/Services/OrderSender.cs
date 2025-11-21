@@ -12,6 +12,7 @@ using Microsoft.Extensions.Options;
 using TradingDaemon.Data;
 using TradingDaemon.Models;
 using TradingDaemon.Options;
+using TradingDaemon.Utils;
 
 namespace TradingDaemon.Services;
 
@@ -125,7 +126,14 @@ public class OrderSender
         }
 
         var aggregatedWeights = AggregateModelWeights(eligibleSnapshots, orderTimestampUtc);
-        var builtOrders = BuildOrders(aggregatedWeights, symbolMap, orderTimestampUtc);
+        var basePairs = LoadConfiguredBasePairs();
+        if (basePairs.Count == 0)
+        {
+            _logger.LogWarning("No Wakett base pairs configured. Aborting order submission.");
+            return;
+        }
+
+        var builtOrders = BuildOrders(aggregatedWeights, symbolMap, orderTimestampUtc, basePairs);
         var isFlatOrderRequest = builtOrders.Count == 0
             || builtOrders.All(order => order.Order.size?.value == 0d);
         if (isFlatOrderRequest)
@@ -1260,10 +1268,42 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         return map;
     }
 
-    private static List<(int SecurityId, WakettOrderItem Order)> BuildOrders(
+    private IReadOnlyCollection<CurrencyPair> LoadConfiguredBasePairs()
+    {
+        var configured = _configuration
+            .GetSection("ExternalApis:WakettApi:BasePairs")
+            .Get<string[]>() ?? Array.Empty<string>();
+
+        var pairs = new List<CurrencyPair>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var entry in configured)
+        {
+            if (!CurrencyPairParser.TryParse(entry, out var pair))
+            {
+                _logger.LogWarning(
+                    "Skipping invalid Wakett base pair configuration value '{Value}'.",
+                    entry);
+                continue;
+            }
+
+            var key = $"{pair.BaseCurrency}{pair.QuoteCurrency}";
+            if (!seen.Add(key))
+            {
+                continue;
+            }
+
+            pairs.Add(pair);
+        }
+
+        return pairs;
+    }
+
+    private List<(int SecurityId, WakettOrderItem Order)> BuildOrders(
         IEnumerable<NettedWeightRow> weights,
         IReadOnlyDictionary<int, string> symbolMap,
-        DateTime orderTimestampUtc)
+        DateTime orderTimestampUtc,
+        IReadOnlyCollection<CurrencyPair> configuredBasePairs)
     {
         var parsedSymbols = symbolMap
             .Select(pair => SymbolInfo.TryCreate(pair.Key, pair.Value, out var info) ? info : null)
@@ -1275,6 +1315,22 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         {
             return new List<(int SecurityId, WakettOrderItem Order)>();
         }
+
+        if (configuredBasePairs.Count == 0)
+        {
+            return new List<(int SecurityId, WakettOrderItem Order)>();
+        }
+
+        var configuredPairLookup = configuredBasePairs
+            .GroupBy(pair => $"{pair.BaseCurrency}{pair.QuoteCurrency}", StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+
+        var symbolPairLookup = parsedSymbols.Values
+            .GroupBy(info => $"{info.BaseCurrency}{info.QuoteCurrency}", StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                group => group.Key,
+                group => group.OrderBy(info => info.SecurityId).First(),
+                StringComparer.OrdinalIgnoreCase);
 
         var exposures = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 
@@ -1299,23 +1355,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
             return BuildFlatOrders(weights, parsedSymbols, orderTimestampUtc);
         }
 
-        var usdBasePairs = parsedSymbols.Values
-            .Where(info => string.Equals(info.QuoteCurrency, "USD", StringComparison.OrdinalIgnoreCase))
-            .GroupBy(info => info.BaseCurrency, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(
-                group => group.Key,
-                group => group.OrderBy(info => info.SecurityId).First(),
-                StringComparer.OrdinalIgnoreCase);
-
-        var usdQuotePairs = parsedSymbols.Values
-            .Where(info => string.Equals(info.BaseCurrency, "USD", StringComparison.OrdinalIgnoreCase))
-            .GroupBy(info => info.QuoteCurrency, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(
-                group => group.Key,
-                group => group.OrderBy(info => info.SecurityId).First(),
-                StringComparer.OrdinalIgnoreCase);
-
-        var orderDescriptors = new List<(int SecurityId, SymbolInfo Info, decimal Weight, bool IsReversed)>();
+        var orderDescriptors = new List<(int SecurityId, SymbolInfo Info, decimal Weight)>();
 
         foreach (var kvp in exposures)
         {
@@ -1332,15 +1372,18 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
                 continue;
             }
 
-            if (usdBasePairs.TryGetValue(currency, out var basePair))
+            var baseKey = $"{currency}USD";
+            var quoteKey = $"USD{currency}";
+
+            if (configuredPairLookup.ContainsKey(baseKey) && symbolPairLookup.TryGetValue(baseKey, out var basePair))
             {
-                orderDescriptors.Add((basePair.SecurityId, basePair, exposure, false));
+                orderDescriptors.Add((basePair.SecurityId, basePair, exposure));
                 continue;
             }
 
-            if (usdQuotePairs.TryGetValue(currency, out var quotePair))
+            if (configuredPairLookup.ContainsKey(quoteKey) && symbolPairLookup.TryGetValue(quoteKey, out var quotePair))
             {
-                orderDescriptors.Add((quotePair.SecurityId, quotePair, exposure, true));
+                orderDescriptors.Add((quotePair.SecurityId, quotePair, -exposure));
             }
         }
 
@@ -1348,7 +1391,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
         foreach (var order in orderDescriptors.Where(order => order.Weight != 0m).OrderBy(order => order.SecurityId))
         {
-            var formatted = order.IsReversed ? order.Info.ReversedFormattedSymbol : order.Info.FormattedSymbol;
+            var formatted = order.Info.FormattedSymbol;
             var side = order.Weight > 0 ? "BUY" : "SELL";
             var value = Math.Abs((double)order.Weight);
 
