@@ -449,11 +449,22 @@ cli.add_argument(
     default=60,
     help="Bar timeframe in minutes (TimeframeMinute)",
 )
+
+_DEFAULT_CONFIG_PATH = (
+    pathlib.Path(__file__).resolve().parent.parent
+    / "src"
+    / "TradingDaemon"
+    / "appsettings.json"
+)
+
 cli.add_argument(
     "--config",
     type=pathlib.Path,
-    default=pathlib.Path("src/TradingDaemon/appsettings.json"),
-    help="Path to appsettings.json containing ExternalApis:WakettApi:BasePairs",
+    default=_DEFAULT_CONFIG_PATH,
+    help=(
+        "Path to appsettings.json containing ExternalApis:WakettApi:BasePairs. "
+        "Defaults to the repository copy if available."
+    ),
 )
 args = cli.parse_args()
 print("timeframe:", args.timeframe)
