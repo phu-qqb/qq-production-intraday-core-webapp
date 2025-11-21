@@ -312,21 +312,27 @@ def compute_series_for_symbol(
 
 
 def flatten_series(raw: pd.Series, tz: str = "America/New_York") -> pd.Series:
+    """Return a flattened series without overnight jumps.
+
+    The result matches the prior backward iteration but avoids Python loops by
+    using cumulative products. Day boundaries are detected in the provided
+    timezone and force a zero return, eliminating overnight jumps.
+    """
+
     if raw.empty:
         return raw
 
     ordered = raw.sort_index()
-    local_dates = ordered.index.tz_convert(tz).date
-    returns = ordered.pct_change().fillna(0)
-    day_change = pd.Series(local_dates).ne(pd.Series(local_dates).shift())
-    returns.loc[day_change.values] = 0
+    local_dates = ordered.index.tz_convert(tz).normalize()
 
-    flattened = pd.Series(index=ordered.index, dtype="float64")
-    flattened.iloc[-1] = ordered.iloc[-1]
-    for i in range(len(ordered) - 2, -1, -1):
-        inc = returns.iloc[i + 1]
-        flattened.iloc[i] = flattened.iloc[i + 1] / (1 + inc)
+    returns = ordered.pct_change().fillna(0.0)
+    day_change = local_dates != local_dates.shift()
+    returns.loc[day_change] = 0.0
 
+    growth = (1.0 + returns).cumprod()
+    scaled = growth / growth.iloc[-1]
+    flattened = scaled * ordered.iloc[-1]
+    flattened.name = ordered.name
     return flattened
 
 def get_universe_info(
@@ -538,10 +544,10 @@ ts_fmt = (
     pd.to_datetime(ts_sorted, utc=True).tz_convert("UTC").strftime(FMT).tolist()
 )
 pd.Series(ts_fmt).to_csv(OUT["D"], header=False, index=False)
-with OUT["C"].open("w") as fhc:
-    for sid in sorted(universe_ids):
-        for t_str in ts_fmt:
-            fhc.write(f"{sid},{t_str}\n")
+combo = pd.MultiIndex.from_product(
+    [sorted(universe_ids), ts_fmt], names=["securityId", "timestamp"]
+).to_frame(index=False)
+combo.to_csv(OUT["C"], header=False, index=False)
 
 for key in ["A", "H", "I"]:
     path = OUT[key]
