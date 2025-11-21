@@ -289,26 +289,31 @@ def build_security_symbol_map(
     }
 
 
+def build_currency_frame(currency_usd: dict[str, pd.Series]) -> pd.DataFrame:
+    if not currency_usd:
+        return pd.DataFrame()
+
+    return pd.concat(currency_usd, axis=1, join="outer").sort_index()
+
+
 def compute_series_for_symbol(
-    pair: tuple[str, str], currency_usd: dict[str, pd.Series]
+    pair: tuple[str, str], currency_frame: pd.DataFrame
 ) -> pd.Series | None:
     base, quote = pair
     if quote == "USD":
-        return currency_usd.get(base)
+        series = currency_frame.get(base)
+        return None if series is None else series.dropna()
     if base == "USD":
-        series = currency_usd.get(quote)
-        return None if series is None else 1 / series
+        series = currency_frame.get(quote)
+        return None if series is None else (1 / series).dropna()
 
-    base_series = currency_usd.get(base)
-    quote_series = currency_usd.get(quote)
+    base_series = currency_frame.get(base)
+    quote_series = currency_frame.get(quote)
     if base_series is None or quote_series is None:
         return None
 
-    aligned = pd.concat([base_series, quote_series], axis=1, join="inner")
-    if aligned.empty:
-        return None
-    aligned.columns = ["base", "quote"]
-    return aligned["base"] / aligned["quote"]
+    ratio = base_series / quote_series
+    return ratio.dropna()
 
 
 def flatten_series(raw: pd.Series, tz: str = "America/New_York") -> pd.Series:
@@ -494,6 +499,9 @@ if not currency_usd:
     sys.exit("No base USD pairs available to build prices")
 
 symbol_map = build_security_symbol_map(security_defs, universe_ids)
+currency_frame = build_currency_frame(currency_usd)
+if currency_frame.empty:
+    sys.exit("No currency data available to build prices")
 
 for real_sid in universe_ids:
     sid = real_sid
@@ -508,7 +516,7 @@ for real_sid in universe_ids:
         continue
 
     print("Processing", sid, symbol)
-    raw = compute_series_for_symbol(parsed, currency_usd)
+    raw = compute_series_for_symbol(parsed, currency_frame)
     if raw is None or raw.empty:
         print(f"Skipping {sid}: unable to build raw series")
         continue
