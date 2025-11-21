@@ -176,6 +176,7 @@ public class WakettPriceFetcher
             securityPairs.Count,
             loadPairsTimer.ElapsedMilliseconds);
         var wakettSymbols = BuildWakettRequestSymbols(baseSymbols);
+        var uploadBatches = new List<PriceUploadBatch>();
         WakettPriceUploadResult? lastResult = null;
 
         foreach (var (minuteOffset, barTimeUtc) in fetchableMissingBars
@@ -305,30 +306,52 @@ public class WakettPriceFetcher
                 continue;
             }
 
-            var storeTimer = Stopwatch.StartNew();
-            await StoreAsync(connection, dbRecords.Values, minuteOffset, cancellationToken);
-            storeTimer.Stop();
-            _logger.LogInformation(
-                "[Wakett] Stored {Count} records for {TimestampUtc} in {ElapsedMs} ms.",
-                dbRecords.Count,
-                timestampUtc,
-                storeTimer.ElapsedMilliseconds);
-
             var ordered = uploadItems.Values
                 .OrderBy(i => i.SecurityId)
                 .ToList();
 
             _logger.LogInformation(
-                "Uploaded {Count} FX prices to Stage_HistClose for {TimestampUtc}.",
+                "Queued {Count} FX prices for flattening and upload for {TimestampUtc} (offset {Offset}).",
                 ordered.Count,
-                timestampUtc);
+                timestampUtc,
+                minuteOffset);
 
-            lastResult = new WakettPriceUploadResult(timestampUtc, ordered);
+            uploadBatches.Add(new PriceUploadBatch(
+                timestampUtc,
+                minuteOffset,
+                dbRecords.Values.ToList(),
+                ordered));
+
             loopTimer.Stop();
             _logger.LogInformation(
-                "[Wakett] End-to-end handling for {TimestampUtc} completed in {ElapsedMs} ms.",
+                "[Wakett] Fetch and compute for {TimestampUtc} completed in {ElapsedMs} ms.",
                 timestampUtc,
                 loopTimer.ElapsedMilliseconds);
+        }
+
+        if (uploadBatches.Count == 0)
+        {
+            _logger.LogInformation("No Wakett price uploads were queued after fetching recent prices.");
+            return null;
+        }
+
+        foreach (var batch in uploadBatches)
+        {
+            var storeTimer = Stopwatch.StartNew();
+            await StoreAsync(connection, batch.Records, batch.MinuteOffset, cancellationToken);
+            storeTimer.Stop();
+            _logger.LogInformation(
+                "[Wakett] Stored {Count} records for {TimestampUtc} in {ElapsedMs} ms.",
+                batch.Records.Count,
+                batch.TimestampUtc,
+                storeTimer.ElapsedMilliseconds);
+
+            _logger.LogInformation(
+                "Uploaded {Count} FX prices to Stage_HistClose for {TimestampUtc}.",
+                batch.UploadItems.Count,
+                batch.TimestampUtc);
+
+            lastResult = new WakettPriceUploadResult(batch.TimestampUtc, batch.UploadItems);
         }
 
         fetchStopwatch.Stop();
@@ -1410,6 +1433,12 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         WakettSecuritySymbol Definition,
         CurrencyPair Pair,
         decimal Rate);
+
+    private sealed record PriceUploadBatch(
+        DateTime TimestampUtc,
+        int MinuteOffset,
+        IReadOnlyCollection<DbPriceRecord> Records,
+        IReadOnlyList<WakettPriceUploadItem> UploadItems);
 
     internal sealed record DbPriceRecord(
         int SecurityId,
