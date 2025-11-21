@@ -10,7 +10,6 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Dapper;
-using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -29,13 +28,10 @@ public class WakettPriceFetcher
 
     private readonly WakettAutomationOptions? _automationOptions;
     private readonly string _stageHistCloseTable;
-    private readonly string _flatBarStagingTable;
     private readonly string _priceBarWindowQuery;
-    private readonly string _priceBarSelectWithOffsetSql;
     private readonly string _priceBarTimestampPresenceSql;
     private readonly string _stageClearSql;
     private readonly string _stageDeleteSql;
-    private readonly string _flatStageClearSql;
     private readonly string _stageInsertSql;
     private readonly string _priceBarTable;
     private readonly string _securityTable;
@@ -67,15 +63,12 @@ public class WakettPriceFetcher
         _automationOptions = automationOptions?.Value;
         _priceBarOptions = priceBarOptions?.Value ?? new PriceBarOptions();
         _stageHistCloseTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketStageHistClose);
-        _flatBarStagingTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayStagingFlatBar);
         _priceBarTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketPriceBar);
         _securityTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayCoreSecurity);
         _priceBarWindowQuery = $"SELECT SecurityId, BarTimeUtc FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset AND BarTimeUtc BETWEEN @StartUtc AND @EndUtc";
-        _priceBarSelectWithOffsetSql = $"SELECT SecurityId, BarTimeUtc, [Close] FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds";
         _priceBarTimestampPresenceSql = $"SELECT SecurityId FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds AND BarTimeUtc = @BarTimeUtc";
         _stageClearSql = $"DELETE FROM {_stageHistCloseTable}";
         _stageDeleteSql = $"DELETE FROM {_stageHistCloseTable} WHERE BarTimeUtc = @BarTimeUtc AND SecurityId IN @SecurityIds";
-        _flatStageClearSql = $"DELETE FROM {_flatBarStagingTable}";
         _stageInsertSql = $"INSERT INTO {_stageHistCloseTable} (SecurityId, BarTimeUtc, [Close]) VALUES (@SecurityId, @BarTimeUtc, @Close)";
     }
 
@@ -109,7 +102,6 @@ public class WakettPriceFetcher
 
         var fetchStopwatch = Stopwatch.StartNew();
         var baseSymbols = symbolConfiguration.BaseSymbols;
-        var missingSymbols = symbolConfiguration.MissingSymbols;
         var allSecurityIds = symbolConfiguration.AllSecurityIds;
         var uploadSecurityIds = symbolConfiguration.AllSecurityIds;
         var uploadSecurityIdSet = new HashSet<int>(uploadSecurityIds);
@@ -234,7 +226,7 @@ public class WakettPriceFetcher
                 "[Wakett] Wakett API call for {TimestampUtc} returned in {ElapsedMs} ms.",
                 requestTimestamp.UtcDateTime,
                 apiTimer.ElapsedMilliseconds);
-            var computedRates = BuildComputedRates(baseSymbols, missingSymbols, response?.Prices, _logger);
+            var computedRates = BuildComputedRates(baseSymbols, response?.Prices, _logger);
             if (computedRates.Count == 0)
             {
                 _logger.LogWarning(
@@ -335,12 +327,6 @@ public class WakettPriceFetcher
             return null;
         }
 
-        var allRecords = uploadBatches.SelectMany(b => b.Records).ToList();
-        var securityKeys = allRecords
-            .Select(r => r.SecurityKey)
-            .Distinct()
-            .ToArray();
-
         foreach (var batch in uploadBatches)
         {
             var storeTimer = Stopwatch.StartNew();
@@ -359,11 +345,6 @@ public class WakettPriceFetcher
 
             lastResult = new WakettPriceUploadResult(batch.TimestampUtc, batch.UploadItems);
         }
-
-        var flattenTimer = Stopwatch.StartNew();
-        await BuildFlatBarsAsync(connection, uploadBatches, securityKeys, cancellationToken);
-        flattenTimer.Stop();
-        _logger.LogInformation("[Wakett] Completed flat bar generation for all batches in {ElapsedMs} ms.", flattenTimer.ElapsedMilliseconds);
 
         fetchStopwatch.Stop();
         _logger.LogInformation("[Wakett] Fetch cycle completed in {ElapsedMs} ms.", fetchStopwatch.ElapsedMilliseconds);
@@ -436,7 +417,6 @@ public class WakettPriceFetcher
 
     internal static IReadOnlyList<ComputedRate> BuildComputedRates(
         IEnumerable<WakettSecuritySymbol> baseSymbols,
-        IEnumerable<WakettSecuritySymbol> missingSymbols,
         IEnumerable<WakettPrice>? prices,
         ILogger? logger)
     {
@@ -509,27 +489,6 @@ public class WakettPriceFetcher
 
             AddRate(graph, pair, rateValue);
             result.Add(new ComputedRate(symbol, pair, rateValue));
-        }
-
-        foreach (var symbol in missingSymbols)
-        {
-            if (!TryParsePair(symbol.Symbol, out var pair))
-            {
-                logger?.LogWarning(
-                    "Unable to parse currency pair for missing symbol {Symbol}.",
-                    symbol.Symbol);
-                continue;
-            }
-
-            if (TryComputeCrossRate(graph, pair, out var rate))
-            {
-                AddRate(graph, pair, rate);
-                result.Add(new ComputedRate(symbol, pair, rate));
-            }
-            else
-            {
-                logger?.LogWarning("Unable to reconstruct price for symbol {Symbol}.", symbol.Symbol);
-            }
         }
 
         return result;
@@ -739,21 +698,9 @@ public class WakettPriceFetcher
             return null;
         }
 
-        var missingSymbols = securityDefinitions
-            .Where(def => !baseSecurityIds.Contains(def.SecurityId))
-            .Select(def => new WakettSecuritySymbol
-            {
-                SecurityId = def.SecurityId,
-                Symbol = FormatCurrencyPair(def.Pair)
-            })
-            .ToList();
+        var allSecurityIds = baseSecurityIds.ToArray();
 
-        var allSecurityIds = baseSecurityIds
-            .Concat(missingSymbols.Select(symbol => symbol.SecurityId))
-            .Distinct()
-            .ToArray();
-
-        return new SymbolConfiguration(baseSymbols, missingSymbols, allSecurityIds);
+        return new SymbolConfiguration(baseSymbols, allSecurityIds);
     }
 
     private IReadOnlyList<CurrencyPair> LoadConfiguredBasePairs()
@@ -1057,6 +1004,9 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         return local.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday;
     }
 
+    private static TimeZoneInfo NewYorkZone => TimeZoneInfo.FindSystemTimeZoneById(
+        RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York");
+
     private async Task<Dictionary<int, CurrencyPair>> LoadSecurityPairsAsync(
         IEnumerable<int> securityIds,
         IDbConnection? connection,
@@ -1178,287 +1128,12 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
     private async Task ClearStageTablesAsync(IDbConnection connection, CancellationToken cancellationToken)
     {
         await connection.ExecuteAsync(_stageClearSql);
-        await connection.ExecuteAsync(_flatStageClearSql);
-    }
-
-    private async Task BuildFlatBarsAsync(
-        IDbConnection connection,
-        IReadOnlyCollection<PriceUploadBatch> batches,
-        IReadOnlyCollection<string> securityKeys,
-        CancellationToken cancellationToken)
-    {
-        var batchesByOffset = batches
-            .GroupBy(b => b.MinuteOffset)
-            .Select(g => new
-            {
-                MinuteOffset = g.Key,
-                Timestamps = g.Select(b => b.TimestampUtc).Distinct().OrderBy(t => t).ToList()
-            })
-            .ToList();
-
-        foreach (var offsetGroup in batchesByOffset)
-        {
-            var flatBarBuilds = FlatBarBuildSpecificationFactory.CreateDefault(PriceTimeframeMinute, offsetGroup.MinuteOffset);
-            foreach (var build in flatBarBuilds)
-            {
-                if (offsetGroup.Timestamps.Count == 0)
-                {
-                    continue;
-                }
-
-                var windowStartUtc = offsetGroup.Timestamps
-                    .Select(t => GetFlatBarWindow(t, build.TimeframeMinute).WindowStartUtc)
-                    .Min();
-                var windowEndUtc = offsetGroup.Timestamps
-                    .Select(t => GetFlatBarWindow(t, build.TimeframeMinute).WindowEndUtc)
-                    .Max();
-
-                var selectRaw = $"{_priceBarSelectWithOffsetSql} AND BarTimeUtc BETWEEN @StartUtc AND @EndUtc";
-                var queryExistingTimer = Stopwatch.StartNew();
-                var existing = (await connection.QueryAsync<HistClose>(
-                        selectRaw,
-                        new { SecurityIds = securityKeys, StartUtc = windowStartUtc, EndUtc = windowEndUtc }))
-                    .GroupBy(r => (r.SecurityId, r.BarTimeUtc))
-                    .Select(g => g.Last())
-                    .ToList();
-
-                queryExistingTimer.Stop();
-                _logger.LogInformation(
-                    "[Wakett] Retrieved {Count} raw bars for flat processing across {TimestampCount} timestamps in {ElapsedMs} ms using window {WindowStart} - {WindowEnd} (tf {Timeframe}m offset {Offset}).",
-                    existing.Count,
-                    offsetGroup.Timestamps.Count,
-                    queryExistingTimer.ElapsedMilliseconds,
-                    windowStartUtc,
-                    windowEndUtc,
-                    build.TimeframeMinute,
-                    build.OffsetMinute);
-
-                var seriesBySecurity = existing
-                    .GroupBy(r => r.SecurityId)
-                    .Select(g => new { SecurityId = g.Key, Series = g.OrderBy(r => r.BarTimeUtc).ToList() })
-                    .ToList();
-
-                var buildTimer = Stopwatch.StartNew();
-                var flatRecords = new List<FlatPrice>();
-                foreach (var grp in seriesBySecurity)
-                {
-                    foreach (var session in new[] { "EU", "US", "EUUS" })
-                    {
-                        var raw = RawNMin(grp.Series, build.TimeframeMinute, session, build.OffsetMinute);
-                        var flat = Flatten(raw, SessionBounds[session].Zone)
-                            .Select(r => new FlatPrice
-                            {
-                                SecurityId = grp.SecurityId,
-                                BarTimeUtc = r.TimestampUtc,
-                                Close = r.Close,
-                                Session = session
-                            });
-                        flatRecords.AddRange(flat);
-                    }
-                }
-
-                if (flatRecords.Count == 0)
-                {
-                    buildTimer.Stop();
-                    _logger.LogInformation(
-                        "[Wakett] Flat build {Timeframe}m offset {Offset} produced no records for {TimestampCount} timestamps in {ElapsedMs} ms.",
-                        build.TimeframeMinute,
-                        build.OffsetMinute,
-                        offsetGroup.Timestamps.Count,
-                        buildTimer.ElapsedMilliseconds);
-                    continue;
-                }
-
-                var purgeTimer = Stopwatch.StartNew();
-                await connection.ExecuteAsync($"DELETE FROM {_flatBarStagingTable}");
-                purgeTimer.Stop();
-
-                var table = new DataTable();
-                table.Columns.Add("SecurityId", typeof(string));
-                table.Columns.Add("BarTimeUtc", typeof(DateTime));
-                table.Columns.Add("Close", typeof(decimal));
-                table.Columns.Add("Session", typeof(string));
-
-                foreach (var record in flatRecords)
-                {
-                    table.Rows.Add(record.SecurityId, record.BarTimeUtc, record.Close, record.Session);
-                }
-
-                if (connection is SqlConnection sqlConnection)
-                {
-                    var bulkTimer = Stopwatch.StartNew();
-                    using var bulkCopy = new SqlBulkCopy(sqlConnection);
-                    bulkCopy.DestinationTableName = _flatBarStagingTable;
-                    await bulkCopy.WriteToServerAsync(table);
-                    bulkTimer.Stop();
-                    _logger.LogInformation(
-                        "[Wakett] Bulk copied {Count} flat bars (tf {Timeframe}m offset {Offset}) across {TimestampCount} timestamps in {ElapsedMs} ms (purge {PurgeMs} ms).",
-                        flatRecords.Count,
-                        build.TimeframeMinute,
-                        build.OffsetMinute,
-                        offsetGroup.Timestamps.Count,
-                        bulkTimer.ElapsedMilliseconds,
-                        purgeTimer.ElapsedMilliseconds);
-                }
-                else
-                {
-                    throw new InvalidOperationException("Expected SqlConnection for bulk copy operations.");
-                }
-
-                var flatLoadTimer = Stopwatch.StartNew();
-                await _priceProcedures.LoadFlatFromMinimalAsync(connection, build.TimeframeMinute, cancellationToken);
-                flatLoadTimer.Stop();
-                buildTimer.Stop();
-
-                _logger.LogInformation(
-                    "[Wakett] LoadFlatFromMinimal ({Timeframe}m offset {Offset}) completed across {TimestampCount} timestamps in {ElapsedMs} ms (build pipeline {BuildMs} ms).",
-                    build.TimeframeMinute,
-                    build.OffsetMinute,
-                    offsetGroup.Timestamps.Count,
-                    flatLoadTimer.ElapsedMilliseconds,
-                    buildTimer.ElapsedMilliseconds);
-            }
-        }
     }
 
     private int PriceTimeframeMinute => Math.Max(1, _priceBarOptions.TimeframeMinute);
 
-    private static (DateTime WindowStartUtc, DateTime WindowEndUtc) GetFlatBarWindow(DateTime timestampUtc, int timeframeMinute)
-    {
-        var lookbackDays = timeframeMinute switch
-        {
-            60 => 160,
-            30 => 80,
-            15 => 40,
-            _ => 40
-        };
-
-        var windowStartUtc = DateTime.SpecifyKind(timestampUtc.Date.AddDays(-lookbackDays), DateTimeKind.Utc);
-        var windowEndUtc = DateTime.SpecifyKind(timestampUtc.Date.AddDays(1), DateTimeKind.Utc);
-        return (windowStartUtc, windowEndUtc);
-    }
-
-
-    private static readonly Dictionary<string, (TimeZoneInfo Zone, TimeSpan Start, TimeSpan End)> SessionBounds = new()
-    {
-        ["US"] = (NewYorkZone, TimeSpan.Parse("09:00"), TimeSpan.Parse("15:59")),
-        ["EU"] = (NewYorkZone, TimeSpan.Parse("02:00"), TimeSpan.Parse("08:59")),
-        ["EUUS"] = (NewYorkZone, TimeSpan.Parse("02:00"), TimeSpan.Parse("11:59"))
-    };
-
-    private static TimeZoneInfo NewYorkZone => TimeZoneInfo.FindSystemTimeZoneById(
-        RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York");
-
-    private static List<(DateTime TimestampUtc, decimal Close)> RawNMin(List<HistClose> series, int minutes, string session, int offset)
-    {
-        var bounds = SessionBounds[session];
-        var zone = bounds.Zone;
-        var result = new List<(DateTime, decimal)>();
-        DateTime? currentBucket = null;
-        decimal lastClose = 0;
-        var sessionStartAligned = AlignSessionStart(bounds.Start, minutes);
-        foreach (var item in series.OrderBy(s => s.BarTimeUtc))
-        {
-            var local = TimeZoneInfo.ConvertTimeFromUtc(item.BarTimeUtc, zone);
-            if (offset != 0) local = local.AddMinutes(-offset);
-            var start = local.TimeOfDay;
-            var end = start.Add(TimeSpan.FromMinutes(minutes - 1));
-
-            if (start < bounds.Start || end > bounds.End) continue;
-            var bucket = AlignToSessionBucket(local, sessionStartAligned, minutes);
-
-            if (currentBucket != bucket)
-            {
-                if (currentBucket.HasValue)
-                    result.Add((TimeZoneInfo.ConvertTimeToUtc(currentBucket.Value.AddMinutes(offset), zone), lastClose));
-                currentBucket = bucket;
-            }
-            lastClose = item.Close;
-        }
-        if (currentBucket.HasValue)
-            result.Add((TimeZoneInfo.ConvertTimeToUtc(currentBucket.Value.AddMinutes(offset), zone), lastClose));
-        return result;
-    }
-
-    private static DateTime AlignToSessionBucket(DateTime local, TimeSpan sessionStartAligned, int minutes)
-    {
-        var alignedDayStart = new DateTime(local.Year, local.Month, local.Day).Add(sessionStartAligned);
-        if (local.TimeOfDay <= sessionStartAligned)
-        {
-            return alignedDayStart;
-        }
-
-        var minutesSinceAlignedStart = (int)Math.Floor((local.TimeOfDay - sessionStartAligned).TotalMinutes / minutes) * minutes;
-        return alignedDayStart.AddMinutes(minutesSinceAlignedStart);
-    }
-
-
-    private static TimeSpan AlignSessionStart(TimeSpan sessionStart, int minutes)
-    {
-        if (minutes <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(minutes), "Aggregation interval must be positive.");
-        }
-
-        if (sessionStart < TimeSpan.Zero)
-        {
-            throw new ArgumentOutOfRangeException(nameof(sessionStart), "Session start cannot be negative.");
-        }
-
-        return sessionStart;
-    }
-
-    private static List<(DateTime TimestampUtc, decimal Close)> Flatten(List<(DateTime TimestampUtc, decimal Close)> raw, TimeZoneInfo zone)
-    {
-        if (raw.Count == 0)
-        {
-            return new();
-        }
-
-        var ordered = raw
-            .OrderBy(r => r.TimestampUtc)
-            .ToList();
-        var count = ordered.Count;
-
-        var localDates = ordered
-            .Select(r => TimeZoneInfo.ConvertTimeFromUtc(r.TimestampUtc, zone).Date)
-            .ToArray();
-
-        var returns = new decimal[count];
-        for (var i = 1; i < count; i++)
-        {
-            var prevClose = ordered[i - 1].Close;
-            returns[i] = prevClose != 0 ? (ordered[i].Close / prevClose) - 1m : 0m;
-        }
-
-        for (var i = 1; i < count; i++)
-        {
-            if (localDates[i] != localDates[i - 1])
-            {
-                returns[i] = 0m;
-            }
-        }
-
-        var flattenedCloses = new decimal[count];
-        flattenedCloses[count - 1] = ordered[count - 1].Close;
-        for (var i = count - 2; i >= 0; i--)
-        {
-            var inc = returns[i + 1];
-            flattenedCloses[i] = flattenedCloses[i + 1] / (1 + inc);
-        }
-
-        var result = new List<(DateTime TimestampUtc, decimal Close)>(count);
-        for (var i = 0; i < count; i++)
-        {
-            result.Add((ordered[i].TimestampUtc, flattenedCloses[i]));
-        }
-
-        return result;
-    }
-
     private sealed record SymbolConfiguration(
         IReadOnlyList<WakettSecuritySymbol> BaseSymbols,
-        IReadOnlyList<WakettSecuritySymbol> MissingSymbols,
         int[] AllSecurityIds);
 
     private sealed record SecuritySymbolDefinition(int SecurityId, CurrencyPair Pair);
