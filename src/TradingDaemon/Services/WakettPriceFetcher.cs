@@ -335,10 +335,16 @@ public class WakettPriceFetcher
             return null;
         }
 
+        var allRecords = uploadBatches.SelectMany(b => b.Records).ToList();
+        var securityKeys = allRecords
+            .Select(r => r.SecurityKey)
+            .Distinct()
+            .ToArray();
+
         foreach (var batch in uploadBatches)
         {
             var storeTimer = Stopwatch.StartNew();
-            await StoreAsync(connection, batch.Records, batch.MinuteOffset, cancellationToken);
+            await StoreRawAsync(connection, batch.Records, cancellationToken);
             storeTimer.Stop();
             _logger.LogInformation(
                 "[Wakett] Stored {Count} records for {TimestampUtc} in {ElapsedMs} ms.",
@@ -353,6 +359,11 @@ public class WakettPriceFetcher
 
             lastResult = new WakettPriceUploadResult(batch.TimestampUtc, batch.UploadItems);
         }
+
+        var flattenTimer = Stopwatch.StartNew();
+        await BuildFlatBarsAsync(connection, uploadBatches, securityKeys, cancellationToken);
+        flattenTimer.Stop();
+        _logger.LogInformation("[Wakett] Completed flat bar generation for all batches in {ElapsedMs} ms.", flattenTimer.ElapsedMilliseconds);
 
         fetchStopwatch.Stop();
         _logger.LogInformation("[Wakett] Fetch cycle completed in {ElapsedMs} ms.", fetchStopwatch.ElapsedMilliseconds);
@@ -1082,10 +1093,9 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         }
     }
 
-    private async Task StoreAsync(
+    private async Task StoreRawAsync(
         IDbConnection connection,
         IEnumerable<DbPriceRecord> records,
-        int minuteOffset,
         CancellationToken cancellationToken)
     {
         var recordList = records.ToList();
@@ -1147,23 +1157,76 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
                 "[Wakett] LoadRawFromStage completed for {TimestampUtc} in {ElapsedMs} ms.",
                 timestamp,
                 loadRawTimer.ElapsedMilliseconds);
+        }
+    }
 
-            var flatBarBuilds = FlatBarBuildSpecificationFactory.CreateDefault(PriceTimeframeMinute, minuteOffset);
+    private async Task<IDbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
+    {
+        var connection = _context.CreateConnection();
+        if (connection is DbConnection dbConnection)
+        {
+            await dbConnection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            connection.Open();
+        }
+
+        return connection;
+    }
+
+    private async Task ClearStageTablesAsync(IDbConnection connection, CancellationToken cancellationToken)
+    {
+        await connection.ExecuteAsync(_stageClearSql);
+        await connection.ExecuteAsync(_flatStageClearSql);
+    }
+
+    private async Task BuildFlatBarsAsync(
+        IDbConnection connection,
+        IReadOnlyCollection<PriceUploadBatch> batches,
+        IReadOnlyCollection<string> securityKeys,
+        CancellationToken cancellationToken)
+    {
+        var batchesByOffset = batches
+            .GroupBy(b => b.MinuteOffset)
+            .Select(g => new
+            {
+                MinuteOffset = g.Key,
+                Timestamps = g.Select(b => b.TimestampUtc).Distinct().OrderBy(t => t).ToList()
+            })
+            .ToList();
+
+        foreach (var offsetGroup in batchesByOffset)
+        {
+            var flatBarBuilds = FlatBarBuildSpecificationFactory.CreateDefault(PriceTimeframeMinute, offsetGroup.MinuteOffset);
             foreach (var build in flatBarBuilds)
             {
-                var (windowStartUtc, windowEndUtc) = GetFlatBarWindow(timestamp!.Value, build.TimeframeMinute);
+                if (offsetGroup.Timestamps.Count == 0)
+                {
+                    continue;
+                }
+
+                var windowStartUtc = offsetGroup.Timestamps
+                    .Select(t => GetFlatBarWindow(t, build.TimeframeMinute).WindowStartUtc)
+                    .Min();
+                var windowEndUtc = offsetGroup.Timestamps
+                    .Select(t => GetFlatBarWindow(t, build.TimeframeMinute).WindowEndUtc)
+                    .Max();
+
                 var selectRaw = $"{_priceBarSelectWithOffsetSql} AND BarTimeUtc BETWEEN @StartUtc AND @EndUtc";
                 var queryExistingTimer = Stopwatch.StartNew();
-                var existing = (await connection.QueryAsync<HistClose>(selectRaw, new { SecurityIds = securityKeys, StartUtc = windowStartUtc, EndUtc = windowEndUtc }))
+                var existing = (await connection.QueryAsync<HistClose>(
+                        selectRaw,
+                        new { SecurityIds = securityKeys, StartUtc = windowStartUtc, EndUtc = windowEndUtc }))
                     .GroupBy(r => (r.SecurityId, r.BarTimeUtc))
                     .Select(g => g.Last())
                     .ToList();
 
                 queryExistingTimer.Stop();
                 _logger.LogInformation(
-                    "[Wakett] Retrieved {Count} raw bars for flat processing of {TimestampUtc} in {ElapsedMs} ms using window {WindowStart} - {WindowEnd} (tf {Timeframe}m offset {Offset}).",
+                    "[Wakett] Retrieved {Count} raw bars for flat processing across {TimestampCount} timestamps in {ElapsedMs} ms using window {WindowStart} - {WindowEnd} (tf {Timeframe}m offset {Offset}).",
                     existing.Count,
-                    timestamp,
+                    offsetGroup.Timestamps.Count,
                     queryExistingTimer.ElapsedMilliseconds,
                     windowStartUtc,
                     windowEndUtc,
@@ -1198,10 +1261,10 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
                 {
                     buildTimer.Stop();
                     _logger.LogInformation(
-                        "[Wakett] Flat build {Timeframe}m offset {Offset} produced no records for {TimestampUtc} in {ElapsedMs} ms.",
+                        "[Wakett] Flat build {Timeframe}m offset {Offset} produced no records for {TimestampCount} timestamps in {ElapsedMs} ms.",
                         build.TimeframeMinute,
                         build.OffsetMinute,
-                        timestamp,
+                        offsetGroup.Timestamps.Count,
                         buildTimer.ElapsedMilliseconds);
                     continue;
                 }
@@ -1229,11 +1292,11 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
                     await bulkCopy.WriteToServerAsync(table);
                     bulkTimer.Stop();
                     _logger.LogInformation(
-                        "[Wakett] Bulk copied {Count} flat bars (tf {Timeframe}m offset {Offset}) for {TimestampUtc} in {ElapsedMs} ms (purge {PurgeMs} ms).",
+                        "[Wakett] Bulk copied {Count} flat bars (tf {Timeframe}m offset {Offset}) across {TimestampCount} timestamps in {ElapsedMs} ms (purge {PurgeMs} ms).",
                         flatRecords.Count,
                         build.TimeframeMinute,
                         build.OffsetMinute,
-                        timestamp,
+                        offsetGroup.Timestamps.Count,
                         bulkTimer.ElapsedMilliseconds,
                         purgeTimer.ElapsedMilliseconds);
                 }
@@ -1248,35 +1311,14 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
                 buildTimer.Stop();
 
                 _logger.LogInformation(
-                    "[Wakett] LoadFlatFromMinimal ({Timeframe}m offset {Offset}) completed for {TimestampUtc} in {ElapsedMs} ms (build pipeline {BuildMs} ms).",
+                    "[Wakett] LoadFlatFromMinimal ({Timeframe}m offset {Offset}) completed across {TimestampCount} timestamps in {ElapsedMs} ms (build pipeline {BuildMs} ms).",
                     build.TimeframeMinute,
                     build.OffsetMinute,
-                    timestamp,
+                    offsetGroup.Timestamps.Count,
                     flatLoadTimer.ElapsedMilliseconds,
                     buildTimer.ElapsedMilliseconds);
             }
         }
-    }
-
-    private async Task<IDbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
-    {
-        var connection = _context.CreateConnection();
-        if (connection is DbConnection dbConnection)
-        {
-            await dbConnection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            connection.Open();
-        }
-
-        return connection;
-    }
-
-    private async Task ClearStageTablesAsync(IDbConnection connection, CancellationToken cancellationToken)
-    {
-        await connection.ExecuteAsync(_stageClearSql);
-        await connection.ExecuteAsync(_flatStageClearSql);
     }
 
     private int PriceTimeframeMinute => Math.Max(1, _priceBarOptions.TimeframeMinute);
