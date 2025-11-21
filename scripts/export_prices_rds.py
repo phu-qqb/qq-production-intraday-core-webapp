@@ -10,6 +10,7 @@ import json
 import os
 import pathlib
 import sys
+import time as perf_time
 from datetime import time
 from typing import List
 import re
@@ -22,6 +23,12 @@ from urllib.parse import quote_plus
 
 FMT = "%Y-%m-%d %H:%M"
 OUT: dict[str, pathlib.Path]
+
+
+def log_timer(label: str, start: float) -> float:
+    now = perf_time.perf_counter()
+    print(f"{label} took {now - start:.2f}s")
+    return now
 
 # Session boundaries defined in New York time (handles daylight saving).
 # Keep these aligned with the TradingDaemon session configuration used by the
@@ -451,8 +458,10 @@ print("session:", args.session)
 print("universe:", args.universe)
 print("secrets:", args.secret_name)
 
+t_total_start = perf_time.perf_counter()
 conn_str = args.conn or get_conn_from_secret(args.secret_name, args.region, args.driver)
 engine = sa.create_engine(conn_str)
+t_mark = log_timer("Create engine", t_total_start)
 
 start_filter = None
 if args.start:
@@ -465,6 +474,7 @@ if args.start:
     start_filter = start_dt.tz_convert("UTC").strftime("%Y-%m-%d %H:%M:%S")
 
 universe_id, universe_name, members_df = get_universe_info(engine, args.universe)
+t_mark = log_timer("Fetch universe info", t_mark)
 universe_ids = members_df["SecurityId"].unique().tolist()
 print("Universe ID:", universe_id)
 # Save exported price files to a fixed directory for downstream processes
@@ -481,6 +491,7 @@ if not universe_ids:
     sys.exit("No securities selected")
 
 sub_ids, sub_members = get_subuniverse_data(engine, universe_id)
+t_mark = log_timer("Fetch subuniverse data", t_mark)
 pd.Series(sub_ids).to_csv(OUT["E"], header=False, index=False)
 sub_members.to_csv(OUT["F"], header=False, index=False)
 
@@ -488,22 +499,28 @@ all_ts: set[pd.Timestamp] = set()
 first_G = True
 
 base_pairs = load_configured_base_pairs(args.config)
+t_mark = log_timer("Load base pairs from config", t_mark)
 if not base_pairs:
     sys.exit("No base pairs configured in appsettings.json")
 
 security_defs = load_security_definitions(engine)
+t_mark = log_timer("Load security definitions", t_mark)
 currency_usd = build_base_currency_series(
     engine, base_pairs, security_defs, start_filter, args.session, args.timeframe
 )
+t_mark = log_timer("Build base USD currency series", t_mark)
 if not currency_usd:
     sys.exit("No base USD pairs available to build prices")
 
 symbol_map = build_security_symbol_map(security_defs, universe_ids)
+t_mark = log_timer("Build security symbol map", t_mark)
 currency_frame = build_currency_frame(currency_usd)
+t_mark = log_timer("Build currency frame", t_mark)
 if currency_frame.empty:
     sys.exit("No currency data available to build prices")
 
 for real_sid in universe_ids:
+    sym_start = perf_time.perf_counter()
     sid = real_sid
     symbol = symbol_map.get(sid)
     if not symbol:
@@ -538,6 +555,8 @@ for real_sid in universe_ids:
         fraw.to_csv(OUT["G"], header=False, index=False)
         first_G = False
 
+    log_timer(f"Processed {sid} {symbol}", sym_start)
+
 # Auxiliary B C D
 pd.Series(universe_ids).to_csv(OUT["B"], header=False, index=False)
 
@@ -558,4 +577,4 @@ for key in ["A", "H", "I"]:
     else:
         print(f"Warning: expected {path} was not created")
 
-print("Export complete")
+log_timer("Export complete", t_total_start)
