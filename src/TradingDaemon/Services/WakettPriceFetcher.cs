@@ -36,6 +36,7 @@ public class WakettPriceFetcher
     private readonly string _securityTable;
     private readonly IPriceProcessingProcedureExecutor _priceProcedures;
     private readonly PriceBarOptions _priceBarOptions;
+    private readonly IReadOnlyList<int> _priceTimeframeMinutes;
 
 
     private IReadOnlyList<int>? _priceMinuteOffsets;
@@ -61,11 +62,12 @@ public class WakettPriceFetcher
         _priceProcedures = priceProcedures;
         _automationOptions = automationOptions?.Value;
         _priceBarOptions = priceBarOptions?.Value ?? new PriceBarOptions();
+        _priceTimeframeMinutes = _priceBarOptions.GetOrderedTimeframeMinutes();
         _stageHistCloseTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketStageHistClose);
         _priceBarTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketPriceBar);
         _securityTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayCoreSecurity);
-        _priceBarWindowQuery = $"SELECT SecurityId, BarTimeUtc FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset AND BarTimeUtc BETWEEN @StartUtc AND @EndUtc";
-        _priceBarTimestampPresenceSql = $"SELECT SecurityId FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds AND BarTimeUtc = @BarTimeUtc";
+        _priceBarWindowQuery = $"SELECT SecurityId, BarTimeUtc FROM {_priceBarTable} WHERE TimeframeMinute = {BasePriceTimeframeMinute} AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset AND BarTimeUtc BETWEEN @StartUtc AND @EndUtc";
+        _priceBarTimestampPresenceSql = $"SELECT SecurityId FROM {_priceBarTable} WHERE TimeframeMinute = {BasePriceTimeframeMinute} AND SecurityId IN @SecurityIds AND BarTimeUtc = @BarTimeUtc";
         _stageClearSql = $"DELETE FROM {_stageHistCloseTable}";
         _stageDeleteSql = $"DELETE FROM {_stageHistCloseTable} WHERE BarTimeUtc = @BarTimeUtc AND SecurityId IN @SecurityIds";
         _stageInsertSql = $"INSERT INTO {_stageHistCloseTable} (SecurityId, BarTimeUtc, [Close]) VALUES (@SecurityId, @BarTimeUtc, @Close)";
@@ -1097,11 +1099,14 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         if (recordList.Count > 0)
         {
             var loadRawTimer = Stopwatch.StartNew();
-            await _priceProcedures.LoadRawFromStageAsync(
-                connection,
-                PriceTimeframeMinute,
-                _priceBarOptions.SourceId,
-                cancellationToken);
+            foreach (var timeframe in PriceTimeframeMinutes)
+            {
+                await _priceProcedures.LoadRawFromStageAsync(
+                    connection,
+                    timeframe,
+                    _priceBarOptions.SourceId,
+                    cancellationToken);
+            }
 
             loadRawTimer.Stop();
             _logger.LogInformation(
@@ -1131,7 +1136,9 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         await connection.ExecuteAsync(_stageClearSql);
     }
 
-    private int PriceTimeframeMinute => Math.Max(1, _priceBarOptions.TimeframeMinute);
+    private IReadOnlyList<int> PriceTimeframeMinutes => _priceTimeframeMinutes;
+
+    private int BasePriceTimeframeMinute => PriceTimeframeMinutes.First();
 
     private sealed record SymbolConfiguration(
         IReadOnlyList<WakettSecuritySymbol> BaseSymbols,
