@@ -25,6 +25,7 @@ public class PriceFetcher
     private readonly string _priceBarTable;
     private readonly IPriceProcessingProcedureExecutor _priceProcedures;
     private readonly PriceBarOptions _priceBarOptions;
+    private readonly IReadOnlyList<int> _priceTimeframeMinutes;
 
     public PriceFetcher(
         DapperContext context,
@@ -39,11 +40,12 @@ public class PriceFetcher
         _config = config;
         _priceProcedures = priceProcedures;
         _priceBarOptions = priceBarOptions?.Value ?? new PriceBarOptions();
+        _priceTimeframeMinutes = _priceBarOptions.GetOrderedTimeframeMinutes();
         _stageHistCloseTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketStageHistClose);
         _flatBarStagingTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayStagingFlatBar);
         _priceBarTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketPriceBar);
         _stageInsertSql = $"INSERT INTO {_stageHistCloseTable} (SecurityId, BarTimeUtc, [Close]) VALUES (@SecurityId, @BarTimeUtc, @Close)";
-        _selectRawSql = $"SELECT SecurityId, BarTimeUtc, [Close] FROM {_priceBarTable} WHERE TimeframeMinute = {PriceTimeframeMinute} AND SecurityId IN @SecurityIds";
+        _selectRawSql = $"SELECT SecurityId, BarTimeUtc, [Close] FROM {_priceBarTable} WHERE TimeframeMinute = {BasePriceTimeframeMinute} AND SecurityId IN @SecurityIds";
     }
 
     public async Task FetchAndStoreAsync()
@@ -86,10 +88,13 @@ public class PriceFetcher
 
         // Load newly staged raw bars into the PriceBar table so that subsequent
         // queries include the latest data.
-        await _priceProcedures.LoadRawFromStageAsync(
-            connection,
-            PriceTimeframeMinute,
-            _priceBarOptions.SourceId);
+        foreach (var timeframe in PriceTimeframeMinutes)
+        {
+            await _priceProcedures.LoadRawFromStageAsync(
+                connection,
+                timeframe,
+                _priceBarOptions.SourceId);
+        }
 
         // Retrieve all existing raw bars for the affected securities so that
         // flat bars can be recomputed over the full history instead of only
@@ -108,7 +113,7 @@ public class PriceFetcher
             .Select(g => new { SecurityId = g.Key, Series = g.OrderBy(r => r.BarTimeUtc).ToList() })
             .ToList();
 
-        var flatBarBuilds = FlatBarBuildSpecificationFactory.CreateDefault(PriceTimeframeMinute, 0);
+        var flatBarBuilds = FlatBarBuildSpecificationFactory.CreateDefault(BasePriceTimeframeMinute, 0);
 
         foreach (var build in flatBarBuilds)
         {
@@ -169,7 +174,9 @@ public class PriceFetcher
     private static TimeZoneInfo NewYorkZone => TimeZoneInfo.FindSystemTimeZoneById(
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York");
 
-    private int PriceTimeframeMinute => Math.Max(1, _priceBarOptions.TimeframeMinute);
+    private IReadOnlyList<int> PriceTimeframeMinutes => _priceTimeframeMinutes;
+
+    private int BasePriceTimeframeMinute => PriceTimeframeMinutes.First();
 
     private static List<(DateTime TimestampUtc, decimal Close)> RawNMin(List<HistClose> series, int minutes, string session, int offset)
     {
