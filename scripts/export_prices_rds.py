@@ -12,6 +12,7 @@ import pathlib
 import sys
 from datetime import time
 from typing import List
+import re
 
 import boto3
 from botocore.exceptions import ClientError
@@ -122,12 +123,23 @@ def parse_pair(symbol: str) -> tuple[str, str] | None:
     return normalized[:3], normalized[3:]
 
 
-def load_configured_base_pairs(path: pathlib.Path) -> list[str]:
+def _load_json_allowing_comments(path: pathlib.Path) -> dict:
+    """Load JSON that may contain ``//`` or ``/* */`` comments."""
+
     if not path.exists():
         raise FileNotFoundError(f"Config file not found: {path}")
 
-    with path.open() as fh:
-        data = json.load(fh)
+    text = path.read_text()
+    no_line_comments = re.sub(r"//.*?$", "", text, flags=re.MULTILINE)
+    cleaned = re.sub(r"/\*.*?\*/", "", no_line_comments, flags=re.DOTALL)
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Failed to parse JSON from {path}: {exc}") from exc
+
+
+def load_configured_base_pairs(path: pathlib.Path) -> list[str]:
+    data = _load_json_allowing_comments(path)
 
     base_pairs = (
         data.get("ExternalApis", {})
