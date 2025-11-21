@@ -115,7 +115,16 @@ public class OrderSender
             return;
         }
 
-        var aggregatedWeights = AggregateModelWeights(modelSnapshots, orderTimestampUtc);
+        var eligibleSnapshots = FilterSnapshotsWithinSession(modelSnapshots, orderTimestampUtc);
+        if (eligibleSnapshots.Count == 0)
+        {
+            _logger.LogWarning(
+                "No model snapshots align with order time {OrderTimestampUtc:O}. Aborting order submission.",
+                orderTimestampUtc);
+            return;
+        }
+
+        var aggregatedWeights = AggregateModelWeights(eligibleSnapshots, orderTimestampUtc);
         var builtOrders = BuildOrders(aggregatedWeights, symbolMap, orderTimestampUtc);
         var isFlatOrderRequest = builtOrders.Count == 0
             || builtOrders.All(order => order.Order.size?.value == 0d);
@@ -302,6 +311,53 @@ public class OrderSender
         }
 
         return snapshots;
+    }
+
+    private IReadOnlyList<ModelSnapshot> FilterSnapshotsWithinSession(
+        IReadOnlyList<ModelSnapshot> snapshots,
+        DateTime orderTimestampUtc)
+    {
+        if (snapshots.Count == 0)
+        {
+            return Array.Empty<ModelSnapshot>();
+        }
+
+        var orderTimeLocal = TimeZoneInfo.ConvertTimeFromUtc(orderTimestampUtc, NewYorkZone);
+        var filtered = new List<ModelSnapshot>();
+
+        foreach (var snapshot in snapshots)
+        {
+            if (string.IsNullOrWhiteSpace(snapshot.SessionKey))
+            {
+                filtered.Add(snapshot);
+                continue;
+            }
+
+            var normalizedSession = snapshot.SessionKey.Trim().ToUpperInvariant();
+            if (!SessionBounds.TryGetValue(normalizedSession, out var bounds))
+            {
+                _logger.LogWarning(
+                    "Skipping model {ModelId} because configured session {Session} is not recognized for order time {OrderTimeLocal:O}.",
+                    snapshot.ModelId,
+                    snapshot.SessionKey,
+                    orderTimeLocal);
+                continue;
+            }
+
+            if (!IsWithinSession(orderTimeLocal, bounds))
+            {
+                _logger.LogInformation(
+                    "Skipping model {ModelId} because order time {OrderTimeLocal:O} is outside configured session {Session}.",
+                    snapshot.ModelId,
+                    orderTimeLocal,
+                    normalizedSession);
+                continue;
+            }
+
+            filtered.Add(snapshot);
+        }
+
+        return filtered;
     }
 
     private static IReadOnlyList<NettedWeightRow> AggregateModelWeights(
