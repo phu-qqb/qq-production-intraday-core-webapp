@@ -1249,7 +1249,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
                 group => group.OrderBy(info => info.SecurityId).First(),
                 StringComparer.OrdinalIgnoreCase);
 
-        var orderDescriptors = new List<(int SecurityId, SymbolInfo Info, decimal Weight)>();
+        var orderDescriptors = new List<(int SecurityId, SymbolInfo Info, decimal Weight, bool IsReversed)>();
 
         foreach (var kvp in exposures)
         {
@@ -1268,13 +1268,13 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
             if (usdBasePairs.TryGetValue(currency, out var basePair))
             {
-                orderDescriptors.Add((basePair.SecurityId, basePair, exposure));
+                orderDescriptors.Add((basePair.SecurityId, basePair, exposure, false));
                 continue;
             }
 
             if (usdQuotePairs.TryGetValue(currency, out var quotePair))
             {
-                orderDescriptors.Add((quotePair.SecurityId, quotePair, -exposure));
+                orderDescriptors.Add((quotePair.SecurityId, quotePair, exposure, true));
             }
         }
 
@@ -1282,7 +1282,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
         foreach (var order in orderDescriptors.Where(order => order.Weight != 0m).OrderBy(order => order.SecurityId))
         {
-            var formatted = order.Info.FormattedSymbol;
+            var formatted = order.IsReversed ? order.Info.ReversedFormattedSymbol : order.Info.FormattedSymbol;
             var side = order.Weight > 0 ? "BUY" : "SELL";
             var value = Math.Abs((double)order.Weight);
 
