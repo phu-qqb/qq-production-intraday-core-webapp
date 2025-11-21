@@ -7,9 +7,11 @@ from an MS SQL database instead of parquet files in S3.
 from __future__ import annotations
 import argparse
 import json
+import numpy as np
 import os
 import pathlib
 import sys
+import time as perf_time
 from datetime import time
 from typing import List
 import re
@@ -22,6 +24,12 @@ from urllib.parse import quote_plus
 
 FMT = "%Y-%m-%d %H:%M"
 OUT: dict[str, pathlib.Path]
+
+
+def log_timer(label: str, start: float) -> float:
+    now = perf_time.perf_counter()
+    print(f"{label} took {now - start:.2f}s")
+    return now
 
 # Session boundaries defined in New York time (handles daylight saving).
 # Keep these aligned with the TradingDaemon session configuration used by the
@@ -289,26 +297,31 @@ def build_security_symbol_map(
     }
 
 
+def build_currency_frame(currency_usd: dict[str, pd.Series]) -> pd.DataFrame:
+    if not currency_usd:
+        return pd.DataFrame()
+
+    return pd.concat(currency_usd, axis=1, join="outer").sort_index()
+
+
 def compute_series_for_symbol(
-    pair: tuple[str, str], currency_usd: dict[str, pd.Series]
+    pair: tuple[str, str], currency_frame: pd.DataFrame
 ) -> pd.Series | None:
     base, quote = pair
     if quote == "USD":
-        return currency_usd.get(base)
+        series = currency_frame.get(base)
+        return None if series is None else series.dropna()
     if base == "USD":
-        series = currency_usd.get(quote)
-        return None if series is None else 1 / series
+        series = currency_frame.get(quote)
+        return None if series is None else (1 / series).dropna()
 
-    base_series = currency_usd.get(base)
-    quote_series = currency_usd.get(quote)
+    base_series = currency_frame.get(base)
+    quote_series = currency_frame.get(quote)
     if base_series is None or quote_series is None:
         return None
 
-    aligned = pd.concat([base_series, quote_series], axis=1, join="inner")
-    if aligned.empty:
-        return None
-    aligned.columns = ["base", "quote"]
-    return aligned["base"] / aligned["quote"]
+    ratio = base_series / quote_series
+    return ratio.dropna()
 
 
 def flatten_series(raw: pd.Series, tz: str = "America/New_York") -> pd.Series:
@@ -321,13 +334,15 @@ def flatten_series(raw: pd.Series, tz: str = "America/New_York") -> pd.Series:
     day_change = pd.Series(local_dates).ne(pd.Series(local_dates).shift())
     returns.loc[day_change.values] = 0
 
-    flattened = pd.Series(index=ordered.index, dtype="float64")
-    flattened.iloc[-1] = ordered.iloc[-1]
-    for i in range(len(ordered) - 2, -1, -1):
-        inc = returns.iloc[i + 1]
-        flattened.iloc[i] = flattened.iloc[i + 1] / (1 + inc)
+    forward_factors = (1 + returns.iloc[1:]).to_numpy()
+    if forward_factors.size:
+        forward_products = np.cumprod(forward_factors[::-1])[::-1]
+        factors = np.concatenate([forward_products, np.array([1.0])])
+    else:
+        factors = np.array([1.0])
 
-    return flattened
+    flattened_values = ordered.iloc[-1] / factors
+    return pd.Series(flattened_values, index=ordered.index)
 
 def get_universe_info(
     engine: sa.engine.Engine, description: str
@@ -446,8 +461,10 @@ print("session:", args.session)
 print("universe:", args.universe)
 print("secrets:", args.secret_name)
 
+t_total_start = perf_time.perf_counter()
 conn_str = args.conn or get_conn_from_secret(args.secret_name, args.region, args.driver)
 engine = sa.create_engine(conn_str)
+t_mark = log_timer("Create engine", t_total_start)
 
 start_filter = None
 if args.start:
@@ -460,6 +477,7 @@ if args.start:
     start_filter = start_dt.tz_convert("UTC").strftime("%Y-%m-%d %H:%M:%S")
 
 universe_id, universe_name, members_df = get_universe_info(engine, args.universe)
+t_mark = log_timer("Fetch universe info", t_mark)
 universe_ids = members_df["SecurityId"].unique().tolist()
 print("Universe ID:", universe_id)
 # Save exported price files to a fixed directory for downstream processes
@@ -476,26 +494,39 @@ if not universe_ids:
     sys.exit("No securities selected")
 
 sub_ids, sub_members = get_subuniverse_data(engine, universe_id)
+t_mark = log_timer("Fetch subuniverse data", t_mark)
 pd.Series(sub_ids).to_csv(OUT["E"], header=False, index=False)
 sub_members.to_csv(OUT["F"], header=False, index=False)
 
 all_ts: set[pd.Timestamp] = set()
 first_G = True
+flat_frames: list[pd.DataFrame] = []
+raw_frames: list[pd.DataFrame] = []
+g_frame: pd.DataFrame | None = None
 
 base_pairs = load_configured_base_pairs(args.config)
+t_mark = log_timer("Load base pairs from config", t_mark)
 if not base_pairs:
     sys.exit("No base pairs configured in appsettings.json")
 
 security_defs = load_security_definitions(engine)
+t_mark = log_timer("Load security definitions", t_mark)
 currency_usd = build_base_currency_series(
     engine, base_pairs, security_defs, start_filter, args.session, args.timeframe
 )
+t_mark = log_timer("Build base USD currency series", t_mark)
 if not currency_usd:
     sys.exit("No base USD pairs available to build prices")
 
 symbol_map = build_security_symbol_map(security_defs, universe_ids)
+t_mark = log_timer("Build security symbol map", t_mark)
+currency_frame = build_currency_frame(currency_usd)
+t_mark = log_timer("Build currency frame", t_mark)
+if currency_frame.empty:
+    sys.exit("No currency data available to build prices")
 
 for real_sid in universe_ids:
+    sym_start = perf_time.perf_counter()
     sid = real_sid
     symbol = symbol_map.get(sid)
     if not symbol:
@@ -508,7 +539,7 @@ for real_sid in universe_ids:
         continue
 
     print("Processing", sid, symbol)
-    raw = compute_series_for_symbol(parsed, currency_usd)
+    raw = compute_series_for_symbol(parsed, currency_frame)
     if raw is None or raw.empty:
         print(f"Skipping {sid}: unable to build raw series")
         continue
@@ -518,17 +549,34 @@ for real_sid in universe_ids:
     all_ts.update(flat.index)
 
     flat_frame = frame(sid, flat)
-    print(f"Writing {len(flat_frame)} rows to {OUT['A']}")
-    flat_frame.to_csv(OUT["A"], mode="a", header=False, index=False)
+    flat_frames.append(flat_frame)
 
     fraw = frame(sid, raw)
-    print(f"Writing {len(fraw)} rows to {OUT['H']} and {OUT['I']}")
-    fraw.to_csv(OUT["H"], mode="a", header=False, index=False)
-    fraw.to_csv(OUT["I"], mode="a", header=False, index=False)
+    raw_frames.append(fraw)
 
     if first_G:
-        fraw.to_csv(OUT["G"], header=False, index=False)
+        g_frame = fraw
         first_G = False
+
+    log_timer(f"Processed {sid} {symbol}", sym_start)
+
+if flat_frames:
+    t_write = perf_time.perf_counter()
+    flat_all = pd.concat(flat_frames, ignore_index=True)
+    print(f"Writing {len(flat_all)} flattened rows to {OUT['A']}")
+    flat_all.to_csv(OUT["A"], header=False, index=False)
+    t_write = log_timer("Write flattened prices", t_write)
+
+if raw_frames:
+    t_write_raw = perf_time.perf_counter()
+    raw_all = pd.concat(raw_frames, ignore_index=True)
+    print(f"Writing {len(raw_all)} raw rows to {OUT['H']} and {OUT['I']}")
+    raw_all.to_csv(OUT["H"], header=False, index=False)
+    raw_all.to_csv(OUT["I"], header=False, index=False)
+    t_write_raw = log_timer("Write raw prices", t_write_raw)
+
+if g_frame is not None:
+    g_frame.to_csv(OUT["G"], header=False, index=False)
 
 # Auxiliary B C D
 pd.Series(universe_ids).to_csv(OUT["B"], header=False, index=False)
@@ -550,4 +598,4 @@ for key in ["A", "H", "I"]:
     else:
         print(f"Warning: expected {path} was not created")
 
-print("Export complete")
+log_timer("Export complete", t_total_start)
