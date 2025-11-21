@@ -28,15 +28,18 @@ public class OrderSender
         ["ALL"] = (TimeSpan.Parse("02:00", CultureInfo.InvariantCulture), TimeSpan.Parse("15:59", CultureInfo.InvariantCulture)),
     };
 
-    private static readonly IReadOnlyList<string> SessionPreference = new[]
+    private static readonly IReadOnlyCollection<string> AllowedTradingSessions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
+        "EU",
         "US",
-        "US2",
+        "EUUS"
+    };
+
+    private static readonly IReadOnlyList<string> TradingSessionPreference = new[]
+    {
         "EU",
         "EUUS",
-        "AS",
-        "ASEU",
-        "ALL"
+        "US"
     };
 
     private const int TargetModelId = 1;
@@ -958,7 +961,7 @@ VALUES
         return TimeSpan.FromMinutes(fallbackMinutes);
     }
 
-    private string ResolveTradingSession(DateTime barTimeUtc)
+    protected virtual string ResolveTradingSession(DateTime barTimeUtc)
     {
         var configured = Environment.GetEnvironmentVariable("WAKETT_SESSION")
             ?? _configuration["ExternalApis:WakettApi:Session"];
@@ -966,9 +969,16 @@ VALUES
         if (!string.IsNullOrWhiteSpace(configured))
         {
             var normalized = configured.Trim().ToUpperInvariant();
-            if (SessionBounds.ContainsKey(normalized))
+            if (AllowedTradingSessions.Contains(normalized))
             {
                 return normalized;
+            }
+
+            if (SessionBounds.ContainsKey(normalized))
+            {
+                _logger.LogWarning(
+                    "Configured trading session {ConfiguredSession} is not enabled. Falling back to allowed sessions EU/US/EUUS.",
+                    configured);
             }
         }
 
@@ -981,7 +991,7 @@ VALUES
             if (!string.IsNullOrWhiteSpace(programmeSession))
             {
                 var normalized = programmeSession.Trim().ToUpperInvariant();
-                if (SessionBounds.ContainsKey(normalized))
+                if (AllowedTradingSessions.Contains(normalized))
                 {
                     return normalized;
                 }
@@ -989,7 +999,7 @@ VALUES
         }
 
         var local = TimeZoneInfo.ConvertTimeFromUtc(barTimeUtc, NewYorkZone);
-        foreach (var session in SessionPreference)
+        foreach (var session in TradingSessionPreference)
         {
             if (SessionBounds.TryGetValue(session, out var bounds) && IsWithinSession(local, bounds))
             {
