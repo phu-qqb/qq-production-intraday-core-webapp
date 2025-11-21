@@ -7,6 +7,7 @@ from an MS SQL database instead of parquet files in S3.
 from __future__ import annotations
 import argparse
 import json
+import numpy as np
 import os
 import pathlib
 import sys
@@ -333,13 +334,15 @@ def flatten_series(raw: pd.Series, tz: str = "America/New_York") -> pd.Series:
     day_change = pd.Series(local_dates).ne(pd.Series(local_dates).shift())
     returns.loc[day_change.values] = 0
 
-    flattened = pd.Series(index=ordered.index, dtype="float64")
-    flattened.iloc[-1] = ordered.iloc[-1]
-    for i in range(len(ordered) - 2, -1, -1):
-        inc = returns.iloc[i + 1]
-        flattened.iloc[i] = flattened.iloc[i + 1] / (1 + inc)
+    forward_factors = (1 + returns.iloc[1:]).to_numpy()
+    if forward_factors.size:
+        forward_products = np.cumprod(forward_factors[::-1])[::-1]
+        factors = np.concatenate([forward_products, np.array([1.0])])
+    else:
+        factors = np.array([1.0])
 
-    return flattened
+    flattened_values = ordered.iloc[-1] / factors
+    return pd.Series(flattened_values, index=ordered.index)
 
 def get_universe_info(
     engine: sa.engine.Engine, description: str
@@ -497,6 +500,9 @@ sub_members.to_csv(OUT["F"], header=False, index=False)
 
 all_ts: set[pd.Timestamp] = set()
 first_G = True
+flat_frames: list[pd.DataFrame] = []
+raw_frames: list[pd.DataFrame] = []
+g_frame: pd.DataFrame | None = None
 
 base_pairs = load_configured_base_pairs(args.config)
 t_mark = log_timer("Load base pairs from config", t_mark)
@@ -543,19 +549,34 @@ for real_sid in universe_ids:
     all_ts.update(flat.index)
 
     flat_frame = frame(sid, flat)
-    print(f"Writing {len(flat_frame)} rows to {OUT['A']}")
-    flat_frame.to_csv(OUT["A"], mode="a", header=False, index=False)
+    flat_frames.append(flat_frame)
 
     fraw = frame(sid, raw)
-    print(f"Writing {len(fraw)} rows to {OUT['H']} and {OUT['I']}")
-    fraw.to_csv(OUT["H"], mode="a", header=False, index=False)
-    fraw.to_csv(OUT["I"], mode="a", header=False, index=False)
+    raw_frames.append(fraw)
 
     if first_G:
-        fraw.to_csv(OUT["G"], header=False, index=False)
+        g_frame = fraw
         first_G = False
 
     log_timer(f"Processed {sid} {symbol}", sym_start)
+
+if flat_frames:
+    t_write = perf_time.perf_counter()
+    flat_all = pd.concat(flat_frames, ignore_index=True)
+    print(f"Writing {len(flat_all)} flattened rows to {OUT['A']}")
+    flat_all.to_csv(OUT["A"], header=False, index=False)
+    t_write = log_timer("Write flattened prices", t_write)
+
+if raw_frames:
+    t_write_raw = perf_time.perf_counter()
+    raw_all = pd.concat(raw_frames, ignore_index=True)
+    print(f"Writing {len(raw_all)} raw rows to {OUT['H']} and {OUT['I']}")
+    raw_all.to_csv(OUT["H"], header=False, index=False)
+    raw_all.to_csv(OUT["I"], header=False, index=False)
+    t_write_raw = log_timer("Write raw prices", t_write_raw)
+
+if g_frame is not None:
+    g_frame.to_csv(OUT["G"], header=False, index=False)
 
 # Auxiliary B C D
 pd.Series(universe_ids).to_csv(OUT["B"], header=False, index=False)
