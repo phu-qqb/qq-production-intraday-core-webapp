@@ -123,15 +123,64 @@ def parse_pair(symbol: str) -> tuple[str, str] | None:
     return normalized[:3], normalized[3:]
 
 
+def _strip_json_comments(raw: str) -> str:
+    """Remove ``//`` and ``/* */`` comments from JSON text safely."""
+
+    out = []
+    in_string = False
+    escape = False
+    i = 0
+    length = len(raw)
+
+    while i < length:
+        ch = raw[i]
+
+        if escape:
+            out.append(ch)
+            escape = False
+            i += 1
+            continue
+
+        if ch == "\\" and in_string:
+            out.append(ch)
+            escape = True
+            i += 1
+            continue
+
+        if ch == '"':
+            in_string = not in_string
+            out.append(ch)
+            i += 1
+            continue
+
+        if not in_string:
+            if raw.startswith("//", i):
+                newline = raw.find("\n", i)
+                if newline == -1:
+                    break
+                i = newline + 1
+                continue
+
+            if raw.startswith("/*", i):
+                end = raw.find("*/", i + 2)
+                if end == -1:
+                    break
+                i = end + 2
+                continue
+
+        out.append(ch)
+        i += 1
+
+    return "".join(out)
+
+
 def _load_json_allowing_comments(path: pathlib.Path) -> dict:
     """Load JSON that may contain ``//`` or ``/* */`` comments."""
 
     if not path.exists():
         raise FileNotFoundError(f"Config file not found: {path}")
 
-    text = path.read_text()
-    no_line_comments = re.sub(r"//.*?$", "", text, flags=re.MULTILINE)
-    cleaned = re.sub(r"/\*.*?\*/", "", no_line_comments, flags=re.DOTALL)
+    cleaned = _strip_json_comments(path.read_text())
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError as exc:
