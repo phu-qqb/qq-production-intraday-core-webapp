@@ -894,6 +894,42 @@ public class OrderSenderTests
         Assert.Equal(expected, formatted);
     }
 
+    [Theory]
+    [InlineData("EU", "EU")]
+    [InlineData("US", "US")]
+    [InlineData("EUUS", "EUUS")]
+    public void ResolveTradingSession_RespectsAllowedConfiguration(string configuredSession, string expected)
+    {
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["ExternalApis:WakettApi:Session"] = configuredSession
+        });
+
+        var sender = CreateSessionResolvingSender(configuration);
+        var result = sender.InvokeResolveTradingSession(new DateTime(2024, 1, 2, 12, 0, 0, DateTimeKind.Utc));
+
+        Assert.Equal(expected, result);
+    }
+
+    [Fact]
+    public void ResolveTradingSession_PrefersAllowedSessionsWhenConfiguredSessionDisabled()
+    {
+        var zoneId = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York";
+        var zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
+        var localBar = new DateTime(2024, 1, 2, 10, 0, 0, DateTimeKind.Unspecified);
+        var barTimeUtc = TimeZoneInfo.ConvertTimeToUtc(localBar, zone);
+
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["ExternalApis:WakettApi:Session"] = "AS"
+        });
+
+        var sender = CreateSessionResolvingSender(configuration);
+        var result = sender.InvokeResolveTradingSession(barTimeUtc);
+
+        Assert.Equal("EUUS", result);
+    }
+
     private static IConfigurationRoot BuildConfiguration(IDictionary<string, string?> values)
     {
         var defaults = new Dictionary<string, string?>
@@ -909,6 +945,26 @@ public class OrderSenderTests
         }
 
         return new ConfigurationBuilder().AddInMemoryCollection(defaults).Build();
+    }
+
+    private static TestOrderSender CreateSessionResolvingSender(IConfiguration configuration)
+    {
+        var httpClient = new HttpClient();
+        var factory = Mock.Of<IHttpClientFactory>(f => f.CreateClient(It.IsAny<string>()) == httpClient);
+        var apiClient = new WakettApiClient(factory);
+        var context = new Mock<DapperContext>(configuration);
+        context.Setup(c => c.CreateConnection()).Returns(Mock.Of<IDbConnection>());
+        var logger = Mock.Of<ILogger<OrderSender>>();
+
+        return new TestOrderSender(
+            apiClient,
+            context.Object,
+            logger,
+            configuration,
+            new TestTimeProvider(DateTimeOffset.UtcNow),
+            Array.Empty<OrderSender.NettedWeightRow>(),
+            new Dictionary<int, string>(),
+            null);
     }
 
     private sealed class TestOrderSender : OrderSender
@@ -996,6 +1052,9 @@ public class OrderSenderTests
             IEnumerable<(int SecurityId, WakettOrderItem Order)> builtOrders,
             CancellationToken cancellationToken)
             => Task.FromResult(_existingOrderSymbols);
+
+        public string InvokeResolveTradingSession(DateTime barTimeUtc)
+            => ResolveTradingSession(barTimeUtc);
     }
 
     private sealed class TestTimeProvider : TimeProvider
