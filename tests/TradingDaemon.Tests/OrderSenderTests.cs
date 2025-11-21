@@ -876,7 +876,7 @@ public class OrderSenderTests
     }
 
     [Fact]
-    public void FormatTimestamp_TopOfHourBarsAdvanceToNextHour()
+    public void FormatTimestamp_TopOfHourBarsAdvanceToNextQuarterHour()
     {
         var zoneId = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York";
         var zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
@@ -885,11 +885,29 @@ public class OrderSenderTests
 
         var formatted = OrderSender.FormatTimestamp(barTimeUtc);
 
-        var expectedLocal = localBar.AddHours(1).AddMinutes(6);
+        var expectedLocal = localBar.AddMinutes(15);
         var offset = zone.GetUtcOffset(expectedLocal);
         var sign = offset < TimeSpan.Zero ? "-" : "+";
         var abs = offset.Duration();
         var expected = $"{expectedLocal:yyyy-MM-dd HH:mm:ss.fff}{sign}{abs.Hours:00}{abs.Minutes:00}";
+
+        Assert.Equal(expected, formatted);
+    }
+
+    [Fact]
+    public void FormatTimestamp_PreservesMinuteWhenProvided()
+    {
+        var zoneId = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York";
+        var zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
+        var localBar = new DateTime(2024, 2, 5, 9, 21, 0, DateTimeKind.Unspecified);
+        var barTimeUtc = TimeZoneInfo.ConvertTimeToUtc(localBar, zone);
+
+        var formatted = OrderSender.FormatTimestamp(barTimeUtc);
+
+        var offset = zone.GetUtcOffset(localBar);
+        var sign = offset < TimeSpan.Zero ? "-" : "+";
+        var abs = offset.Duration();
+        var expected = $"{localBar:yyyy-MM-dd HH:mm:ss.fff}{sign}{abs.Hours:00}{abs.Minutes:00}";
 
         Assert.Equal(expected, formatted);
     }
