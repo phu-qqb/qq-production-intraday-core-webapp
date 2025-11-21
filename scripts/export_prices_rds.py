@@ -12,6 +12,7 @@ import pathlib
 import sys
 from datetime import time
 from typing import List
+import re
 
 import boto3
 from botocore.exceptions import ClientError
@@ -110,6 +111,230 @@ def frame(sec_id: int, ser: pd.Series) -> pd.DataFrame:
     )
     return df
 
+
+def normalize_symbol(symbol: str) -> str:
+    return symbol.replace("/", "").strip().upper()
+
+
+def parse_pair(symbol: str) -> tuple[str, str] | None:
+    normalized = normalize_symbol(symbol)
+    if len(normalized) != 6:
+        return None
+    return normalized[:3], normalized[3:]
+
+
+def _strip_json_comments(raw: str) -> str:
+    """Remove ``//`` and ``/* */`` comments from JSON text safely."""
+
+    out = []
+    in_string = False
+    escape = False
+    i = 0
+    length = len(raw)
+
+    while i < length:
+        ch = raw[i]
+
+        if escape:
+            out.append(ch)
+            escape = False
+            i += 1
+            continue
+
+        if ch == "\\" and in_string:
+            out.append(ch)
+            escape = True
+            i += 1
+            continue
+
+        if ch == '"':
+            in_string = not in_string
+            out.append(ch)
+            i += 1
+            continue
+
+        if not in_string:
+            if raw.startswith("//", i):
+                newline = raw.find("\n", i)
+                if newline == -1:
+                    break
+                i = newline + 1
+                continue
+
+            if raw.startswith("/*", i):
+                end = raw.find("*/", i + 2)
+                if end == -1:
+                    break
+                i = end + 2
+                continue
+
+        out.append(ch)
+        i += 1
+
+    return "".join(out)
+
+
+def _load_json_allowing_comments(path: pathlib.Path) -> dict:
+    """Load JSON that may contain ``//`` or ``/* */`` comments."""
+
+    if not path.exists():
+        raise FileNotFoundError(f"Config file not found: {path}")
+
+    cleaned = _strip_json_comments(path.read_text())
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Failed to parse JSON from {path}: {exc}") from exc
+
+
+def load_configured_base_pairs(path: pathlib.Path) -> list[str]:
+    data = _load_json_allowing_comments(path)
+
+    base_pairs = (
+        data.get("ExternalApis", {})
+        .get("WakettApi", {})
+        .get("BasePairs", [])
+    )
+    return [normalize_symbol(p) for p in base_pairs if isinstance(p, str)]
+
+
+def ensure_usd_quote(pair: str) -> tuple[str | None, bool]:
+    parsed = parse_pair(pair)
+    if parsed is None:
+        return None, False
+
+    base, quote = parsed
+    if quote == "USD":
+        return pair, False
+    if base == "USD":
+        return f"{quote}USD", True
+    return None, False
+
+
+def load_security_definitions(engine: sa.engine.Engine) -> pd.DataFrame:
+    sql = sa.text(
+        """
+        SELECT SecurityId, Symbol
+        FROM core.Security
+        WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''
+        """
+    )
+    df = pd.read_sql(sql, engine)
+    df["NormalizedSymbol"] = df["Symbol"].apply(normalize_symbol)
+    return df
+
+
+def build_base_currency_series(
+    engine: sa.engine.Engine,
+    base_pairs: list[str],
+    security_defs: pd.DataFrame,
+    start: str | None,
+    session: str,
+    timeframe: int,
+) -> dict[str, pd.Series]:
+    series_map: dict[str, pd.Series] = {}
+    lookup = {
+        row["NormalizedSymbol"]: int(row["SecurityId"])
+        for _, row in security_defs.iterrows()
+    }
+
+    for configured in base_pairs:
+        target_symbol, invert = ensure_usd_quote(configured)
+        if target_symbol is None:
+            print(f"Skipping base pair without USD: {configured}")
+            continue
+
+        candidates = [target_symbol]
+        if configured not in candidates:
+            candidates.append(configured)
+
+        security_id = None
+        used_symbol = None
+        used_inversion = invert
+
+        for candidate in candidates:
+            sid = lookup.get(candidate)
+            if sid is not None:
+                security_id = sid
+                used_symbol = candidate
+                used_inversion = candidate != target_symbol
+                break
+
+        if security_id is None or used_symbol is None:
+            print(f"No security found for base pair {configured}")
+            continue
+
+        raw_df = read_price_bars(engine, security_id, start, session, timeframe)
+        raw_series = raw_df.set_index("timestamp")["close"]
+        if used_inversion:
+            raw_series = 1 / raw_series
+
+        currency = target_symbol[:3]
+        series_map[currency] = raw_series
+        check_long_gaps(raw_series.index.to_series(), 5)
+        print(
+            f"Loaded base {currency}USD from security {security_id}"
+            f" ({'inverted' if used_inversion else 'direct'} {used_symbol})"
+        )
+
+    return series_map
+
+
+def build_security_symbol_map(
+    security_defs: pd.DataFrame, universe_ids: list[int]
+) -> dict[int, str]:
+    subset = security_defs[security_defs["SecurityId"].isin(universe_ids)]
+    return {
+        int(row["SecurityId"]): row["NormalizedSymbol"] for _, row in subset.iterrows()
+    }
+
+
+def compute_series_for_symbol(
+    pair: tuple[str, str], currency_usd: dict[str, pd.Series]
+) -> pd.Series | None:
+    base, quote = pair
+    if quote == "USD":
+        return currency_usd.get(base)
+    if base == "USD":
+        series = currency_usd.get(quote)
+        return None if series is None else 1 / series
+
+    base_series = currency_usd.get(base)
+    quote_series = currency_usd.get(quote)
+    if base_series is None or quote_series is None:
+        return None
+
+    aligned = pd.concat([base_series, quote_series], axis=1, join="inner")
+    if aligned.empty:
+        return None
+    aligned.columns = ["base", "quote"]
+    return aligned["base"] / aligned["quote"]
+
+
+def flatten_series(raw: pd.Series, tz: str = "America/New_York") -> pd.Series:
+    """Return a flattened series without overnight jumps.
+
+    The result matches the prior backward iteration but avoids Python loops by
+    using cumulative products. Day boundaries are detected in the provided
+    timezone and force a zero return, eliminating overnight jumps.
+    """
+
+    if raw.empty:
+        return raw
+
+    ordered = raw.sort_index()
+    local_dates = ordered.index.tz_convert(tz).normalize()
+
+    returns = ordered.pct_change().fillna(0.0)
+    day_change = local_dates != local_dates.shift()
+    returns.loc[day_change] = 0.0
+
+    growth = (1.0 + returns).cumprod()
+    scaled = growth / growth.iloc[-1]
+    flattened = scaled * ordered.iloc[-1]
+    flattened.name = ordered.name
+    return flattened
+
 def get_universe_info(
     engine: sa.engine.Engine, description: str
 ) -> tuple[int, str, pd.DataFrame]:
@@ -182,35 +407,6 @@ def read_price_bars(
     return df[mask].copy()
 
 
-def read_flat_bars(
-    engine: sa.engine.Engine,
-    security_id: int,
-    start: str | None,
-    session: str,
-    timeframe: int = 60,
-) -> pd.DataFrame:
-    params = {"sid": security_id, "tf": timeframe}
-    sql = (
-        "SELECT BarTimeUtc AS timestamp, [Close] AS [close] "
-        "FROM mkt.FlatBar "
-        "WHERE SecurityId = :sid AND TimeframeMinute = :tf "
-        "AND DATEPART(MINUTE, BarTimeUtc) % :tf = 6"
-    )
-    if start:
-        sql += " AND BarTimeUtc >= :start"
-        params["start"] = start
-    sql += " ORDER BY BarTimeUtc"
-    df = pd.read_sql(sa.text(sql), engine, params=params)
-    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-    end_times = df["timestamp"] + pd.Timedelta(minutes=timeframe)
-    start_t, end_t = SESSION_HOURS_NY[session]
-    local = end_times.dt.tz_convert("America/New_York")
-    minutes = local.dt.hour * 60 + local.dt.minute
-    lo = start_t.hour * 60 + start_t.minute
-    hi = end_t.hour * 60 + end_t.minute + 1
-    mask = minutes.between(lo, hi)
-    return df[mask].copy()
-
 # ---------- CLI ----------
 cli = argparse.ArgumentParser()
 cli.add_argument("--session", choices=["US", "EU", "EUUS", "ALL"], default="EUUS")
@@ -243,6 +439,12 @@ cli.add_argument(
     type=int,
     default=60,
     help="Bar timeframe in minutes (TimeframeMinute)",
+)
+cli.add_argument(
+    "--config",
+    type=pathlib.Path,
+    default=pathlib.Path("src/TradingDaemon/appsettings.json"),
+    help="Path to appsettings.json containing ExternalApis:WakettApi:BasePairs",
 )
 args = cli.parse_args()
 print("timeframe:", args.timeframe)
@@ -286,31 +488,40 @@ sub_members.to_csv(OUT["F"], header=False, index=False)
 all_ts: set[pd.Timestamp] = set()
 first_G = True
 
+base_pairs = load_configured_base_pairs(args.config)
+if not base_pairs:
+    sys.exit("No base pairs configured in appsettings.json")
+
+security_defs = load_security_definitions(engine)
+currency_usd = build_base_currency_series(
+    engine, base_pairs, security_defs, start_filter, args.session, args.timeframe
+)
+if not currency_usd:
+    sys.exit("No base USD pairs available to build prices")
+
+symbol_map = build_security_symbol_map(security_defs, universe_ids)
+
 for real_sid in universe_ids:
     sid = real_sid
-    print("done", real_sid)
-
-    df_raw = read_price_bars(
-        engine, real_sid, start_filter, args.session, args.timeframe
-    )
-    check_long_gaps(df_raw["timestamp"], 5)
-    if df_raw.empty:
-        print(f"Skipping {real_sid}: no raw bars")
+    symbol = symbol_map.get(sid)
+    if not symbol:
+        print(f"Skipping {sid}: no symbol found")
         continue
 
-    df_flat = read_flat_bars(
-        engine, real_sid, start_filter, args.session, args.timeframe
-    )
-    if df_flat.empty:
-        print(f"Skipping {real_sid}: no flat bars")
+    parsed = parse_pair(symbol)
+    if parsed is None:
+        print(f"Skipping {sid}: invalid symbol {symbol}")
         continue
 
-    raw = df_raw.set_index("timestamp")["close"]
-    flat = df_flat.set_index("timestamp")["close"]
+    print("Processing", sid, symbol)
+    raw = compute_series_for_symbol(parsed, currency_usd)
+    if raw is None or raw.empty:
+        print(f"Skipping {sid}: unable to build raw series")
+        continue
+
+    check_long_gaps(raw.index.to_series(), 5)
+    flat = flatten_series(raw)
     all_ts.update(flat.index)
-
-    # Ensure H and I only contain timestamps present in A
-    raw = raw.reindex(flat.index).dropna()
 
     flat_frame = frame(sid, flat)
     print(f"Writing {len(flat_frame)} rows to {OUT['A']}")
@@ -333,10 +544,10 @@ ts_fmt = (
     pd.to_datetime(ts_sorted, utc=True).tz_convert("UTC").strftime(FMT).tolist()
 )
 pd.Series(ts_fmt).to_csv(OUT["D"], header=False, index=False)
-with OUT["C"].open("w") as fhc:
-    for sid in sorted(universe_ids):
-        for t_str in ts_fmt:
-            fhc.write(f"{sid},{t_str}\n")
+combo = pd.MultiIndex.from_product(
+    [sorted(universe_ids), ts_fmt], names=["securityId", "timestamp"]
+).to_frame(index=False)
+combo.to_csv(OUT["C"], header=False, index=False)
 
 for key in ["A", "H", "I"]:
     path = OUT[key]
