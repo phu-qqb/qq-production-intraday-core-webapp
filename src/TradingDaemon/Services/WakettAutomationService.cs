@@ -18,10 +18,10 @@ public sealed class WakettAutomationService : BackgroundService
     private static readonly TimeSpan SessionEnd = new(15, 59, 0);
     private static readonly TimeSpan SessionShutdownDelay = TimeSpan.FromHours(1);
 
-    private static readonly IReadOnlyList<TimeSpan> PriceFetchOffsets = BuildQuarterOffsets(TimeSpan.FromSeconds(7));
-    private static readonly IReadOnlyList<TimeSpan> WeightCalculationOffsets = BuildQuarterOffsets(TimeSpan.FromSeconds(7.5));
-    private static readonly IReadOnlyList<TimeSpan> FillCheckOffsets = new[] { TimeSpan.FromMinutes(10), TimeSpan.FromMinutes(40) };
-    private static readonly IReadOnlyList<TimeSpan> OrderSubmissionOffsets = BuildQuarterOffsets(TimeSpan.FromSeconds(1));
+    private static readonly IReadOnlyList<TimeSpan> PriceFetchOffsets = BuildQuarterOffsets(TimeSpan.FromMinutes(7));
+    private static readonly IReadOnlyList<TimeSpan> WeightCalculationOffsets = BuildQuarterOffsets(TimeSpan.FromMinutes(7.5));
+    private static readonly IReadOnlyList<TimeSpan> FillCheckOffsets = BuildQuarterOffsets(TimeSpan.FromMinutes(0));
+    private static readonly IReadOnlyList<TimeSpan> OrderSubmissionOffsets = BuildQuarterOffsets(TimeSpan.FromMinutes(1));
     private static readonly IReadOnlyList<TimeSpan> PnlReportOffsets = new[] { TimeSpan.FromMinutes(15) };
 
     private readonly WakettPriceFetcher _priceFetcher;
