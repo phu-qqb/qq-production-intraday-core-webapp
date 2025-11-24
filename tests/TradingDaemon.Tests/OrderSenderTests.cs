@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Runtime.InteropServices;
@@ -190,6 +191,47 @@ public class OrderSenderTests
         Assert.Equal(OrderSender.BuildOrderCode(61, expectedOrderTimestampUtc), second.GetProperty("code").GetString());
         Assert.Equal("percentage", second.GetProperty("size").GetProperty("type").GetString());
         Assert.Equal(0d, second.GetProperty("size").GetProperty("value").GetDouble());
+    }
+
+    [Theory]
+    [InlineData(2024, 1, 1, 17, 0, 0, false)] // 06:00 NZDT
+    [InlineData(2024, 1, 1, 18, 0, 0, true)]  // 07:00 NZDT
+    [InlineData(2024, 6, 30, 18, 25, 0, false)] // 06:25 NZST
+    [InlineData(2024, 6, 30, 18, 30, 0, true)]  // 06:30 NZST
+    public void ApplyWeightOverrides_UsesNewZealandLocalTime(
+        int year,
+        int month,
+        int day,
+        int hour,
+        int minute,
+        int second,
+        bool expectZero)
+    {
+        var orderTimestampUtc = new DateTime(year, month, day, hour, minute, second, DateTimeKind.Utc);
+        var barTimeUtc = orderTimestampUtc.AddMinutes(-60);
+
+        var weights = new List<OrderSender.NettedWeightRow>
+        {
+            new() { SecurityId = 1, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 10, Weight = 0.12m },
+            new() { SecurityId = 2, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 10, Weight = -0.03m }
+        };
+
+        var symbolMap = new Dictionary<int, string>
+        {
+            [1] = "NZDUSD",
+            [2] = "EURUSD"
+        };
+
+        var configuration = BuildConfiguration(new Dictionary<string, string?>());
+        var sender = CreateSessionResolvingSender(configuration);
+
+        var result = sender.InvokeApplyWeightOverrides(weights, symbolMap, orderTimestampUtc);
+
+        var nzdusd = Assert.Single(result, row => row.SecurityId == 1);
+        var eurusd = Assert.Single(result, row => row.SecurityId == 2);
+
+        Assert.Equal(expectZero ? 0m : 0.12m, nzdusd.Weight);
+        Assert.Equal(-0.03m, eurusd.Weight);
     }
 
     [Fact]
@@ -948,6 +990,12 @@ public class OrderSenderTests
             IEnumerable<(int SecurityId, WakettOrderItem Order)> builtOrders,
             CancellationToken cancellationToken)
             => Task.FromResult(_existingOrderSymbols);
+
+        public IReadOnlyList<OrderSender.NettedWeightRow> InvokeApplyWeightOverrides(
+            IEnumerable<OrderSender.NettedWeightRow> weights,
+            IReadOnlyDictionary<int, string> symbolMap,
+            DateTime orderTimestampUtc)
+            => ApplyWeightOverrides(weights, symbolMap, orderTimestampUtc).ToList();
 
         public string InvokeResolveTradingSession(DateTime barTimeUtc)
             => ResolveTradingSession(barTimeUtc);
