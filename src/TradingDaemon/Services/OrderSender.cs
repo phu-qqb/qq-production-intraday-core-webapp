@@ -396,45 +396,47 @@ public class OrderSender
             .ToList();
     }
 
-    private async Task<DateTime> ResolveOrderTimestampAsync(
+    private Task<DateTime> ResolveOrderTimestampAsync(
         IDbConnection connection,
         IReadOnlyList<ModelSnapshot> snapshots,
         DateTime utcNow,
         CancellationToken cancellationToken)
     {
-        var maxBarTimeUtc = snapshots.Max(snapshot => snapshot.BarTimeUtc);
-        var maxBarLocal = TimeZoneInfo.ConvertTimeFromUtc(maxBarTimeUtc, NewYorkZone);
+        _ = connection;
+        _ = cancellationToken;
+
+        var sessionKey = ResolveOrderSession(utcNow, snapshots);
+        var normalizedSession = string.IsNullOrWhiteSpace(sessionKey)
+            ? ResolveTradingSession(utcNow)
+            : sessionKey;
+
+        return Task.FromResult(CalculateOrderTimestamp(utcNow, normalizedSession));
+    }
+
+    private string ResolveOrderSession(DateTime utcNow, IReadOnlyList<ModelSnapshot> snapshots)
+    {
         var nowLocal = TimeZoneInfo.ConvertTimeFromUtc(utcNow, NewYorkZone);
 
-        if (maxBarLocal.Date < nowLocal.Date)
+        foreach (var snapshot in snapshots)
         {
-            var anchor = snapshots
-                .OrderBy(snapshot => snapshot.BarInterval)
-                .ThenBy(snapshot => snapshot.ModelId)
-                .First();
-
-            var schedule = await LoadModelScheduleAsync(connection, anchor.ModelId, cancellationToken);
-            var anchorSession = anchor.SessionKey ?? ResolveTradingSession(maxBarTimeUtc);
-            var calculated = CalculateOrderTimestamp(
-                maxBarTimeUtc,
-                anchor.BarInterval,
-                anchorSession,
-                schedule?.Offset,
-                schedule?.BarSize);
-
-            var calculatedLocal = TimeZoneInfo.ConvertTimeFromUtc(calculated, NewYorkZone);
-            if (calculatedLocal.Date > maxBarLocal.Date)
+            var normalized = snapshot.SessionKey?.Trim().ToUpperInvariant();
+            if (string.IsNullOrWhiteSpace(normalized))
             {
-                _logger.LogInformation(
-                    "Calculated Wakett order timestamp {OrderTimestamp} falls on the next trading day relative to the latest bar {BarTimestamp}. Proceeding with submission.",
-                    calculatedLocal,
-                    maxBarLocal);
+                continue;
             }
 
-            return calculated;
+            if (!SessionBounds.TryGetValue(normalized, out var bounds))
+            {
+                continue;
+            }
+
+            if (IsWithinSession(nowLocal, bounds))
+            {
+                return normalized;
+            }
         }
 
-        return maxBarTimeUtc;
+        return ResolveTradingSession(utcNow);
     }
 
     private async Task PersistOrderResponseAsync(
@@ -814,130 +816,47 @@ VALUES
         return value;
     }
 
-    internal static DateTime CalculateOrderTimestamp(
-        DateTime barTimeUtc,
-        TimeSpan barInterval,
-        string sessionKey,
-        int? offsetMinutes = null,
-        int? barSizeMinutes = null)
+    internal static DateTime CalculateOrderTimestamp(DateTime utcNow, string sessionKey)
     {
         if (!SessionBounds.TryGetValue(sessionKey, out var bounds))
         {
             bounds = SessionBounds["US"];
         }
 
-        var zone = NewYorkZone;
-        var local = TimeZoneInfo.ConvertTimeFromUtc(barTimeUtc, zone);
-        var (sessionStart, sessionEnd) = GetSessionWindow(local, bounds);
-
-        var scheduleCandidate = TryGetNextScheduledTime(
-            local,
-            sessionStart,
-            sessionEnd,
-            offsetMinutes,
-            barSizeMinutes);
-
-        if (scheduleCandidate is not null)
-        {
-            return TimeZoneInfo.ConvertTimeToUtc(scheduleCandidate.Value, zone);
-        }
-
-        var candidate = local + barInterval;
-        if (candidate <= sessionEnd)
-        {
-            return TimeZoneInfo.ConvertTimeToUtc(candidate, zone);
-        }
-
-        var nextSessionStart = AlignNextSessionStart(
-            sessionStart,
-            barInterval,
-            offsetMinutes,
-            barSizeMinutes);
-        return TimeZoneInfo.ConvertTimeToUtc(nextSessionStart, zone);
-    }
-
-    private static DateTime? TryGetNextScheduledTime(
-        DateTime local,
-        DateTime sessionStart,
-        DateTime sessionEnd,
-        int? offsetMinutes,
-        int? barSizeMinutes)
-    {
-        if (offsetMinutes is not > 0)
-        {
-            return null;
-        }
-
-        var baseMinute = Math.Max(0, barSizeMinutes ?? 0);
-        var step = offsetMinutes.Value;
-
-        if (barSizeMinutes is > 0 && offsetMinutes.Value < barSizeMinutes.Value)
-        {
-            baseMinute = offsetMinutes.Value;
-            step = barSizeMinutes.Value;
-        }
-
-        var withinSession = GetNextScheduledLocal(local, step, baseMinute, strictlyGreater: true);
-        if (withinSession <= sessionEnd)
-        {
-            return withinSession;
-        }
-
-        var duration = sessionEnd - sessionStart;
+        var duration = bounds.End - bounds.Start;
         if (duration <= TimeSpan.Zero)
         {
             duration += TimeSpan.FromDays(1);
         }
 
-        var nextSessionStart = SkipWeekend(sessionStart.AddDays(1));
-        var nextSessionEnd = nextSessionStart + duration;
+        var zone = NewYorkZone;
+        var localNow = TimeZoneInfo.ConvertTimeFromUtc(utcNow, zone);
+        var sessionStart = SkipWeekend(localNow.Date + bounds.Start);
+        var sessionEnd = sessionStart + duration;
 
-        var nextSession = GetNextScheduledLocal(nextSessionStart, step, baseMinute, strictlyGreater: false);
-        if (nextSession > nextSessionEnd)
+        if (localNow < sessionStart)
         {
-            return nextSessionStart;
+            localNow = sessionStart;
+        }
+        else if (localNow > sessionEnd)
+        {
+            sessionStart = SkipWeekend(sessionStart.AddDays(1));
+            sessionEnd = sessionStart + duration;
+            localNow = sessionStart;
         }
 
-        return nextSession;
-    }
-
-    private static DateTime AlignNextSessionStart(
-        DateTime sessionStart,
-        TimeSpan barInterval,
-        int? offsetMinutes,
-        int? barSizeMinutes)
-    {
-        var nextSessionStart = SkipWeekend(sessionStart.AddDays(1));
-
-        if (offsetMinutes is > 0)
+        while (true)
         {
-            var step = offsetMinutes.Value;
-            var baseMinute = Math.Max(0, barSizeMinutes ?? 0);
-
-            if (barSizeMinutes is > 0 && offsetMinutes.Value < barSizeMinutes.Value)
+            var nextSlot = GetNextQuarterHourTimestamp(localNow);
+            if (nextSlot <= sessionEnd)
             {
-                baseMinute = offsetMinutes.Value;
-                step = barSizeMinutes.Value;
+                return TimeZoneInfo.ConvertTimeToUtc(nextSlot, zone);
             }
 
-            return GetNextScheduledLocal(nextSessionStart, step, baseMinute, strictlyGreater: false);
+            sessionStart = SkipWeekend(sessionStart.AddDays(1));
+            sessionEnd = sessionStart + duration;
+            localNow = sessionStart;
         }
-
-        var alignment = barSizeMinutes.GetValueOrDefault((int)Math.Round(barInterval.TotalMinutes));
-        if (alignment <= 0)
-        {
-            return nextSessionStart;
-        }
-
-        var minutesIntoDay = (int)Math.Floor(nextSessionStart.TimeOfDay.TotalMinutes);
-        var remainder = minutesIntoDay % alignment;
-        if (remainder == 0)
-        {
-            return nextSessionStart;
-        }
-
-        var delta = alignment - remainder;
-        return nextSessionStart.AddMinutes(delta);
     }
 
     private static DateTime SkipWeekend(DateTime candidate)
@@ -950,45 +869,22 @@ VALUES
         return candidate;
     }
 
-    private static DateTime GetNextScheduledLocal(
-        DateTime reference,
-        int stepMinutes,
-        int baseMinute,
-        bool strictlyGreater)
+    private static DateTime GetNextQuarterHourTimestamp(DateTime local)
     {
-        const int MinutesPerDay = 24 * 60;
+        var scheduleMinutes = new[] { 6, 21, 36, 51 };
+        var candidateHour = local.Hour;
 
-        var minutes = (int)Math.Floor(reference.TimeOfDay.TotalMinutes);
-
-        int nextMinute;
-        if (minutes < baseMinute || (minutes == baseMinute && !strictlyGreater))
+        foreach (var minute in scheduleMinutes)
         {
-            nextMinute = baseMinute;
-        }
-        else
-        {
-            var delta = minutes - baseMinute;
-            var steps = delta / stepMinutes;
-            var remainder = delta % stepMinutes;
-
-            if (remainder == 0)
+            var candidate = new DateTime(local.Year, local.Month, local.Day, candidateHour, minute, 0, local.Kind);
+            if (candidate > local)
             {
-                if (strictlyGreater)
-                {
-                    steps += 1;
-                }
+                return candidate;
             }
-            else
-            {
-                steps += 1;
-            }
-
-            nextMinute = baseMinute + (steps * stepMinutes);
         }
 
-        var dayOffset = Math.DivRem(nextMinute, MinutesPerDay, out var minuteOfDay);
-        var candidateDate = reference.Date.AddDays(dayOffset);
-        return candidateDate + TimeSpan.FromMinutes(minuteOfDay);
+        return new DateTime(local.Year, local.Month, local.Day, candidateHour, scheduleMinutes[0], 0, local.Kind)
+            .AddHours(1);
     }
 
     private TimeSpan ResolveBarInterval(
