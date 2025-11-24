@@ -82,12 +82,7 @@ public class OrderSenderTests
         using var document = JsonDocument.Parse(payload);
         var root = document.RootElement;
 
-        var expectedOrderTimestampUtc = OrderSender.CalculateOrderTimestamp(
-            barTimeUtc,
-            TimeSpan.FromMinutes(60),
-            "US",
-            60,
-            0);
+        var expectedOrderTimestampUtc = OrderSender.CalculateOrderTimestamp(now.UtcDateTime, "US");
         Assert.Equal(OrderSender.FormatTimestamp(expectedOrderTimestampUtc), root.GetProperty("ts").GetString());
         Assert.Equal(2_500_000d, root.GetProperty("aum").GetDouble());
         Assert.Equal("EOC", root.GetProperty("execution").GetString());
@@ -174,12 +169,7 @@ public class OrderSenderTests
         using var document = JsonDocument.Parse(payload);
         var root = document.RootElement;
 
-        var expectedOrderTimestampUtc = OrderSender.CalculateOrderTimestamp(
-            barTimeUtc,
-            TimeSpan.FromMinutes(60),
-            "US",
-            60,
-            0);
+        var expectedOrderTimestampUtc = OrderSender.CalculateOrderTimestamp(now.UtcDateTime, "US");
 
         Assert.True(root.TryGetProperty("execution", out var execution));
         Assert.Equal("EOF", execution.GetString());
@@ -517,12 +507,7 @@ public class OrderSenderTests
         using var document = JsonDocument.Parse(payload);
         var orders = document.RootElement.GetProperty("orders");
 
-        var expectedOrderTimestampUtc = OrderSender.CalculateOrderTimestamp(
-            barTimeUtc,
-            TimeSpan.FromMinutes(60),
-            "US",
-            60,
-            0);
+        var expectedOrderTimestampUtc = OrderSender.CalculateOrderTimestamp(now.UtcDateTime, "US");
 
         Assert.Equal(3, orders.GetArrayLength());
 
@@ -604,12 +589,7 @@ public class OrderSenderTests
         using var document = JsonDocument.Parse(payload);
         var orders = document.RootElement.GetProperty("orders");
 
-        var expectedOrderTimestampUtc = OrderSender.CalculateOrderTimestamp(
-            barTimeUtc,
-            TimeSpan.FromMinutes(60),
-            "US",
-            60,
-            0);
+        var expectedOrderTimestampUtc = OrderSender.CalculateOrderTimestamp(now.UtcDateTime, "US");
 
         Assert.Equal(1, orders.GetArrayLength());
 
@@ -740,136 +720,53 @@ public class OrderSenderTests
         var payload = await captured!.Content.ReadAsStringAsync();
         using var document = JsonDocument.Parse(payload);
         var root = document.RootElement;
-        var expectedTsUtc = OrderSender.CalculateOrderTimestamp(
-            previousDayUtc,
-            TimeSpan.FromMinutes(60),
-            "US",
-            60,
-            0);
+        var expectedTsUtc = OrderSender.CalculateOrderTimestamp(nowUtc, "US");
         Assert.Equal(OrderSender.FormatTimestamp(expectedTsUtc), root.GetProperty("ts").GetString());
     }
 
     [Fact]
-    public void CalculateOrderTimestamp_UsesModelScheduleWithinSession()
+    public void CalculateOrderTimestamp_UsesNextQuarterHourWithinSession()
     {
         var zoneId = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York";
         var zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
-        var localBar = new DateTime(2024, 1, 2, 10, 0, 0, DateTimeKind.Unspecified);
-        var barTimeUtc = TimeZoneInfo.ConvertTimeToUtc(localBar, zone);
+        var localNow = new DateTime(2024, 1, 2, 10, 2, 0, DateTimeKind.Unspecified);
+        var utcNow = TimeZoneInfo.ConvertTimeToUtc(localNow, zone);
 
-        var result = OrderSender.CalculateOrderTimestamp(
-            barTimeUtc,
-            TimeSpan.FromMinutes(60),
-            "US",
-            15,
-            5);
+        var result = OrderSender.CalculateOrderTimestamp(utcNow, "US");
 
-        var expectedLocal = new DateTime(2024, 1, 2, 10, 5, 0, DateTimeKind.Unspecified);
+        var expectedLocal = new DateTime(2024, 1, 2, 10, 6, 0, DateTimeKind.Unspecified);
         var expectedUtc = TimeZoneInfo.ConvertTimeToUtc(expectedLocal, zone);
 
         Assert.Equal(expectedUtc, result);
     }
 
     [Fact]
-    public void CalculateOrderTimestamp_HonorsBarMinuteOffsetFromLatestBar()
+    public void CalculateOrderTimestamp_RollsForwardWhenPastSessionEnd()
     {
         var zoneId = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York";
         var zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
-        var localBar = new DateTime(2024, 1, 2, 10, 6, 0, DateTimeKind.Unspecified);
-        var barTimeUtc = TimeZoneInfo.ConvertTimeToUtc(localBar, zone);
+        var localNow = new DateTime(2024, 1, 2, 16, 10, 0, DateTimeKind.Unspecified);
+        var utcNow = TimeZoneInfo.ConvertTimeToUtc(localNow, zone);
 
-        var result = OrderSender.CalculateOrderTimestamp(
-            barTimeUtc,
-            TimeSpan.FromMinutes(60),
-            "US",
-            60,
-            0);
+        var result = OrderSender.CalculateOrderTimestamp(utcNow, "US");
 
-        var expectedLocal = new DateTime(2024, 1, 2, 11, 6, 0, DateTimeKind.Unspecified);
+        var expectedLocal = new DateTime(2024, 1, 3, 9, 6, 0, DateTimeKind.Unspecified);
         var expectedUtc = TimeZoneInfo.ConvertTimeToUtc(expectedLocal, zone);
 
         Assert.Equal(expectedUtc, result);
     }
 
     [Fact]
-    public void CalculateOrderTimestamp_RollsToNextSessionWhenScheduleExceedsEnd()
+    public void CalculateOrderTimestamp_SkipsWeekendWhenAdvancing()
     {
         var zoneId = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York";
         var zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
-        var localBar = new DateTime(2024, 1, 2, 15, 50, 0, DateTimeKind.Unspecified);
-        var barTimeUtc = TimeZoneInfo.ConvertTimeToUtc(localBar, zone);
+        var localNow = new DateTime(2024, 1, 5, 16, 10, 0, DateTimeKind.Unspecified);
+        var utcNow = TimeZoneInfo.ConvertTimeToUtc(localNow, zone);
 
-        var result = OrderSender.CalculateOrderTimestamp(
-            barTimeUtc,
-            TimeSpan.FromMinutes(60),
-            "US",
-            15,
-            5);
+        var result = OrderSender.CalculateOrderTimestamp(utcNow, "US");
 
-        var nextSessionLocal = new DateTime(2024, 1, 3, 9, 35, 0, DateTimeKind.Unspecified);
-        var expectedUtc = TimeZoneInfo.ConvertTimeToUtc(nextSessionLocal, zone);
-
-        Assert.Equal(expectedUtc, result);
-    }
-
-    [Fact]
-    public void CalculateOrderTimestamp_NextSessionRespectsOffsetWhenBarSizeIsLarger()
-    {
-        var zoneId = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York";
-        var zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
-        var localBar = new DateTime(2024, 1, 2, 15, 59, 0, DateTimeKind.Unspecified);
-        var barTimeUtc = TimeZoneInfo.ConvertTimeToUtc(localBar, zone);
-
-        var result = OrderSender.CalculateOrderTimestamp(
-            barTimeUtc,
-            TimeSpan.FromMinutes(60),
-            "US",
-            6,
-            60);
-
-        var nextSessionLocal = new DateTime(2024, 1, 3, 9, 6, 0, DateTimeKind.Unspecified);
-        var expectedUtc = TimeZoneInfo.ConvertTimeToUtc(nextSessionLocal, zone);
-
-        Assert.Equal(expectedUtc, result);
-    }
-
-    [Fact]
-    public void CalculateOrderTimestamp_ZeroOffsetAlignsNextSessionToBarSize()
-    {
-        var zoneId = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York";
-        var zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
-        var localBar = new DateTime(2024, 1, 2, 15, 30, 0, DateTimeKind.Unspecified);
-        var barTimeUtc = TimeZoneInfo.ConvertTimeToUtc(localBar, zone);
-
-        var result = OrderSender.CalculateOrderTimestamp(
-            barTimeUtc,
-            TimeSpan.FromMinutes(60),
-            "US",
-            0,
-            60);
-
-        var expectedLocal = new DateTime(2024, 1, 3, 10, 0, 0, DateTimeKind.Unspecified);
-        var expectedUtc = TimeZoneInfo.ConvertTimeToUtc(expectedLocal, zone);
-
-        Assert.Equal(expectedUtc, result);
-    }
-
-    [Fact]
-    public void CalculateOrderTimestamp_SkipsWeekendWhenAdvancingToNextSession()
-    {
-        var zoneId = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York";
-        var zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
-        var localBar = new DateTime(2024, 1, 5, 15, 30, 0, DateTimeKind.Unspecified);
-        var barTimeUtc = TimeZoneInfo.ConvertTimeToUtc(localBar, zone);
-
-        var result = OrderSender.CalculateOrderTimestamp(
-            barTimeUtc,
-            TimeSpan.FromMinutes(60),
-            "US",
-            0,
-            60);
-
-        var expectedLocal = new DateTime(2024, 1, 8, 10, 0, 0, DateTimeKind.Unspecified);
+        var expectedLocal = new DateTime(2024, 1, 8, 9, 6, 0, DateTimeKind.Unspecified);
         var expectedUtc = TimeZoneInfo.ConvertTimeToUtc(expectedLocal, zone);
 
         Assert.Equal(expectedUtc, result);
