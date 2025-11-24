@@ -524,14 +524,6 @@ END";
             @"SELECT SecurityId, BloombergTicker FROM core.Security WHERE BloombergTicker LIKE '%USD%'");
 
         var usdMap = BuildUsdMap(usdPairs);
-        var usdBaseIds = new HashSet<long>(usdPairs
-            .Where(p =>
-            {
-                var pair = p.Ticker.Split(' ')[0];
-                return pair.Length >= 6 && pair[..3] == "USD";
-            })
-            .Select(p => p.SecurityId));
-
         var net = new Dictionary<(long SecurityId, DateTime BarTimeUtc), decimal>();
 
         foreach (var w in weights)
@@ -540,11 +532,6 @@ END";
             if (pair.Length < 6) continue;
             var baseCcy = pair[..3];
             var quoteCcy = pair.Substring(3, 3);
-            if(pair.Contains("NZD"))
-            {
-                int u = 0;
-            }
-
             if (baseCcy == "USD" || quoteCcy == "USD")
             {
                 var (secId, weight) = NormalizeUsdPair(w.SecurityId, pair, w.Weight, usdMap);
@@ -587,14 +574,13 @@ END";
 
         foreach (var entry in net)
         {
-            var weight = AdjustWeightForUsdBase(entry.Key.SecurityId, entry.Value, usdBaseIds);
             var record = new
             {
                 SecurityId = entry.Key.SecurityId,
                 ModelId = modelId,
                 BarTimeUtc = entry.Key.BarTimeUtc,
                 ModelRunId = modelRunId,
-                Weight = weight
+                Weight = entry.Value
             };
 
             await connection.ExecuteAsync(insertSql, record);
@@ -656,11 +642,6 @@ END";
         }
 
         return (securityId, -weight);
-    }
-
-    private static decimal AdjustWeightForUsdBase(long securityId, decimal weight, HashSet<long> usdBaseIds)
-    {
-        return usdBaseIds.Contains(securityId) ? -weight : weight;
     }
 
     private static string ResolveHomePath(string? path)
