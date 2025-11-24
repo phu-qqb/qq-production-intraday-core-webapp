@@ -43,6 +43,8 @@ public class OrderSender
         "US"
     };
 
+    private static readonly TimeSpan NzWeightOverrideTime = new(6, 30, 0);
+
     private const int TargetModelId = 1;
 
     private static readonly JsonSerializerOptions OrderTradeJsonOptions = new(JsonSerializerDefaults.Web)
@@ -1188,6 +1190,8 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         DateTime orderTimestampUtc,
         IReadOnlyCollection<CurrencyPair> configuredBasePairs)
     {
+        var adjustedWeights = ApplyWeightOverrides(weights, symbolMap, orderTimestampUtc);
+
         var parsedSymbols = symbolMap
             .Select(pair => SymbolInfo.TryCreate(pair.Key, pair.Value, out var info) ? info : null)
             .Where(info => info is not null)
@@ -1217,7 +1221,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
         var exposures = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var weight in weights)
+        foreach (var weight in adjustedWeights)
         {
             if (weight.Weight == 0m)
             {
@@ -1235,7 +1239,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
         if (exposures.Count == 0)
         {
-            return BuildFlatOrders(weights, parsedSymbols, orderTimestampUtc);
+            return BuildFlatOrders(adjustedWeights, parsedSymbols, orderTimestampUtc);
         }
 
         var orderDescriptors = new List<(int SecurityId, SymbolInfo Info, decimal Weight)>();
@@ -1294,6 +1298,50 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         }
 
         return result;
+    }
+
+    protected virtual IEnumerable<NettedWeightRow> ApplyWeightOverrides(
+        IEnumerable<NettedWeightRow> weights,
+        IReadOnlyDictionary<int, string> symbolMap,
+        DateTime orderTimestampUtc)
+    {
+        var weightList = weights.ToList();
+
+        if (weightList.Count == 0)
+        {
+            return weightList;
+        }
+
+        var localTime = TimeZoneInfo.ConvertTimeFromUtc(orderTimestampUtc, NewZealandZone);
+
+        if (localTime.TimeOfDay < NzWeightOverrideTime)
+        {
+            return weightList;
+        }
+
+        var nzdusdIds = symbolMap
+            .Where(pair =>
+                !string.IsNullOrWhiteSpace(pair.Value) &&
+                string.Equals(
+                    pair.Value.Trim().Replace("/", string.Empty),
+                    "NZDUSD",
+                    StringComparison.OrdinalIgnoreCase))
+            .Select(pair => pair.Key)
+            .ToHashSet();
+
+        if (nzdusdIds.Count == 0)
+        {
+            return weightList;
+        }
+
+        _logger.LogInformation(
+            "Zeroing NZDUSD weights for order timestamp {OrderTimestampUtc:O} after {CutoffLocal} NZ.",
+            orderTimestampUtc,
+            NzWeightOverrideTime);
+
+        return weightList
+            .Select(weight => nzdusdIds.Contains(weight.SecurityId) ? weight with { Weight = 0m } : weight)
+            .ToList();
     }
 
     private static List<(int SecurityId, WakettOrderItem Order)> BuildFlatOrders(
@@ -1644,6 +1692,9 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
     private static TimeZoneInfo CentralEuropeZone => TimeZoneInfo.FindSystemTimeZoneById(
         RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Central European Standard Time" : "Europe/Berlin");
+
+    private static TimeZoneInfo NewZealandZone => TimeZoneInfo.FindSystemTimeZoneById(
+        RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "New Zealand Standard Time" : "Pacific/Auckland");
 
     private sealed record TradingLimitOrderSnapshot(int SecurityId, string Symbol, string Side, string SizeType, double SizeValue);
 
