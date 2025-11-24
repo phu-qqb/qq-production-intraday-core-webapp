@@ -773,20 +773,19 @@ public class OrderSenderTests
     }
 
     [Fact]
-    public void FormatTimestamp_TopOfHourBarsAdvanceToNextHour()
+    public void FormatTimestamp_UsesProvidedOrderTime()
     {
         var zoneId = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York";
         var zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
-        var localBar = new DateTime(2024, 2, 5, 9, 0, 0, DateTimeKind.Unspecified);
-        var barTimeUtc = TimeZoneInfo.ConvertTimeToUtc(localBar, zone);
+        var localOrderTime = new DateTime(2024, 2, 5, 9, 21, 0, DateTimeKind.Unspecified);
+        var orderTimeUtc = TimeZoneInfo.ConvertTimeToUtc(localOrderTime, zone);
 
-        var formatted = OrderSender.FormatTimestamp(barTimeUtc);
+        var formatted = OrderSender.FormatTimestamp(orderTimeUtc);
 
-        var expectedLocal = localBar.AddHours(1).AddMinutes(6);
-        var offset = zone.GetUtcOffset(expectedLocal);
+        var offset = zone.GetUtcOffset(localOrderTime);
         var sign = offset < TimeSpan.Zero ? "-" : "+";
         var abs = offset.Duration();
-        var expected = $"{expectedLocal:yyyy-MM-dd HH:mm:ss.fff}{sign}{abs.Hours:00}{abs.Minutes:00}";
+        var expected = $"{localOrderTime:yyyy-MM-dd HH:mm:ss.fff}{sign}{abs.Hours:00}{abs.Minutes:00}";
 
         Assert.Equal(expected, formatted);
     }

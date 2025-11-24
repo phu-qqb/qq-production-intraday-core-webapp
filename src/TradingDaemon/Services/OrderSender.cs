@@ -745,23 +745,10 @@ VALUES
         }
     }
 
-    internal static string FormatTimestamp(DateTime barTimeUtc)
+    internal static string FormatTimestamp(DateTime orderTimestampUtc)
     {
-        var local = TimeZoneInfo.ConvertTimeFromUtc(barTimeUtc, NewYorkZone);
-
-        if (local.Minute == 0 && local.Second == 0 && local.Millisecond == 0)
-        {
-            local = local.AddHours(1);
-        }
-
-        local = new DateTime(
-            local.Year,
-            local.Month,
-            local.Day,
-            local.Hour,
-            6,
-            0,
-            local.Kind);
+        var utc = DateTime.SpecifyKind(orderTimestampUtc, DateTimeKind.Utc);
+        var local = TimeZoneInfo.ConvertTimeFromUtc(utc, NewYorkZone);
 
         var offset = NewYorkZone.GetUtcOffset(local);
         var sign = offset < TimeSpan.Zero ? "-" : "+";
