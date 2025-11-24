@@ -402,39 +402,61 @@ public class OrderSender
         DateTime utcNow,
         CancellationToken cancellationToken)
     {
-        var maxBarTimeUtc = snapshots.Max(snapshot => snapshot.BarTimeUtc);
-        var maxBarLocal = TimeZoneInfo.ConvertTimeFromUtc(maxBarTimeUtc, NewYorkZone);
-        var nowLocal = TimeZoneInfo.ConvertTimeFromUtc(utcNow, NewYorkZone);
+        var sessionKey = ResolveOrderSession(utcNow, snapshots);
+        var anchorCandidates = snapshots
+            .Where(snapshot => string.Equals(
+                snapshot.SessionKey?.Trim(),
+                sessionKey,
+                StringComparison.OrdinalIgnoreCase))
+            .ToList();
 
-        if (maxBarLocal.Date < nowLocal.Date)
+        if (anchorCandidates.Count == 0)
         {
-            var anchor = snapshots
-                .OrderBy(snapshot => snapshot.BarInterval)
-                .ThenBy(snapshot => snapshot.ModelId)
-                .First();
-
-            var schedule = await LoadModelScheduleAsync(connection, anchor.ModelId, cancellationToken);
-            var anchorSession = anchor.SessionKey ?? ResolveTradingSession(maxBarTimeUtc);
-            var calculated = CalculateOrderTimestamp(
-                maxBarTimeUtc,
-                anchor.BarInterval,
-                anchorSession,
-                schedule?.Offset,
-                schedule?.BarSize);
-
-            var calculatedLocal = TimeZoneInfo.ConvertTimeFromUtc(calculated, NewYorkZone);
-            if (calculatedLocal.Date > maxBarLocal.Date)
-            {
-                _logger.LogInformation(
-                    "Calculated Wakett order timestamp {OrderTimestamp} falls on the next trading day relative to the latest bar {BarTimestamp}. Proceeding with submission.",
-                    calculatedLocal,
-                    maxBarLocal);
-            }
-
-            return calculated;
+            anchorCandidates = snapshots.ToList();
         }
 
-        return maxBarTimeUtc;
+        var anchor = anchorCandidates
+            .OrderBy(snapshot => snapshot.BarInterval)
+            .ThenBy(snapshot => snapshot.ModelId)
+            .First();
+
+        var schedule = await LoadModelScheduleAsync(connection, anchor.ModelId, cancellationToken);
+        var anchorSession = string.IsNullOrWhiteSpace(sessionKey)
+            ? anchor.SessionKey ?? ResolveTradingSession(utcNow)
+            : sessionKey;
+
+        return CalculateOrderTimestamp(
+            utcNow,
+            anchor.BarInterval,
+            anchorSession,
+            schedule?.Offset,
+            schedule?.BarSize);
+    }
+
+    private string ResolveOrderSession(DateTime utcNow, IReadOnlyList<ModelSnapshot> snapshots)
+    {
+        var nowLocal = TimeZoneInfo.ConvertTimeFromUtc(utcNow, NewYorkZone);
+
+        foreach (var snapshot in snapshots)
+        {
+            var normalized = snapshot.SessionKey?.Trim().ToUpperInvariant();
+            if (string.IsNullOrWhiteSpace(normalized))
+            {
+                continue;
+            }
+
+            if (!SessionBounds.TryGetValue(normalized, out var bounds))
+            {
+                continue;
+            }
+
+            if (IsWithinSession(nowLocal, bounds))
+            {
+                return normalized;
+            }
+        }
+
+        return ResolveTradingSession(utcNow);
     }
 
     private async Task PersistOrderResponseAsync(
