@@ -196,8 +196,8 @@ public class OrderSenderTests
     [Theory]
     [InlineData(2024, 1, 1, 17, 0, 0, false)] // 06:00 NZDT
     [InlineData(2024, 1, 1, 18, 0, 0, true)]  // 07:00 NZDT
-    [InlineData(2024, 6, 30, 18, 25, 0, false)] // 06:25 NZST
-    [InlineData(2024, 6, 30, 18, 30, 0, true)]  // 06:30 NZST
+    [InlineData(2024, 6, 30, 18, 55, 0, false)] // 06:55 NZST
+    [InlineData(2024, 6, 30, 19, 0, 0, true)]  // 07:00 NZST
     public void ApplyWeightOverrides_UsesNewZealandLocalTime(
         int year,
         int month,
