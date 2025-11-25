@@ -43,7 +43,7 @@ public class OrderSender
         "US"
     };
 
-    private static readonly TimeSpan NzWeightOverrideTime = new(7, 0, 0);
+    private static readonly TimeSpan NyWeightOverrideTime = new(12, 30, 0);
 
     private const int TargetModelId = 1;
 
@@ -1312,9 +1312,9 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
             return weightList;
         }
 
-        var localTime = TimeZoneInfo.ConvertTimeFromUtc(orderTimestampUtc, NewZealandZone);
+        var localTime = TimeZoneInfo.ConvertTimeFromUtc(orderTimestampUtc, NewYorkZone);
 
-        if (localTime.TimeOfDay < NzWeightOverrideTime)
+        if (localTime.TimeOfDay < NyWeightOverrideTime)
         {
             return weightList;
         }
@@ -1335,9 +1335,9 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         }
 
         _logger.LogInformation(
-            "Zeroing NZDUSD weights for order timestamp {OrderTimestampUtc:O} after {CutoffLocal} NZ.",
+            "Zeroing NZDUSD weights for order timestamp {OrderTimestampUtc:O} after {CutoffLocal} NY.",
             orderTimestampUtc,
-            NzWeightOverrideTime);
+            NyWeightOverrideTime);
 
         return weightList
             .Select(weight => nzdusdIds.Contains(weight.SecurityId) ? weight with { Weight = 0m } : weight)
