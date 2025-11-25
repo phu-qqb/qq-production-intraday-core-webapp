@@ -43,7 +43,7 @@ public class OrderSender
         "US"
     };
 
-    private static readonly TimeSpan NzWeightOverrideTime = new(6, 30, 0);
+    private static readonly TimeSpan NzWeightOverrideTime = new(7, 0, 0);
 
     private const int TargetModelId = 1;
 
