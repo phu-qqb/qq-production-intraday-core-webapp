@@ -101,7 +101,7 @@ public class WeightCalculator
             }
             if (!string.IsNullOrWhiteSpace(startDate))
             {
-                scriptArgs.AddRange(new[] { "--secret-name", "qq-intraday-test-credentials" });
+                scriptArgs.AddRange(new[] { "--secret-name", "qq-intraday-credentials" });
             }
 
             var sbOut = new StringBuilder();
