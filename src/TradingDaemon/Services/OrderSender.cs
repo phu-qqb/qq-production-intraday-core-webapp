@@ -136,13 +136,6 @@ public class OrderSender
         }
 
         var builtOrders = BuildOrders(aggregatedWeights, symbolMap, orderTimestampUtc, basePairs);
-        var isFlatOrderRequest = builtOrders.Count == 0
-            || builtOrders.All(order => order.Order.size?.value == 0d);
-        if (isFlatOrderRequest)
-        {
-            _logger.LogInformation("All Wakett order weights are zero. Submitting flat order request.");
-        }
-
         var scheduledTimestamp = ResolveScheduledTimestamp(orderTimestampUtc);
         var existingOrderSymbols = await LoadExistingOrderSymbolsAsync(
             connection,
@@ -160,6 +153,19 @@ public class OrderSender
         }
 
         var aum = aumOverride ?? ResolveAum();
+
+        var pairUsdLimits = LoadPairUsdLimits();
+        if (pairUsdLimits.Count > 0 && aum is double resolvedAum && resolvedAum > 0d)
+        {
+            builtOrders = ApplyPairUsdLimits(builtOrders, pairUsdLimits, resolvedAum);
+        }
+
+        var isFlatOrderRequest = builtOrders.Count == 0
+            || builtOrders.All(order => order.Order.size?.value == 0d);
+        if (isFlatOrderRequest)
+        {
+            _logger.LogInformation("All Wakett order weights are zero. Submitting flat order request.");
+        }
 
         var tradingLimits = await LoadTradingLimitsAsync(connection, cancellationToken);
         if (tradingLimits is not null)
@@ -1184,6 +1190,47 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         return pairs;
     }
 
+    private IReadOnlyDictionary<string, decimal> LoadPairUsdLimits()
+    {
+        var pairs = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+
+        var configured = _configuration
+            .GetSection("ExternalApis:WakettApi:PairUsdLimits")
+            .GetChildren();
+
+        foreach (var entry in configured)
+        {
+            if (string.IsNullOrWhiteSpace(entry.Key))
+            {
+                continue;
+            }
+
+            var key = entry.Key.Replace("/", string.Empty).Trim().ToUpperInvariant();
+            if (key.Length != 6)
+            {
+                _logger.LogWarning(
+                    "Skipping pair USD limit entry '{Key}' because normalized key '{Normalized}' is invalid.",
+                    entry.Key,
+                    key);
+                continue;
+            }
+
+            if (!decimal.TryParse(entry.Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var limit)
+                || limit <= 0m)
+            {
+                _logger.LogWarning(
+                    "Skipping pair USD limit entry '{Key}' with invalid value '{Value}'.",
+                    entry.Key,
+                    entry.Value);
+                continue;
+            }
+
+            pairs[key] = limit;
+        }
+
+        return pairs;
+    }
+
     private List<(int SecurityId, WakettOrderItem Order)> BuildOrders(
         IEnumerable<NettedWeightRow> weights,
         IReadOnlyDictionary<int, string> symbolMap,
@@ -1295,6 +1342,68 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
                     value = value
                 }
             }));
+        }
+
+        return result;
+    }
+
+    private List<(int SecurityId, WakettOrderItem Order)> ApplyPairUsdLimits(
+        List<(int SecurityId, WakettOrderItem Order)> builtOrders,
+        IReadOnlyDictionary<string, decimal> pairUsdLimits,
+        double aum)
+    {
+        if (builtOrders.Count == 0 || pairUsdLimits.Count == 0 || aum <= 0d)
+        {
+            return builtOrders;
+        }
+
+        var aumDecimal = (decimal)aum;
+        var result = new List<(int SecurityId, WakettOrderItem Order)>(builtOrders.Count);
+
+        foreach (var entry in builtOrders)
+        {
+            var order = entry.Order;
+            var size = order.size;
+            var symbolKey = order.symbol?.Replace("/", string.Empty).Trim().ToUpperInvariant();
+
+            if (size is null || string.IsNullOrWhiteSpace(symbolKey) || !pairUsdLimits.TryGetValue(symbolKey, out var usdLimit))
+            {
+                result.Add(entry);
+                continue;
+            }
+
+            var limitWeight = usdLimit / aumDecimal;
+            var currentWeight = (decimal)size.value;
+
+            if (currentWeight <= limitWeight)
+            {
+                result.Add(entry);
+                continue;
+            }
+
+            var adjustedValue = (double)limitWeight;
+
+            _logger.LogInformation(
+                "Capping {Symbol} weight from {CurrentWeight} to {AdjustedWeight} using USD limit {UsdLimit} and AUM {Aum}.",
+                order.symbol,
+                currentWeight,
+                limitWeight,
+                usdLimit,
+                aum);
+
+            var adjustedOrder = new WakettOrderItem
+            {
+                symbol = order.symbol,
+                side = order.side,
+                code = order.code,
+                size = new WakettOrderSize
+                {
+                    type = size.type,
+                    value = adjustedValue
+                }
+            };
+
+            result.Add((entry.SecurityId, adjustedOrder));
         }
 
         return result;
