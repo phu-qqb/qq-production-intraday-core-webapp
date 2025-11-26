@@ -1312,6 +1312,31 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
             return weightList;
         }
 
+        var cnhIds = symbolMap
+            .Where(pair => !string.IsNullOrWhiteSpace(pair.Value))
+            .Select(pair => new
+            {
+                pair.Key,
+                Sanitized = pair.Value.Trim().Replace("/", string.Empty).ToUpperInvariant()
+            })
+            .Where(pair =>
+                pair.Sanitized.Length == 6 &&
+                (pair.Sanitized.StartsWith("CNH", StringComparison.OrdinalIgnoreCase) ||
+                 pair.Sanitized.EndsWith("CNH", StringComparison.OrdinalIgnoreCase)))
+            .Select(pair => pair.Key)
+            .ToHashSet();
+
+        if (cnhIds.Count > 0)
+        {
+            _logger.LogInformation(
+                "Zeroing CNH weights for order timestamp {OrderTimestampUtc:O}.",
+                orderTimestampUtc);
+
+            weightList = weightList
+                .Select(weight => cnhIds.Contains(weight.SecurityId) ? weight with { Weight = 0m } : weight)
+                .ToList();
+        }
+
         var localTime = TimeZoneInfo.ConvertTimeFromUtc(orderTimestampUtc, NewYorkZone);
 
         if (localTime.TimeOfDay < NyWeightOverrideTime)
