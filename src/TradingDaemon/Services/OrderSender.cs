@@ -1286,7 +1286,26 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
         if (exposures.Count == 0)
         {
-            return BuildFlatOrders(adjustedWeights, parsedSymbols, orderTimestampUtc);
+            var flatSymbols = configuredPairLookup.Keys
+                .Select(key => symbolPairLookup.TryGetValue(key, out var info) ? info : null)
+                .Where(info => info is not null)
+                .Cast<SymbolInfo>()
+                .OrderBy(info => info.SecurityId)
+                .ToList();
+
+            if (flatSymbols.Count == 0)
+            {
+                flatSymbols = adjustedWeights
+                    .Select(weight => weight.SecurityId)
+                    .Distinct()
+                    .Select(id => parsedSymbols.TryGetValue(id, out var info) ? info : null)
+                    .Where(info => info is not null)
+                    .Cast<SymbolInfo>()
+                    .OrderBy(info => info.SecurityId)
+                    .ToList();
+            }
+
+            return BuildFlatOrders(flatSymbols, orderTimestampUtc);
         }
 
         var orderDescriptors = new List<(int SecurityId, SymbolInfo Info, decimal Weight)>();
@@ -1479,19 +1498,10 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
     }
 
     private static List<(int SecurityId, WakettOrderItem Order)> BuildFlatOrders(
-        IEnumerable<NettedWeightRow> weights,
-        IReadOnlyDictionary<int, SymbolInfo> parsedSymbols,
+        IEnumerable<SymbolInfo> orderedSymbols,
         DateTime orderTimestampUtc)
     {
         var result = new List<(int SecurityId, WakettOrderItem Order)>();
-
-        var orderedSymbols = weights
-            .Select(weight => weight.SecurityId)
-            .Distinct()
-            .Select(id => parsedSymbols.TryGetValue(id, out var info) ? info : null)
-            .Where(info => info is not null)
-            .Cast<SymbolInfo>()
-            .OrderBy(info => info.SecurityId);
 
         foreach (var symbol in orderedSymbols)
         {
