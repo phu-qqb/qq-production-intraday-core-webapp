@@ -186,9 +186,9 @@ public class OrderSenderTests
         Assert.Equal(0d, first.GetProperty("size").GetProperty("value").GetDouble());
 
         var second = orders[1];
-        Assert.Equal("EUR/CHF", second.GetProperty("symbol").GetString());
+        Assert.Equal("USD/CHF", second.GetProperty("symbol").GetString());
         Assert.Equal("BUY", second.GetProperty("side").GetString());
-        Assert.Equal(OrderSender.BuildOrderCode(61, expectedOrderTimestampUtc), second.GetProperty("code").GetString());
+        Assert.Equal(OrderSender.BuildOrderCode(136, expectedOrderTimestampUtc), second.GetProperty("code").GetString());
         Assert.Equal("percentage", second.GetProperty("size").GetProperty("type").GetString());
         Assert.Equal(0d, second.GetProperty("size").GetProperty("value").GetDouble());
     }
@@ -874,7 +874,20 @@ public class OrderSenderTests
         {
             ["Programmes:0:ModelId"] = "1",
             ["Programmes:0:Session"] = "EUUS",
-            ["Programmes:0:Timeframe"] = "60"
+            ["Programmes:0:Timeframe"] = "60",
+            ["ExternalApis:WakettApi:BasePairs:0"] = "AUDUSD",
+            ["ExternalApis:WakettApi:BasePairs:1"] = "USDCAD",
+            ["ExternalApis:WakettApi:BasePairs:2"] = "USDCHF",
+            ["ExternalApis:WakettApi:BasePairs:3"] = "USDCNH",
+            ["ExternalApis:WakettApi:BasePairs:4"] = "EURUSD",
+            ["ExternalApis:WakettApi:BasePairs:5"] = "GBPUSD",
+            ["ExternalApis:WakettApi:BasePairs:6"] = "USDJPY",
+            ["ExternalApis:WakettApi:BasePairs:7"] = "USDMXN",
+            ["ExternalApis:WakettApi:BasePairs:8"] = "USDNOK",
+            ["ExternalApis:WakettApi:BasePairs:9"] = "NZDUSD",
+            ["ExternalApis:WakettApi:BasePairs:10"] = "USDSEK",
+            ["ExternalApis:WakettApi:BasePairs:11"] = "USDSGD",
+            ["ExternalApis:WakettApi:BasePairs:12"] = "USDZAR"
         };
 
         foreach (var kvp in values)
