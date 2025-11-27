@@ -18,9 +18,12 @@ namespace TradingDaemon.Services;
 
 public class OrderSender
 {
+    private static readonly (TimeSpan Start, TimeSpan End) UsSessionBounds = (TimeSpan.Parse("09:00", CultureInfo.InvariantCulture), TimeSpan.Parse("15:59", CultureInfo.InvariantCulture));
+    private static readonly (TimeSpan Start, TimeSpan End) UsBankHolidaySessionBounds = (TimeSpan.Parse("09:00", CultureInfo.InvariantCulture), TimeSpan.Parse("12:59", CultureInfo.InvariantCulture));
+
     private static readonly IReadOnlyDictionary<string, (TimeSpan Start, TimeSpan End)> SessionBounds = new Dictionary<string, (TimeSpan Start, TimeSpan End)>
     {
-        ["US"] = (TimeSpan.Parse("09:00", CultureInfo.InvariantCulture), TimeSpan.Parse("15:59", CultureInfo.InvariantCulture)),
+        ["US"] = UsSessionBounds,
         ["US2"] = (TimeSpan.Parse("09:00", CultureInfo.InvariantCulture), TimeSpan.Parse("13:59", CultureInfo.InvariantCulture)),
         ["EU"] = (TimeSpan.Parse("02:00", CultureInfo.InvariantCulture), TimeSpan.Parse("08:59", CultureInfo.InvariantCulture)),
         ["EUUS"] = (TimeSpan.Parse("02:00", CultureInfo.InvariantCulture), TimeSpan.Parse("11:59", CultureInfo.InvariantCulture)),
@@ -45,6 +48,8 @@ public class OrderSender
 
     private static readonly TimeSpan NyWeightOverrideTime = new(12, 30, 0);
     private static readonly TimeSpan UsSessionEndOrderTime = new(15, 51, 0);
+    private static readonly TimeSpan UsBankHolidaySessionEndOrderTime = new(12, 51, 0);
+    private static readonly TimeSpan UsBankHolidayCutoffTime = new(13, 0, 0);
 
     private const int TargetModelId = 1;
 
@@ -65,6 +70,7 @@ public class OrderSender
     private readonly string _orderTable;
     private readonly string _tradingLimitBreachTable;
     private readonly PriceBarOptions _priceBarOptions;
+    private readonly bool _useUsHolidaySchedule;
 
     public OrderSender(
         WakettApiClient wakettApiClient,
@@ -73,7 +79,8 @@ public class OrderSender
         IConfiguration configuration,
         IDatabaseObjectNameProvider databaseNameProvider,
         TimeProvider? timeProvider = null,
-        IOptions<PriceBarOptions>? priceBarOptions = null)
+        IOptions<PriceBarOptions>? priceBarOptions = null,
+        IOptions<TradingOptions>? tradingOptions = null)
     {
         _wakettApiClient = wakettApiClient;
         _context = context;
@@ -81,6 +88,7 @@ public class OrderSender
         _configuration = configuration;
         _timeProvider = timeProvider ?? TimeProvider.System;
         _priceBarOptions = priceBarOptions?.Value ?? new PriceBarOptions();
+        _useUsHolidaySchedule = tradingOptions?.Value?.UsBankHoliday ?? false;
         _nettedWeightTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayModelNettedWeight);
         _modelTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayModel);
         _securityTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayCoreSecurity);
@@ -103,6 +111,16 @@ public class OrderSender
         }
 
         var utcNow = _timeProvider.GetUtcNow().UtcDateTime;
+
+        if (_useUsHolidaySchedule && IsPastUsHolidayCutoff(utcNow))
+        {
+            _logger.LogInformation(
+                "US bank holiday schedule active and local time {LocalTime:HH:mm} past cutoff {Cutoff:hh\:mm}. Skipping order submission.",
+                TimeZoneInfo.ConvertTimeFromUtc(utcNow, NewYorkZone),
+                UsBankHolidayCutoffTime);
+            return;
+        }
+
         var modelSnapshots = BuildModelSnapshots(latest, modelDefinitions, utcNow);
         if (modelSnapshots.Count == 0)
         {
@@ -361,7 +379,7 @@ public class OrderSender
             }
 
             var normalizedSession = snapshot.SessionKey.Trim().ToUpperInvariant();
-            if (!SessionBounds.TryGetValue(normalizedSession, out var bounds))
+            if (!TryResolveSessionBounds(normalizedSession, out var bounds))
             {
                 _logger.LogWarning(
                     "Skipping model {ModelId} because configured session {Session} is not recognized for order time {OrderTimeLocal:O}.",
@@ -429,7 +447,7 @@ public class OrderSender
             ? ResolveTradingSession(utcNow)
             : sessionKey;
 
-        return Task.FromResult(CalculateOrderTimestamp(utcNow, normalizedSession));
+        return Task.FromResult(CalculateOrderTimestamp(utcNow, normalizedSession, _useUsHolidaySchedule));
     }
 
     private string ResolveOrderSession(DateTime utcNow, IReadOnlyList<ModelSnapshot> snapshots)
@@ -444,7 +462,7 @@ public class OrderSender
                 continue;
             }
 
-            if (!SessionBounds.TryGetValue(normalized, out var bounds))
+            if (!TryResolveSessionBounds(normalized, out var bounds))
             {
                 continue;
             }
@@ -822,12 +840,36 @@ VALUES
         return value;
     }
 
-    internal static DateTime CalculateOrderTimestamp(DateTime utcNow, string sessionKey)
+    private static bool TryGetSessionBounds(string sessionKey, bool useUsHolidaySchedule, out (TimeSpan Start, TimeSpan End) bounds)
     {
-        if (!SessionBounds.TryGetValue(sessionKey, out var bounds))
+        bounds = default;
+
+        if (string.IsNullOrWhiteSpace(sessionKey))
         {
-            bounds = SessionBounds["US"];
+            return false;
         }
+
+        var normalized = sessionKey.Trim().ToUpperInvariant();
+        if (string.Equals(normalized, "US", StringComparison.Ordinal))
+        {
+            bounds = ResolveUsSessionBounds(useUsHolidaySchedule);
+            return true;
+        }
+
+        return SessionBounds.TryGetValue(normalized, out bounds);
+    }
+
+    private static (TimeSpan Start, TimeSpan End) ResolveUsSessionBounds(bool useUsHolidaySchedule)
+        => useUsHolidaySchedule ? UsBankHolidaySessionBounds : UsSessionBounds;
+
+    private bool TryResolveSessionBounds(string? sessionKey, out (TimeSpan Start, TimeSpan End) bounds)
+        => TryGetSessionBounds(sessionKey ?? string.Empty, _useUsHolidaySchedule, out bounds);
+
+    internal static DateTime CalculateOrderTimestamp(DateTime utcNow, string sessionKey, bool useUsHolidaySchedule = false)
+    {
+        var bounds = TryGetSessionBounds(sessionKey, useUsHolidaySchedule, out var resolved)
+            ? resolved
+            : ResolveUsSessionBounds(useUsHolidaySchedule);
 
         var duration = bounds.End - bounds.Start;
         if (duration <= TimeSpan.Zero)
@@ -967,7 +1009,7 @@ VALUES
         var local = TimeZoneInfo.ConvertTimeFromUtc(barTimeUtc, NewYorkZone);
         foreach (var session in TradingSessionPreference)
         {
-            if (SessionBounds.TryGetValue(session, out var bounds) && IsWithinSession(local, bounds))
+            if (TryResolveSessionBounds(session, out var bounds) && IsWithinSession(local, bounds))
             {
                 return session;
             }
@@ -1009,10 +1051,20 @@ VALUES
         return time >= bounds.Start || time <= bounds.End;
     }
 
-    private static bool IsEndOfDayOrder(DateTime orderTimestampUtc)
+    private TimeSpan CurrentUsSessionEndOrderTime => _useUsHolidaySchedule
+        ? UsBankHolidaySessionEndOrderTime
+        : UsSessionEndOrderTime;
+
+    private bool IsPastUsHolidayCutoff(DateTime utcNow)
+    {
+        var local = TimeZoneInfo.ConvertTimeFromUtc(utcNow, NewYorkZone);
+        return local.TimeOfDay >= UsBankHolidayCutoffTime;
+    }
+
+    private bool IsEndOfDayOrder(DateTime orderTimestampUtc)
     {
         var local = TimeZoneInfo.ConvertTimeFromUtc(orderTimestampUtc, NewYorkZone);
-        return local.TimeOfDay == UsSessionEndOrderTime;
+        return local.TimeOfDay == CurrentUsSessionEndOrderTime;
     }
 
     protected virtual async Task<IReadOnlyList<NettedWeightRow>> LoadLatestNettedWeightsAsync(
@@ -1116,7 +1168,7 @@ ORDER BY TradingLimitId DESC;";
         if (utcNow - barTimeUtc > allowedStaleness)
         {
             var sessionKeyNormalized = sessionKey?.Trim().ToUpperInvariant();
-            if (!string.IsNullOrWhiteSpace(sessionKeyNormalized) && SessionBounds.TryGetValue(sessionKeyNormalized, out var bounds))
+            if (!string.IsNullOrWhiteSpace(sessionKeyNormalized) && TryResolveSessionBounds(sessionKeyNormalized, out var bounds))
             {
                 var barLocalNy = TimeZoneInfo.ConvertTimeFromUtc(barTimeUtc, NewYorkZone);
                 var nowLocalNy = TimeZoneInfo.ConvertTimeFromUtc(utcNow, NewYorkZone);
