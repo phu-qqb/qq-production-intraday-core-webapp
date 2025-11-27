@@ -44,6 +44,7 @@ public class OrderSender
     };
 
     private static readonly TimeSpan NyWeightOverrideTime = new(12, 30, 0);
+    private static readonly TimeSpan UsSessionEndOrderTime = new(15, 51, 0);
 
     private const int TargetModelId = 1;
 
@@ -135,7 +136,17 @@ public class OrderSender
             return;
         }
 
-        var builtOrders = BuildOrders(aggregatedWeights, symbolMap, orderTimestampUtc, basePairs);
+        var isEndOfDayOrder = IsEndOfDayOrder(orderTimestampUtc);
+        if (isEndOfDayOrder)
+        {
+            _logger.LogInformation(
+                "End-of-day order detected at {OrderTimestampUtc:O}. Submitting flat weights for configured base pairs.",
+                orderTimestampUtc);
+        }
+
+        var builtOrders = isEndOfDayOrder
+            ? BuildEndOfDayOrders(symbolMap, basePairs, orderTimestampUtc)
+            : BuildOrders(aggregatedWeights, symbolMap, orderTimestampUtc, basePairs);
         var scheduledTimestamp = ResolveScheduledTimestamp(orderTimestampUtc);
         var existingOrderSymbols = await LoadExistingOrderSymbolsAsync(
             connection,
@@ -998,6 +1009,12 @@ VALUES
         return time >= bounds.Start || time <= bounds.End;
     }
 
+    private static bool IsEndOfDayOrder(DateTime orderTimestampUtc)
+    {
+        var local = TimeZoneInfo.ConvertTimeFromUtc(orderTimestampUtc, NewYorkZone);
+        return local.TimeOfDay == UsSessionEndOrderTime;
+    }
+
     protected virtual async Task<IReadOnlyList<NettedWeightRow>> LoadLatestNettedWeightsAsync(
         IDbConnection connection,
         IReadOnlyCollection<int> modelIds,
@@ -1364,6 +1381,40 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         }
 
         return result;
+    }
+
+    private List<(int SecurityId, WakettOrderItem Order)> BuildEndOfDayOrders(
+        IReadOnlyDictionary<int, string> symbolMap,
+        IReadOnlyCollection<CurrencyPair> configuredBasePairs,
+        DateTime orderTimestampUtc)
+    {
+        var parsedSymbols = symbolMap
+            .Select(pair => SymbolInfo.TryCreate(pair.Key, pair.Value, out var info) ? info : null)
+            .Where(info => info is not null)
+            .Cast<SymbolInfo>()
+            .ToDictionary(info => info.SecurityId);
+
+        if (parsedSymbols.Count == 0 || configuredBasePairs.Count == 0)
+        {
+            return new List<(int SecurityId, WakettOrderItem Order)>();
+        }
+
+        var symbolPairLookup = parsedSymbols.Values
+            .GroupBy(info => $"{info.BaseCurrency}{info.QuoteCurrency}", StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                group => group.Key,
+                group => group.OrderBy(info => info.SecurityId).First(),
+                StringComparer.OrdinalIgnoreCase);
+
+        var endOfDaySymbols = configuredBasePairs
+            .Select(pair => $"{pair.BaseCurrency}{pair.QuoteCurrency}")
+            .Select(key => symbolPairLookup.TryGetValue(key, out var info) ? info : null)
+            .Where(info => info is not null)
+            .Cast<SymbolInfo>()
+            .OrderBy(info => info.SecurityId)
+            .ToList();
+
+        return BuildFlatOrders(endOfDaySymbols, orderTimestampUtc);
     }
 
     private List<(int SecurityId, WakettOrderItem Order)> ApplyPairUsdLimits(
