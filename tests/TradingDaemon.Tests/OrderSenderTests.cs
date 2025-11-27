@@ -8,6 +8,7 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Moq;
 using Moq.Protected;
 using TradingDaemon.Data;
@@ -191,6 +192,64 @@ public class OrderSenderTests
         Assert.Equal(OrderSender.BuildOrderCode(136, expectedOrderTimestampUtc), second.GetProperty("code").GetString());
         Assert.Equal("percentage", second.GetProperty("size").GetProperty("type").GetString());
         Assert.Equal(0d, second.GetProperty("size").GetProperty("value").GetDouble());
+    }
+
+    [Fact]
+    public async Task SendOrdersAsync_SkipsAfterUsHolidayCutoff()
+    {
+        var handler = new Mock<HttpMessageHandler>();
+        handler.Protected().Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+            .ReturnsAsync(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"ts\":\"\",\"orders\":[]}")
+            });
+
+        var client = new HttpClient(handler.Object) { BaseAddress = new Uri("http://wakett") };
+        var factory = Mock.Of<IHttpClientFactory>(f => f.CreateClient("WakettApi") == client);
+        var apiClient = new WakettApiClient(factory);
+
+        var now = new DateTimeOffset(2024, 7, 4, 19, 30, 0, TimeSpan.Zero);
+        var barTimeUtc = now.AddMinutes(-60).UtcDateTime;
+        var weights = new List<OrderSender.NettedWeightRow>
+        {
+            new() { SecurityId = 58, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 10, Weight = 0.15m }
+        };
+
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["ExternalApis:WakettApi:Aum"] = "2500000",
+            ["Trading:UsBankHoliday"] = "true"
+        });
+
+        var symbolMap = new Dictionary<int, string>
+        {
+            [58] = "EURUSD"
+        };
+
+        var context = new Mock<DapperContext>(configuration);
+        context.Setup(c => c.CreateConnection()).Returns(Mock.Of<IDbConnection>());
+
+        var logger = Mock.Of<ILogger<OrderSender>>();
+        var timeProvider = new TestTimeProvider(now);
+
+        var sender = new TestOrderSender(
+            apiClient,
+            context.Object,
+            logger,
+            configuration,
+            timeProvider,
+            weights,
+            symbolMap,
+            new OrderSender.ModelScheduleRow { Offset = 60, BarSize = 0 },
+            tradingOptions: new TradingOptions { UsBankHoliday = true });
+
+        await sender.SendOrdersAsync();
+
+        handler.Protected().Verify(
+            "SendAsync",
+            Times.Never(),
+            ItExpr.IsAny<HttpRequestMessage>(),
+            ItExpr.IsAny<CancellationToken>());
     }
 
     [Theory]
@@ -783,6 +842,22 @@ public class OrderSenderTests
     }
 
     [Fact]
+    public void CalculateOrderTimestamp_UsesHolidaySessionEndWhenConfigured()
+    {
+        var zoneId = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York";
+        var zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
+        var localNow = new DateTime(2024, 7, 4, 12, 46, 0, DateTimeKind.Unspecified);
+        var utcNow = TimeZoneInfo.ConvertTimeToUtc(localNow, zone);
+
+        var result = OrderSender.CalculateOrderTimestamp(utcNow, "US", true);
+
+        var expectedLocal = new DateTime(2024, 7, 4, 12, 51, 0, DateTimeKind.Unspecified);
+        var expectedUtc = TimeZoneInfo.ConvertTimeToUtc(expectedLocal, zone);
+
+        Assert.Equal(expectedUtc, result);
+    }
+
+    [Fact]
     public void CalculateOrderTimestamp_RollsForwardWhenPastSessionEnd()
     {
         var zoneId = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York";
@@ -938,8 +1013,17 @@ public class OrderSenderTests
             ModelScheduleRow? schedule,
             TradingLimitRow? tradingLimit = null,
             IReadOnlyCollection<string>? existingOrderSymbols = null,
-            IDatabaseObjectNameProvider? databaseNameProvider = null)
-            : base(client, context, logger, configuration, databaseNameProvider ?? DefaultDatabaseNameProvider, timeProvider)
+            IDatabaseObjectNameProvider? databaseNameProvider = null,
+            TradingOptions? tradingOptions = null)
+            : base(
+                client,
+                context,
+                logger,
+                configuration,
+                databaseNameProvider ?? DefaultDatabaseNameProvider,
+                timeProvider,
+                null,
+                tradingOptions is null ? null : Options.Create(tradingOptions))
         {
             _weights = weights;
             _symbolMap = symbolMap;
