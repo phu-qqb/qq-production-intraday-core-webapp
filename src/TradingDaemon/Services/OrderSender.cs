@@ -115,7 +115,7 @@ public class OrderSender
         if (_useUsHolidaySchedule && IsPastUsHolidayCutoff(utcNow))
         {
             _logger.LogInformation(
-                "US bank holiday schedule active and local time {LocalTime:HH:mm} past cutoff {Cutoff:hh\:mm}. Skipping order submission.",
+                "US bank holiday schedule active and local time {LocalTime:HH:mm} past cutoff {Cutoff:hh:mm}. Skipping order submission.",
                 TimeZoneInfo.ConvertTimeFromUtc(utcNow, NewYorkZone),
                 UsBankHolidayCutoffTime);
             return;
