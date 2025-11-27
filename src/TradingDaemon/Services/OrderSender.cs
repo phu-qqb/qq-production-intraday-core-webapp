@@ -19,7 +19,7 @@ namespace TradingDaemon.Services;
 public class OrderSender
 {
     private static readonly (TimeSpan Start, TimeSpan End) UsSessionBounds = (TimeSpan.Parse("09:00", CultureInfo.InvariantCulture), TimeSpan.Parse("15:59", CultureInfo.InvariantCulture));
-    private static readonly (TimeSpan Start, TimeSpan End) UsBankHolidaySessionBounds = (TimeSpan.Parse("09:00", CultureInfo.InvariantCulture), TimeSpan.Parse("12:59", CultureInfo.InvariantCulture));
+    private static readonly (TimeSpan Start, TimeSpan End) UsBankHolidaySessionBounds = (TimeSpan.Parse("09:00", CultureInfo.InvariantCulture), TimeSpan.Parse("13:21", CultureInfo.InvariantCulture));
 
     private static readonly IReadOnlyDictionary<string, (TimeSpan Start, TimeSpan End)> SessionBounds = new Dictionary<string, (TimeSpan Start, TimeSpan End)>
     {
@@ -48,8 +48,8 @@ public class OrderSender
 
     private static readonly TimeSpan NyWeightOverrideTime = new(12, 30, 0);
     private static readonly TimeSpan UsSessionEndOrderTime = new(15, 51, 0);
-    private static readonly TimeSpan UsBankHolidaySessionEndOrderTime = new(12, 51, 0);
-    private static readonly TimeSpan UsBankHolidayCutoffTime = new(13, 0, 0);
+    private static readonly TimeSpan UsBankHolidaySessionEndOrderTime = new(13, 21, 0);
+    private static readonly TimeSpan UsBankHolidayCutoffTime = new(13, 22, 0);
 
     private const int TargetModelId = 1;
 
@@ -155,14 +155,16 @@ public class OrderSender
         }
 
         var isEndOfDayOrder = IsEndOfDayOrder(orderTimestampUtc);
-        if (isEndOfDayOrder)
+        var forceHolidayFlatOrders = _useUsHolidaySchedule;
+        if (isEndOfDayOrder || forceHolidayFlatOrders)
         {
             _logger.LogInformation(
-                "End-of-day order detected at {OrderTimestampUtc:O}. Submitting flat weights for configured base pairs.",
+                "{Context} order detected at {OrderTimestampUtc:O}. Submitting flat weights for configured base pairs.",
+                forceHolidayFlatOrders ? "US bank holiday" : "End-of-day",
                 orderTimestampUtc);
         }
 
-        var builtOrders = isEndOfDayOrder
+        var builtOrders = isEndOfDayOrder || forceHolidayFlatOrders
             ? BuildEndOfDayOrders(symbolMap, basePairs, orderTimestampUtc)
             : BuildOrders(aggregatedWeights, symbolMap, orderTimestampUtc, basePairs);
         var scheduledTimestamp = ResolveScheduledTimestamp(orderTimestampUtc);
