@@ -252,6 +252,95 @@ public class OrderSenderTests
             ItExpr.IsAny<CancellationToken>());
     }
 
+    [Fact]
+    public async Task SendOrdersAsync_SubmitsFlatEofOrderOnUsBankHoliday()
+    {
+        HttpRequestMessage? captured = null;
+        var handler = new Mock<HttpMessageHandler>();
+        handler.Protected().Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+            .Callback<HttpRequestMessage, CancellationToken>((message, _) => captured = message)
+            .ReturnsAsync(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"ts\":\"\",\"orders\":[]}")
+            });
+
+        var client = new HttpClient(handler.Object) { BaseAddress = new Uri("http://wakett") };
+        var factory = Mock.Of<IHttpClientFactory>(f => f.CreateClient("WakettApi") == client);
+        var apiClient = new WakettApiClient(factory);
+
+        var now = new DateTimeOffset(2024, 7, 4, 17, 5, 0, TimeSpan.Zero);
+        var barTimeUtc = now.AddMinutes(-60).UtcDateTime;
+        var weights = new List<OrderSender.NettedWeightRow>
+        {
+            new() { SecurityId = 58, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 10, Weight = 0.25m },
+            new() { SecurityId = 136, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 10, Weight = -0.1m }
+        };
+
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["ExternalApis:WakettApi:Aum"] = "2500000",
+            ["Trading:UsBankHoliday"] = "true"
+        });
+
+        var symbolMap = new Dictionary<int, string>
+        {
+            [58] = "EURUSD",
+            [136] = "USDCHF"
+        };
+
+        var context = new Mock<DapperContext>(configuration);
+        context.Setup(c => c.CreateConnection()).Returns(Mock.Of<IDbConnection>());
+
+        var logger = Mock.Of<ILogger<OrderSender>>();
+        var timeProvider = new TestTimeProvider(now);
+
+        var sender = new TestOrderSender(
+            apiClient,
+            context.Object,
+            logger,
+            configuration,
+            timeProvider,
+            weights,
+            symbolMap,
+            new OrderSender.ModelScheduleRow { Offset = 60, BarSize = 0 },
+            tradingOptions: new TradingOptions { UsBankHoliday = true });
+
+        await sender.SendOrdersAsync();
+
+        handler.Protected().Verify(
+            "SendAsync",
+            Times.Once(),
+            ItExpr.IsAny<HttpRequestMessage>(),
+            ItExpr.IsAny<CancellationToken>());
+
+        Assert.NotNull(captured);
+        var payload = await captured!.Content.ReadAsStringAsync();
+        using var document = JsonDocument.Parse(payload);
+        var root = document.RootElement;
+
+        Assert.True(root.TryGetProperty("execution", out var execution));
+        Assert.Equal("EOF", execution.GetString());
+
+        var orders = root.GetProperty("orders");
+        Assert.Equal(2, orders.GetArrayLength());
+
+        var expectedOrderTimestampUtc = OrderSender.CalculateOrderTimestamp(now.UtcDateTime, "US", true);
+
+        var first = orders[0];
+        Assert.Equal("EUR/USD", first.GetProperty("symbol").GetString());
+        Assert.Equal("BUY", first.GetProperty("side").GetString());
+        Assert.Equal(OrderSender.BuildOrderCode(58, expectedOrderTimestampUtc), first.GetProperty("code").GetString());
+        Assert.Equal("percentage", first.GetProperty("size").GetProperty("type").GetString());
+        Assert.Equal(0d, first.GetProperty("size").GetProperty("value").GetDouble());
+
+        var second = orders[1];
+        Assert.Equal("USD/CHF", second.GetProperty("symbol").GetString());
+        Assert.Equal("BUY", second.GetProperty("side").GetString());
+        Assert.Equal(OrderSender.BuildOrderCode(136, expectedOrderTimestampUtc), second.GetProperty("code").GetString());
+        Assert.Equal("percentage", second.GetProperty("size").GetProperty("type").GetString());
+        Assert.Equal(0d, second.GetProperty("size").GetProperty("value").GetDouble());
+    }
+
     [Theory]
     [InlineData(2024, 1, 1, 17, 0, 0, false)] // 06:00 NZDT
     [InlineData(2024, 1, 1, 18, 0, 0, true)]  // 07:00 NZDT
@@ -846,12 +935,12 @@ public class OrderSenderTests
     {
         var zoneId = RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York";
         var zone = TimeZoneInfo.FindSystemTimeZoneById(zoneId);
-        var localNow = new DateTime(2024, 7, 4, 12, 46, 0, DateTimeKind.Unspecified);
+        var localNow = new DateTime(2024, 7, 4, 13, 5, 0, DateTimeKind.Unspecified);
         var utcNow = TimeZoneInfo.ConvertTimeToUtc(localNow, zone);
 
         var result = OrderSender.CalculateOrderTimestamp(utcNow, "US", true);
 
-        var expectedLocal = new DateTime(2024, 7, 4, 12, 51, 0, DateTimeKind.Unspecified);
+        var expectedLocal = new DateTime(2024, 7, 4, 13, 21, 0, DateTimeKind.Unspecified);
         var expectedUtc = TimeZoneInfo.ConvertTimeToUtc(expectedLocal, zone);
 
         Assert.Equal(expectedUtc, result);
