@@ -13,6 +13,7 @@ using Moq;
 using Moq.Protected;
 using TradingDaemon.Data;
 using TradingDaemon.Models;
+using TradingDaemon.Options;
 using TradingDaemon.Services;
 using Xunit;
 
@@ -268,7 +269,7 @@ public class OrderSenderTests
         var factory = Mock.Of<IHttpClientFactory>(f => f.CreateClient("WakettApi") == client);
         var apiClient = new WakettApiClient(factory);
 
-        var now = new DateTimeOffset(2024, 7, 4, 17, 5, 0, TimeSpan.Zero);
+        var now = new DateTimeOffset(2024, 7, 4, 16, 40, 0, TimeSpan.Zero);
         var barTimeUtc = now.AddMinutes(-60).UtcDateTime;
         var weights = new List<OrderSender.NettedWeightRow>
         {
@@ -339,6 +340,94 @@ public class OrderSenderTests
         Assert.Equal(OrderSender.BuildOrderCode(136, expectedOrderTimestampUtc), second.GetProperty("code").GetString());
         Assert.Equal("percentage", second.GetProperty("size").GetProperty("type").GetString());
         Assert.Equal(0d, second.GetProperty("size").GetProperty("value").GetDouble());
+    }
+
+    [Fact]
+    public async Task SendOrdersAsync_SendsIntradayOrdersDuringUsBankHoliday()
+    {
+        HttpRequestMessage? captured = null;
+        var handler = new Mock<HttpMessageHandler>();
+        handler.Protected().Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+            .Callback<HttpRequestMessage, CancellationToken>((message, _) => captured = message)
+            .ReturnsAsync(new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{\"ts\":\"\",\"orders\":[]}")
+            });
+
+        var client = new HttpClient(handler.Object) { BaseAddress = new Uri("http://wakett") };
+        var factory = Mock.Of<IHttpClientFactory>(f => f.CreateClient("WakettApi") == client);
+        var apiClient = new WakettApiClient(factory);
+
+        var now = new DateTimeOffset(2024, 7, 4, 15, 50, 0, TimeSpan.Zero);
+        var barTimeUtc = now.AddMinutes(-60).UtcDateTime;
+        var weights = new List<OrderSender.NettedWeightRow>
+        {
+            new() { SecurityId = 58, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 10, Weight = 0.2m },
+            new() { SecurityId = 136, ModelId = 1, BarTimeUtc = barTimeUtc, ModelRunId = 10, Weight = -0.1m }
+        };
+
+        var configuration = BuildConfiguration(new Dictionary<string, string?>
+        {
+            ["ExternalApis:WakettApi:Aum"] = "2500000",
+            ["Trading:UsBankHoliday"] = "true"
+        });
+
+        var symbolMap = new Dictionary<int, string>
+        {
+            [58] = "EURUSD",
+            [136] = "USDCHF"
+        };
+
+        var context = new Mock<DapperContext>(configuration);
+        context.Setup(c => c.CreateConnection()).Returns(Mock.Of<IDbConnection>());
+
+        var logger = Mock.Of<ILogger<OrderSender>>();
+        var timeProvider = new TestTimeProvider(now);
+
+        var sender = new TestOrderSender(
+            apiClient,
+            context.Object,
+            logger,
+            configuration,
+            timeProvider,
+            weights,
+            symbolMap,
+            new OrderSender.ModelScheduleRow { Offset = 60, BarSize = 0 },
+            tradingOptions: new TradingOptions { UsBankHoliday = true });
+
+        await sender.SendOrdersAsync();
+
+        handler.Protected().Verify(
+            "SendAsync",
+            Times.Once(),
+            ItExpr.IsAny<HttpRequestMessage>(),
+            ItExpr.IsAny<CancellationToken>());
+
+        Assert.NotNull(captured);
+        var payload = await captured!.Content.ReadAsStringAsync();
+        using var document = JsonDocument.Parse(payload);
+        var root = document.RootElement;
+
+        Assert.Equal("EOC", root.GetProperty("execution").GetString());
+
+        var orders = root.GetProperty("orders");
+        Assert.Equal(2, orders.GetArrayLength());
+
+        var expectedOrderTimestampUtc = OrderSender.CalculateOrderTimestamp(now.UtcDateTime, "US", true);
+
+        var first = orders[0];
+        Assert.Equal("EUR/USD", first.GetProperty("symbol").GetString());
+        Assert.Equal("BUY", first.GetProperty("side").GetString());
+        Assert.Equal(OrderSender.BuildOrderCode(58, expectedOrderTimestampUtc), first.GetProperty("code").GetString());
+        Assert.Equal("percentage", first.GetProperty("size").GetProperty("type").GetString());
+        Assert.Equal(0.2, first.GetProperty("size").GetProperty("value").GetDouble(), 6);
+
+        var second = orders[1];
+        Assert.Equal("USD/CHF", second.GetProperty("symbol").GetString());
+        Assert.Equal("SELL", second.GetProperty("side").GetString());
+        Assert.Equal(OrderSender.BuildOrderCode(136, expectedOrderTimestampUtc), second.GetProperty("code").GetString());
+        Assert.Equal("percentage", second.GetProperty("size").GetProperty("type").GetString());
+        Assert.Equal(0.1, second.GetProperty("size").GetProperty("value").GetDouble(), 6);
     }
 
     [Theory]

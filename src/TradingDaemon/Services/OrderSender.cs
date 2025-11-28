@@ -19,7 +19,7 @@ namespace TradingDaemon.Services;
 public class OrderSender
 {
     private static readonly (TimeSpan Start, TimeSpan End) UsSessionBounds = (TimeSpan.Parse("09:00", CultureInfo.InvariantCulture), TimeSpan.Parse("15:59", CultureInfo.InvariantCulture));
-    private static readonly (TimeSpan Start, TimeSpan End) UsBankHolidaySessionBounds = (TimeSpan.Parse("09:00", CultureInfo.InvariantCulture), TimeSpan.Parse("13:21", CultureInfo.InvariantCulture));
+    private static readonly (TimeSpan Start, TimeSpan End) UsBankHolidaySessionBounds = (TimeSpan.Parse("09:00", CultureInfo.InvariantCulture), TimeSpan.Parse("12:51", CultureInfo.InvariantCulture));
 
     private static readonly IReadOnlyDictionary<string, (TimeSpan Start, TimeSpan End)> SessionBounds = new Dictionary<string, (TimeSpan Start, TimeSpan End)>
     {
@@ -48,8 +48,8 @@ public class OrderSender
 
     private static readonly TimeSpan NyWeightOverrideTime = new(12, 30, 0);
     private static readonly TimeSpan UsSessionEndOrderTime = new(15, 51, 0);
-    private static readonly TimeSpan UsBankHolidaySessionEndOrderTime = new(13, 21, 0);
-    private static readonly TimeSpan UsBankHolidayCutoffTime = new(13, 22, 0);
+    private static readonly TimeSpan UsBankHolidaySessionEndOrderTime = new(12, 51, 0);
+    private static readonly TimeSpan UsBankHolidayCutoffTime = new(12, 52, 0);
 
     private const int TargetModelId = 1;
 
@@ -115,7 +115,7 @@ public class OrderSender
         if (_useUsHolidaySchedule && IsPastUsHolidayCutoff(utcNow))
         {
             _logger.LogInformation(
-                "US bank holiday schedule active and local time {LocalTime:HH:mm} past cutoff {Cutoff:hh:mm}. Skipping order submission.",
+                "US bank holiday schedule active and local time {LocalTime:HH:mm} past cutoff {Cutoff:hh\:mm}. Skipping order submission.",
                 TimeZoneInfo.ConvertTimeFromUtc(utcNow, NewYorkZone),
                 UsBankHolidayCutoffTime);
             return;
@@ -160,7 +160,7 @@ public class OrderSender
         {
             _logger.LogInformation(
                 "{Context} order detected at {OrderTimestampUtc:O}. Submitting flat weights for configured base pairs.",
-                forceHolidayFlatOrders ? "US bank holiday" : "End-of-day",
+                _useUsHolidaySchedule ? "US bank holiday" : "End-of-day",
                 orderTimestampUtc);
         }
 
