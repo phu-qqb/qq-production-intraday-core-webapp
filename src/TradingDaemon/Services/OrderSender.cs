@@ -155,7 +155,8 @@ public class OrderSender
         }
 
         var isEndOfDayOrder = IsEndOfDayOrder(orderTimestampUtc);
-        if (isEndOfDayOrder)
+        var forceHolidayFlatOrders = _useUsHolidaySchedule;
+        if (isEndOfDayOrder || forceHolidayFlatOrders)
         {
             _logger.LogInformation(
                 "{Context} order detected at {OrderTimestampUtc:O}. Submitting flat weights for configured base pairs.",
@@ -163,7 +164,7 @@ public class OrderSender
                 orderTimestampUtc);
         }
 
-        var builtOrders = isEndOfDayOrder
+        var builtOrders = isEndOfDayOrder || forceHolidayFlatOrders
             ? BuildEndOfDayOrders(symbolMap, basePairs, orderTimestampUtc)
             : BuildOrders(aggregatedWeights, symbolMap, orderTimestampUtc, basePairs);
         var scheduledTimestamp = ResolveScheduledTimestamp(orderTimestampUtc);
