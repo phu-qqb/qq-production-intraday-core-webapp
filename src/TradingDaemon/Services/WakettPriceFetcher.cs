@@ -103,9 +103,9 @@ public class WakettPriceFetcher
 
         var fetchStopwatch = Stopwatch.StartNew();
         var baseSymbols = symbolConfiguration.BaseSymbols;
-        var allSecurityIds = symbolConfiguration.AllSecurityIds;
-        var uploadSecurityIds = symbolConfiguration.AllSecurityIds;
+        var uploadSecurityIds = symbolConfiguration.UploadSecurityIds;
         var uploadSecurityIdSet = new HashSet<int>(uploadSecurityIds);
+        var pairToSecurityId = symbolConfiguration.PairToSecurityId;
 
         if (uploadSecurityIds.Length == 0)
         {
@@ -162,7 +162,7 @@ public class WakettPriceFetcher
         }
 
         var loadPairsTimer = Stopwatch.StartNew();
-        var securityPairs = await LoadSecurityPairsAsync(allSecurityIds, connection, cancellationToken);
+        var securityPairs = await LoadSecurityPairsAsync(uploadSecurityIds, connection, cancellationToken);
         loadPairsTimer.Stop();
         _logger.LogInformation(
             "[Wakett] Loaded {Count} security pairs in {ElapsedMs} ms.",
@@ -247,11 +247,6 @@ public class WakettPriceFetcher
 
             foreach (var rate in computedRates)
             {
-                if (!uploadSecurityIdSet.Contains(rate.Definition.SecurityId))
-                {
-                    continue;
-                }
-
                 if (!TryParsePair(rate.Definition.Symbol, out var configPair))
                 {
                     _logger.LogWarning(
@@ -277,18 +272,43 @@ public class WakettPriceFetcher
                     continue;
                 }
 
-                var securityKey = rate.Definition.SecurityId.ToString(CultureInfo.InvariantCulture);
-                dbRecords[rate.Definition.SecurityId] = new DbPriceRecord(
-                    rate.Definition.SecurityId,
+                var (uploadPair, uploadRate, usdInverted) = NormalizeToUsdQuote(dbPair, adjustedRate, inverted);
+                var uploadSecurityId = pairToSecurityId.TryGetValue(CreatePairKey(uploadPair), out var mappedSecurityId)
+                    ? mappedSecurityId
+                    : rate.Definition.SecurityId;
+
+                if (!uploadSecurityIdSet.Contains(uploadSecurityId))
+                {
+                    continue;
+                }
+
+                if (securityPairs.TryGetValue(uploadSecurityId, out var uploadSecurityPair)
+                    && !PairMatches(uploadSecurityPair, uploadPair))
+                {
+                    _logger.LogWarning(
+                        "Skipping security {SecurityId} because normalized pair {Base}/{Quote} does not match database pair {DbBase}/{DbQuote}.",
+                        uploadSecurityId,
+                        uploadPair.Base,
+                        uploadPair.Quote,
+                        uploadSecurityPair.Base,
+                        uploadSecurityPair.Quote);
+                    continue;
+                }
+
+                var uploadSymbol = FormatCurrencyPair(uploadPair);
+                var finalInverted = inverted || usdInverted;
+                var securityKey = uploadSecurityId.ToString(CultureInfo.InvariantCulture);
+                dbRecords[uploadSecurityId] = new DbPriceRecord(
+                    uploadSecurityId,
                     securityKey,
                     timestampUtc,
-                    adjustedRate);
+                    uploadRate);
 
-                uploadItems[rate.Definition.SecurityId] = new WakettPriceUploadItem(
-                    rate.Definition.SecurityId,
-                    rate.Definition.Symbol,
-                    adjustedRate,
-                    inverted);
+                uploadItems[uploadSecurityId] = new WakettPriceUploadItem(
+                    uploadSecurityId,
+                    uploadSymbol,
+                    uploadRate,
+                    finalInverted);
             }
 
             if (dbRecords.Count == 0)
@@ -360,8 +380,8 @@ public class WakettPriceFetcher
             return false;
         }
 
-        var securityIds = symbolConfiguration.AllSecurityIds;
-        var uploadSecurityIds = symbolConfiguration.AllSecurityIds;
+        var securityIds = symbolConfiguration.UploadSecurityIds;
+        var uploadSecurityIds = symbolConfiguration.UploadSecurityIds;
 
         if (uploadSecurityIds.Length == 0)
         {
@@ -670,8 +690,18 @@ public class WakettPriceFetcher
             return null;
         }
 
+        var pairToSecurityId = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var definition in securityDefinitions)
+        {
+            var key = CreatePairKey(definition.Pair);
+            if (!pairToSecurityId.ContainsKey(key))
+            {
+                pairToSecurityId[key] = definition.SecurityId;
+            }
+        }
+
         var baseSymbols = new List<WakettSecuritySymbol>();
-        var baseSecurityIds = new HashSet<int>();
 
         foreach (var pair in basePairs)
         {
@@ -685,7 +715,6 @@ public class WakettPriceFetcher
                 continue;
             }
 
-            baseSecurityIds.Add(match.SecurityId);
             baseSymbols.Add(new WakettSecuritySymbol
             {
                 SecurityId = match.SecurityId,
@@ -699,9 +728,9 @@ public class WakettPriceFetcher
             return null;
         }
 
-        var allSecurityIds = baseSecurityIds.ToArray();
+        var uploadSecurityIds = pairToSecurityId.Values.Distinct().ToArray();
 
-        return new SymbolConfiguration(baseSymbols, allSecurityIds);
+        return new SymbolConfiguration(baseSymbols, uploadSecurityIds, pairToSecurityId);
     }
 
     private IReadOnlyList<CurrencyPair> LoadConfiguredBasePairs()
@@ -788,6 +817,32 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
     }
 
     private static string FormatCurrencyPair(CurrencyPair pair) => $"{pair.Base}/{pair.Quote}";
+
+    private static string CreatePairKey(CurrencyPair pair) => $"{pair.Base.ToUpperInvariant()}/{pair.Quote.ToUpperInvariant()}";
+
+    private static (CurrencyPair Pair, decimal Rate, bool Inverted) NormalizeToUsdQuote(
+        CurrencyPair pair,
+        decimal rate,
+        bool inverted)
+    {
+        if (rate <= 0m)
+        {
+            return (pair, rate, inverted);
+        }
+
+        if (pair.Quote.Equals("USD", StringComparison.OrdinalIgnoreCase))
+        {
+            return (pair, rate, inverted);
+        }
+
+        if (pair.Base.Equals("USD", StringComparison.OrdinalIgnoreCase))
+        {
+            var flipped = new CurrencyPair(pair.Quote, pair.Base);
+            return (flipped, 1m / rate, true);
+        }
+
+        return (pair, rate, inverted);
+    }
 
     private static bool PairMatches(CurrencyPair candidate, CurrencyPair target)
     {
@@ -1142,7 +1197,8 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
     private sealed record SymbolConfiguration(
         IReadOnlyList<WakettSecuritySymbol> BaseSymbols,
-        int[] AllSecurityIds);
+        int[] UploadSecurityIds,
+        IReadOnlyDictionary<string, int> PairToSecurityId);
 
     private sealed record SecuritySymbolDefinition(int SecurityId, CurrencyPair Pair);
 
