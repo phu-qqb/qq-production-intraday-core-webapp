@@ -277,18 +277,21 @@ public class WakettPriceFetcher
                     continue;
                 }
 
+                var (uploadPair, uploadRate, usdInverted) = NormalizeToUsdQuote(dbPair, adjustedRate, inverted);
+                var uploadSymbol = FormatCurrencyPair(uploadPair);
+                var finalInverted = inverted || usdInverted;
                 var securityKey = rate.Definition.SecurityId.ToString(CultureInfo.InvariantCulture);
                 dbRecords[rate.Definition.SecurityId] = new DbPriceRecord(
                     rate.Definition.SecurityId,
                     securityKey,
                     timestampUtc,
-                    adjustedRate);
+                    uploadRate);
 
                 uploadItems[rate.Definition.SecurityId] = new WakettPriceUploadItem(
                     rate.Definition.SecurityId,
-                    rate.Definition.Symbol,
-                    adjustedRate,
-                    inverted);
+                    uploadSymbol,
+                    uploadRate,
+                    finalInverted);
             }
 
             if (dbRecords.Count == 0)
@@ -788,6 +791,30 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
     }
 
     private static string FormatCurrencyPair(CurrencyPair pair) => $"{pair.Base}/{pair.Quote}";
+
+    private static (CurrencyPair Pair, decimal Rate, bool Inverted) NormalizeToUsdQuote(
+        CurrencyPair pair,
+        decimal rate,
+        bool inverted)
+    {
+        if (rate <= 0m)
+        {
+            return (pair, rate, inverted);
+        }
+
+        if (pair.Quote.Equals("USD", StringComparison.OrdinalIgnoreCase))
+        {
+            return (pair, rate, inverted);
+        }
+
+        if (pair.Base.Equals("USD", StringComparison.OrdinalIgnoreCase))
+        {
+            var flipped = new CurrencyPair(pair.Quote, pair.Base);
+            return (flipped, 1m / rate, true);
+        }
+
+        return (pair, rate, inverted);
+    }
 
     private static bool PairMatches(CurrencyPair candidate, CurrencyPair target)
     {
