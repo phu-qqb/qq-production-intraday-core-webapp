@@ -25,8 +25,8 @@ public class OrderSender
     {
         ["US"] = UsSessionBounds,
         ["US2"] = (TimeSpan.Parse("09:00", CultureInfo.InvariantCulture), TimeSpan.Parse("13:59", CultureInfo.InvariantCulture)),
-        ["EU"] = (TimeSpan.Parse("02:00", CultureInfo.InvariantCulture), TimeSpan.Parse("08:59", CultureInfo.InvariantCulture)),
-        ["EUUS"] = (TimeSpan.Parse("02:00", CultureInfo.InvariantCulture), TimeSpan.Parse("11:59", CultureInfo.InvariantCulture)),
+        ["EU"] = (TimeSpan.Parse("01:00", CultureInfo.InvariantCulture), TimeSpan.Parse("08:59", CultureInfo.InvariantCulture)),
+        ["EUUS"] = (TimeSpan.Parse("01:00", CultureInfo.InvariantCulture), TimeSpan.Parse("11:59", CultureInfo.InvariantCulture)),
         ["AS"] = (TimeSpan.Parse("20:00", CultureInfo.InvariantCulture), TimeSpan.Parse("01:59", CultureInfo.InvariantCulture)),
         ["ASEU"] = (TimeSpan.Parse("20:00", CultureInfo.InvariantCulture), TimeSpan.Parse("08:59", CultureInfo.InvariantCulture)),
         ["ALL"] = (TimeSpan.Parse("02:00", CultureInfo.InvariantCulture), TimeSpan.Parse("15:59", CultureInfo.InvariantCulture)),
@@ -1157,6 +1157,26 @@ ORDER BY TradingLimitId DESC;";
 
         if (barLocal.Date < nowLocal.Date)
         {
+            var sessionKeyNormalized = sessionKey?.Trim().ToUpperInvariant();
+
+            if (!string.IsNullOrWhiteSpace(sessionKeyNormalized) && TryResolveSessionBounds(sessionKeyNormalized, out var bounds))
+            {
+                var nowLocalNy = TimeZoneInfo.ConvertTimeFromUtc(utcNow, NewYorkZone);
+                var (_, sessionEnd) = GetSessionWindow(nowLocalNy, bounds);
+
+                if (nowLocalNy > sessionEnd)
+                {
+                    _logger.LogInformation(
+                        "Skipping previous day's netted weights from {BarTimeUtc:O} because current time {NowLocal:O} is past session end {SessionEnd:O} for model {ModelId}.",
+                        barTimeUtc,
+                        nowLocalNy,
+                        sessionEnd,
+                        sessionKeyNormalized,
+                        modelId ?? TargetModelId);
+                    return false;
+                }
+
+            }
             _logger.LogInformation(
                 "Using previous day's netted weights from {BarTimeUtc:O} for first trade of the day.",
                 barTimeUtc);
