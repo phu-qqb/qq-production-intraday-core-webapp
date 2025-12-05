@@ -13,7 +13,10 @@ namespace TradingDaemon.Services;
 
 public sealed class WakettAutomationService : BackgroundService
 {
-    private static readonly TimeSpan SessionStart = new(2, 0, 0);
+    // EU session should begin at 06:00 UTC; using 01:00 New York time aligns
+    // the automated schedule with that UTC start during the winter trading
+    // calendar.
+    private static readonly TimeSpan SessionStart = new(1, 0, 0);
     private static readonly TimeSpan AutomationLeadTime = TimeSpan.Zero;
     private static readonly TimeSpan SessionEnd = new(15, 59, 0);
     private static readonly TimeSpan SessionShutdownDelay = TimeSpan.FromHours(1);
