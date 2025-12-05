@@ -54,6 +54,8 @@ public class WeightCalculator
 
         var priceOffset = _config.GetValue<int?>("ExternalApis:WakettApi:PriceMinuteOffset") ?? 0;
 
+        var nowUtc = DateTime.UtcNow;
+
         foreach (var model in _config.GetSection("Programmes").GetChildren())
         {
             var universe = model["Universe"] ?? string.Empty;
@@ -68,6 +70,11 @@ public class WeightCalculator
             modelTimeframes[modelId] = timeFrameInt;
             if (!string.IsNullOrWhiteSpace(tradingSession))
             {
+                if (!IsWithinCurrentSession(tradingSession, nowUtc))
+                {
+                    continue;
+                }
+
                 modelSessions[modelId] = tradingSession.Trim();
             }
 
@@ -314,6 +321,38 @@ END";
         }
 
         await RunModelReportsAsync(modelTimeframes);
+    }
+
+    private bool IsWithinCurrentSession(string sessionKey, DateTime utcNow)
+    {
+        var trimmed = sessionKey.Trim();
+        if (!SessionBounds.TryGetValue(trimmed, out var session))
+        {
+            _logger.LogWarning(
+                "Unknown session {Session}; computeWeights will run without time filtering.",
+                sessionKey);
+            return true;
+        }
+
+        var local = TimeZoneInfo.ConvertTimeFromUtc(utcNow, session.Zone);
+        var localTime = local.TimeOfDay;
+        var wrapsMidnight = SessionWrapsMidnight(session.Start, session.End);
+
+        var inSession = wrapsMidnight
+            ? localTime >= session.Start || localTime <= session.End
+            : localTime >= session.Start && localTime <= session.End;
+
+        if (!inSession)
+        {
+            _logger.LogInformation(
+                "Skipping computeWeights for session {Session}: current time {NowLocal:O} is outside bounds {Start}-{End}.",
+                sessionKey,
+                local,
+                session.Start,
+                session.End);
+        }
+
+        return inSession;
     }
 
     private void ZeroPenultimateRows(List<WeightRow> rows, string? sessionKey, int timeframeMinutes, int offsetMinutes)
