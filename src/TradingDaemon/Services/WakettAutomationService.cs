@@ -463,6 +463,11 @@ public sealed class WakettAutomationService : BackgroundService
             return TimeZoneInfo.ConvertTimeToUtc(candidate.Add(-AutomationLeadTime), NewYorkTimeZone);
         }
 
+        if (local >= candidate)
+        {
+            candidate = candidate.AddDays(1);
+        }
+
         do
         {
             candidate = candidate.AddDays(1);
