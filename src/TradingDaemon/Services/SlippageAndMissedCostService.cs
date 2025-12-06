@@ -68,7 +68,7 @@ ORDER BY Symbol, BarTimeUtc";
         var startUtc = DateTime.SpecifyKind(tradingDate.ToDateTime(TimeOnly.MinValue), DateTimeKind.Utc);
         var endUtc = startUtc.AddDays(1);
 
-        await using var connection = _context.CreateConnection();
+        using var connection = _context.CreateConnection();
 
         var ordersTask = connection.QueryAsync<OrderRow>(
             new CommandDefinition(FormatSql(OrdersSqlTemplate), new { StartUtc = startUtc, EndUtc = endUtc }, cancellationToken: cancellationToken));
