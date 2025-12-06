@@ -1,10 +1,8 @@
-using Quartz;
-using Quartz.Impl;
-using Quartz.Spi;
 using Serilog;
 using TradingDaemon.Controllers;
 using TradingDaemon.Data;
 using TradingDaemon.Logging;
+using TradingDaemon.Middleware;
 using TradingDaemon.Services;
 using TradingDaemon.Models;
 using TradingDaemon.Utils;
@@ -12,9 +10,22 @@ using TradingDaemon.Options;
 
 var builder = WebApplication.CreateBuilder(args);
 
+ConfigurationEnvironmentExtensions.ApplyEnvironmentOverrides(
+    builder.Configuration,
+    "ExternalApis",
+    builder.Configuration["Database:ActiveEnvironment"]);
+
+ConfigurationEnvironmentExtensions.ApplyEnvironmentOverrides(
+    builder.Configuration,
+    "Automation",
+    builder.Configuration["Database:ActiveEnvironment"]);
+
 SerilogConfig.Configure(builder.Configuration);
 builder.Host.UseSerilog();
 
+builder.Services.Configure<DatabaseObjectNameOptions>(builder.Configuration.GetSection("Database"));
+builder.Services.AddSingleton<IDatabaseObjectNameProvider, DatabaseObjectNameProvider>();
+builder.Services.AddSingleton<IPriceProcessingProcedureExecutor, PriceProcessingProcedureExecutor>();
 builder.Services.AddSingleton<DapperContext>();
 
 builder.Services.AddHttpClient("PriceApi", client =>
@@ -54,18 +65,12 @@ builder.Services.AddTransient<ReportRunner>();
 builder.Services.AddTransient<WakettApiClient>();
 builder.Services.AddTransient<WakettPriceFetcher>();
 builder.Services.AddTransient<WakettTradeFetcher>();
-builder.Services.AddTransient<TradingJob>();
-
-
 builder.Services.Configure<WakettAutomationOptions>(builder.Configuration.GetSection("Automation:Wakett"));
 builder.Services.Configure<TradingOptions>(builder.Configuration.GetSection("Trading"));
+builder.Services.Configure<PriceBarOptions>(builder.Configuration.GetSection("PriceBars"));
 builder.Services.AddHostedService<WakettAutomationService>();
 
 builder.Services.AddSingleton<IEmailNotificationService, EmailNotificationService>();
-builder.Services.Configure<SchedulerOptions>(builder.Configuration.GetSection("Quartz"));
-builder.Services.AddSingleton<ISchedulerFactory>(_ => new StdSchedulerFactory());
-builder.Services.AddSingleton<IJobFactory, DependencyInjectionJobFactory>();
-builder.Services.AddHostedService<SchedulerService>();
 
 
 
@@ -83,6 +88,8 @@ var app = builder.Build();
         c.RoutePrefix = string.Empty;  // Swagger accessible à la racine
     });
 }
+
+app.UseMiddleware<SqlTimeoutLoggingMiddleware>();
 
 app.MapFillEndpoints();
 app.MapPriceEndpoints();

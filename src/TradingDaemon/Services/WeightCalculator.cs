@@ -7,7 +7,9 @@ using System.Text;
 using System.Runtime.InteropServices;
 using System.Data;
 using Dapper;
+using Microsoft.Extensions.Options;
 using TradingDaemon.Data;
+using TradingDaemon.Options;
 
 namespace TradingDaemon.Services;
 
@@ -16,6 +18,7 @@ public class WeightCalculator
     private readonly DapperContext _context;
     private readonly IConfiguration _config;
     private readonly ILogger<WeightCalculator> _logger;
+    private readonly PriceBarOptions _priceBarOptions;
 
     private static readonly IReadOnlyDictionary<string, SessionInfo> SessionBounds =
         new Dictionary<string, SessionInfo>(StringComparer.OrdinalIgnoreCase)
@@ -23,20 +26,27 @@ public class WeightCalculator
             ["US"] = new SessionInfo(ResolveTimeZone("Eastern Standard Time", "America/New_York"),
                 TimeSpan.Parse("09:00"), TimeSpan.Parse("15:59")),
             ["EU"] = new SessionInfo(ResolveTimeZone("Eastern Standard Time", "America/New_York"),
-                TimeSpan.Parse("02:00"), TimeSpan.Parse("08:59"))
+                TimeSpan.Parse("02:00"), TimeSpan.Parse("08:59")),
+            ["EUUS"] = new SessionInfo(ResolveTimeZone("Eastern Standard Time", "America/New_York"),
+                TimeSpan.Parse("02:00"), TimeSpan.Parse("11:59"))
         };
 
-    public WeightCalculator(DapperContext context, IConfiguration config, ILogger<WeightCalculator> logger)
+    public WeightCalculator(
+        DapperContext context,
+        IConfiguration config,
+        ILogger<WeightCalculator> logger,
+        IOptions<PriceBarOptions>? priceBarOptions = null)
     {
         _context = context;
         _config = config;
         _logger = logger;
+        _priceBarOptions = priceBarOptions?.Value ?? new PriceBarOptions();
     }
 
     public async Task CalculateAndStoreAsync()
     {
         var pythonExec = _config["Executables:PythonExecutable"] ?? "python3";
-        var scriptPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../scripts/export_prices_rds.py"));
+        var scriptPath = "C:\\repos\\qq-production-intraday-core-webapp\\scripts\\export_prices_rds.py";
 
         var modelTimeframes = new Dictionary<int, int>();
 
@@ -44,25 +54,62 @@ public class WeightCalculator
 
         var priceOffset = _config.GetValue<int?>("ExternalApis:WakettApi:PriceMinuteOffset") ?? 0;
 
+        var nowUtc = DateTime.UtcNow;
+
         foreach (var model in _config.GetSection("Programmes").GetChildren())
         {
             var universe = model["Universe"] ?? string.Empty;
             var universeId = model["UniverseId"] ?? string.Empty;
             var tradingSession = model["Session"] ?? string.Empty;
-            var timeFrame = model["Timeframe"] ?? "60";
+            var defaultTimeframe = Math.Max(1, _priceBarOptions.TimeframeMinute);
+            var timeFrame = model["Timeframe"] ?? defaultTimeframe.ToString(CultureInfo.InvariantCulture);
             var startDate = model["StartDate"] ?? "2022-01-01";
             var modelId = int.Parse(model["ModelId"] ?? "0");
-            var timeFrameInt = int.TryParse(timeFrame, out var tfVal) ? tfVal : 60;
+            var timeFrameInt = int.TryParse(timeFrame, out var tfVal) ? tfVal : defaultTimeframe;
 
             modelTimeframes[modelId] = timeFrameInt;
             if (!string.IsNullOrWhiteSpace(tradingSession))
             {
+                if (!IsWithinCurrentSession(tradingSession, nowUtc))
+                {
+                    continue;
+                }
+
                 modelSessions[modelId] = tradingSession.Trim();
             }
 
-            var scriptArgs = string.IsNullOrEmpty(universe)
-                ? scriptPath
-                : $"{scriptPath} --universe {universe} --session {tradingSession} --timeframe {timeFrame} --start {startDate}";
+            if (string.IsNullOrWhiteSpace(universe))
+            {
+                _logger.LogWarning("Skipping price export: model {ModelId} does not define a universe", modelId);
+                continue;
+            }
+
+            var scriptArgs = new List<string>
+            {
+                scriptPath,
+                "--universe",
+                universe
+            };
+
+            if (!string.IsNullOrWhiteSpace(tradingSession))
+            {
+                scriptArgs.AddRange(new[] { "--session", tradingSession });
+            }
+
+            scriptArgs.AddRange(new[]
+            {
+                "--timeframe",
+                timeFrameInt.ToString(CultureInfo.InvariantCulture)
+            });
+
+            if (!string.IsNullOrWhiteSpace(startDate))
+            {
+                scriptArgs.AddRange(new[] { "--start", startDate });
+            }
+            if (!string.IsNullOrWhiteSpace(startDate))
+            {
+                scriptArgs.AddRange(new[] { "--secret-name", "qq-intraday-credentials" });
+            }
 
             var sbOut = new StringBuilder();
             var sbErr = new StringBuilder();
@@ -86,7 +133,7 @@ public class WeightCalculator
             }
             _logger.LogInformation("Price export script completed successfully for {Universe}: {Output}", universe, sbOut.ToString());
 
-            var exportDir = Path.Combine("/home/data/historical_data", $"Univ{universeId}");
+            var exportDir = ResolveHomePath(Path.Combine("/home/data/historical_data", $"Univ{universeId}"));
             foreach (var name in new[] { "A", "H", "I" })
             {
                 var path = Path.Combine(exportDir, $"{name}.txt");
@@ -103,9 +150,9 @@ public class WeightCalculator
 
             var executables = new List<(string Path, string Args)>
             {
-                (_config["Executables:GenBinariesExecutable"] ?? string.Empty, $"{universe} {universeId}"),
-                (_config["Executables:GenTimeSeriesExecutable"] ?? string.Empty, $"{universe}"),
-                (_config["Executables:ProdManagerExecutable"] ?? string.Empty, $"{universe} account={universe}")
+                (ResolveHomePath(_config["Executables:GenBinariesExecutable"] ?? string.Empty), $"{universe} {universeId}"),
+                (ResolveHomePath(_config["Executables:GenTimeSeriesExecutable"] ?? string.Empty), $"{universe}"),
+                (ResolveHomePath(_config["Executables:ProdManagerExecutable"] ?? string.Empty), $"{universe} account={universe}")
             };
 
             string stdout = string.Empty;
@@ -138,7 +185,7 @@ public class WeightCalculator
                 stdout = outText;
             }
 
-            var weightsFile = Path.Combine(@"C:\home\prod", universe, "AggregatedWeights.txt");
+            var weightsFile = ResolveHomePath(Path.Combine(@"C:\home\prod", universe, "AggregatedWeights.txt"));
             if (File.Exists(weightsFile))
             {
                 var lines = await File.ReadAllLinesAsync(weightsFile);
@@ -274,6 +321,38 @@ END";
         }
 
         await RunModelReportsAsync(modelTimeframes);
+    }
+
+    private bool IsWithinCurrentSession(string sessionKey, DateTime utcNow)
+    {
+        var trimmed = sessionKey.Trim();
+        if (!SessionBounds.TryGetValue(trimmed, out var session))
+        {
+            _logger.LogWarning(
+                "Unknown session {Session}; computeWeights will run without time filtering.",
+                sessionKey);
+            return true;
+        }
+
+        var local = TimeZoneInfo.ConvertTimeFromUtc(utcNow, session.Zone);
+        var localTime = local.TimeOfDay;
+        var wrapsMidnight = SessionWrapsMidnight(session.Start, session.End);
+
+        var inSession = wrapsMidnight
+            ? localTime >= session.Start || localTime <= session.End
+            : localTime >= session.Start && localTime <= session.End;
+
+        if (!inSession)
+        {
+            _logger.LogInformation(
+                "Skipping computeWeights for session {Session}: current time {NowLocal:O} is outside bounds {Start}-{End}.",
+                sessionKey,
+                local,
+                session.Start,
+                session.End);
+        }
+
+        return inSession;
     }
 
     private void ZeroPenultimateRows(List<WeightRow> rows, string? sessionKey, int timeframeMinutes, int offsetMinutes)
@@ -484,14 +563,6 @@ END";
             @"SELECT SecurityId, BloombergTicker FROM core.Security WHERE BloombergTicker LIKE '%USD%'");
 
         var usdMap = BuildUsdMap(usdPairs);
-        var usdBaseIds = new HashSet<long>(usdPairs
-            .Where(p =>
-            {
-                var pair = p.Ticker.Split(' ')[0];
-                return pair.Length >= 6 && pair[..3] == "USD";
-            })
-            .Select(p => p.SecurityId));
-
         var net = new Dictionary<(long SecurityId, DateTime BarTimeUtc), decimal>();
 
         foreach (var w in weights)
@@ -500,11 +571,6 @@ END";
             if (pair.Length < 6) continue;
             var baseCcy = pair[..3];
             var quoteCcy = pair.Substring(3, 3);
-            if(pair.Contains("NZD"))
-            {
-                int u = 0;
-            }
-
             if (baseCcy == "USD" || quoteCcy == "USD")
             {
                 var (secId, weight) = NormalizeUsdPair(w.SecurityId, pair, w.Weight, usdMap);
@@ -547,14 +613,13 @@ END";
 
         foreach (var entry in net)
         {
-            var weight = AdjustWeightForUsdBase(entry.Key.SecurityId, entry.Value, usdBaseIds);
             var record = new
             {
                 SecurityId = entry.Key.SecurityId,
                 ModelId = modelId,
                 BarTimeUtc = entry.Key.BarTimeUtc,
                 ModelRunId = modelRunId,
-                Weight = weight
+                Weight = entry.Value
             };
 
             await connection.ExecuteAsync(insertSql, record);
@@ -618,9 +683,71 @@ END";
         return (securityId, -weight);
     }
 
-    private static decimal AdjustWeightForUsdBase(long securityId, decimal weight, HashSet<long> usdBaseIds)
+    private static string ResolveHomePath(string? path)
     {
-        return usdBaseIds.Contains(securityId) ? -weight : weight;
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return path ?? string.Empty;
+        }
+
+        var resolved = path;
+
+        var unixRoot = Environment.GetEnvironmentVariable("HOME_ROOT");
+        if (string.IsNullOrEmpty(unixRoot))
+        {
+            var environmentName =
+                Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ??
+                Environment.GetEnvironmentVariable("DOTNET_ENVIRONMENT");
+
+            if (string.Equals(environmentName, "Test", StringComparison.OrdinalIgnoreCase))
+            {
+                unixRoot = "/home_test";
+            }
+        }
+        if (!string.IsNullOrEmpty(unixRoot))
+        {
+            const string unixPrefix = "/home";
+            if (string.Equals(resolved, unixPrefix, StringComparison.Ordinal) ||
+                string.Equals(resolved, unixPrefix + "/", StringComparison.Ordinal))
+            {
+                resolved = unixRoot;
+            }
+            else if (resolved.StartsWith(unixPrefix + "/", StringComparison.Ordinal))
+            {
+                resolved = CombinePath(unixRoot, resolved.Substring(unixPrefix.Length + 1));
+            }
+        }
+
+        var windowsRoot = Environment.GetEnvironmentVariable("WINDOWS_HOME_ROOT");
+        if (!string.IsNullOrEmpty(windowsRoot))
+        {
+            foreach (var prefix in new[] { @"C:\\home\\", @"C:/home/", @"C:\\home", @"C:/home" })
+            {
+                if (resolved.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    var relative = resolved.Length > prefix.Length
+                        ? resolved.Substring(prefix.Length).TrimStart('/', '\\')
+                        : string.Empty;
+                    resolved = CombinePath(windowsRoot, relative);
+                    break;
+                }
+            }
+        }
+
+        return resolved;
+    }
+
+    private static string CombinePath(string root, string? relative)
+    {
+        if (string.IsNullOrEmpty(relative))
+        {
+            return root;
+        }
+
+        var segments = relative
+            .Split(new[] { '/', '\\' }, StringSplitOptions.RemoveEmptyEntries);
+
+        return segments.Aggregate(root, Path.Combine);
     }
 
     private sealed class WeightRow

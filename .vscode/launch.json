@@ -11,8 +11,11 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "args": [
-                "--universe", "INFXUS",
-                "--timeframe", "60"
+                "--universe", "INFX1",
+                "--timeframe", "15",
+                "--secret-name", "qq-intraday-credentials",
+                "--session","US",
+                "--start", "2022-01-01"
             ]
         }
     ]

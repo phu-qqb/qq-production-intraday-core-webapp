@@ -2,19 +2,19 @@ using System;
 using System.Collections.Generic;
 using System.Data;
 using System.Data.Common;
+using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
-using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Dapper;
-using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using TradingDaemon.Data;
 using TradingDaemon.Models;
+using TradingDaemon.Options;
 
 namespace TradingDaemon.Services;
 
@@ -26,56 +26,161 @@ public class WakettPriceFetcher
     private readonly ILogger<WakettPriceFetcher> _logger;
 
     private readonly WakettAutomationOptions? _automationOptions;
+    private readonly string _stageHistCloseTable;
+    private readonly string _priceBarWindowQuery;
+    private readonly string _priceBarTimestampPresenceSql;
+    private readonly string _stageClearSql;
+    private readonly string _stageDeleteSql;
+    private readonly string _stageInsertSql;
+    private readonly string _priceBarTable;
+    private readonly string _securityTable;
+    private readonly IPriceProcessingProcedureExecutor _priceProcedures;
+    private readonly PriceBarOptions _priceBarOptions;
+    private readonly IReadOnlyList<int> _priceTimeframeMinutes;
 
 
-    private int PriceMinuteOffset => Math.Clamp(
-        _config.GetValue<int?>("ExternalApis:WakettApi:PriceMinuteOffset")
-            ?? 6,
-        0,
-        59);
+    private IReadOnlyList<int>? _priceMinuteOffsets;
+
+    private static readonly TimeSpan HistoricalWindow = TimeSpan.FromHours(6);
+
+    private IReadOnlyList<int> PriceMinuteOffsets => _priceMinuteOffsets ??= LoadMinuteOffsets();
 
     public WakettPriceFetcher(
         WakettApiClient client,
         DapperContext context,
         IConfiguration config,
         ILogger<WakettPriceFetcher> logger,
-        IOptions<WakettAutomationOptions>? automationOptions = null)
+        IDatabaseObjectNameProvider databaseNameProvider,
+        IPriceProcessingProcedureExecutor priceProcedures,
+        IOptions<WakettAutomationOptions>? automationOptions = null,
+        IOptions<PriceBarOptions>? priceBarOptions = null)
     {
         _client = client;
         _context = context;
         _config = config;
         _logger = logger;
+        _priceProcedures = priceProcedures;
         _automationOptions = automationOptions?.Value;
+        _priceBarOptions = priceBarOptions?.Value ?? new PriceBarOptions();
+        _priceTimeframeMinutes = _priceBarOptions.GetOrderedTimeframeMinutes();
+        _stageHistCloseTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketStageHistClose);
+        _priceBarTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayMarketPriceBar);
+        _securityTable = databaseNameProvider.GetObjectName(DatabaseObjects.IntradayCoreSecurity);
+        _priceBarWindowQuery = $"SELECT SecurityId, BarTimeUtc FROM {_priceBarTable} WHERE TimeframeMinute = {BasePriceTimeframeMinute} AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset AND BarTimeUtc BETWEEN @StartUtc AND @EndUtc";
+        _priceBarTimestampPresenceSql = $"SELECT SecurityId FROM {_priceBarTable} WHERE TimeframeMinute = {BasePriceTimeframeMinute} AND SecurityId IN @SecurityIds AND BarTimeUtc = @BarTimeUtc";
+        _stageClearSql = $"DELETE FROM {_stageHistCloseTable}";
+        _stageDeleteSql = $"DELETE FROM {_stageHistCloseTable} WHERE BarTimeUtc = @BarTimeUtc AND SecurityId IN @SecurityIds";
+        _stageInsertSql = $"INSERT INTO {_stageHistCloseTable} (SecurityId, BarTimeUtc, [Close]) VALUES (@SecurityId, @BarTimeUtc, @Close)";
+    }
+
+    private IReadOnlyList<int> LoadMinuteOffsets()
+    {
+        var configuredOffsets = _config
+            .GetSection("ExternalApis:WakettApi:PriceMinuteOffsets")
+            .Get<int[]>()
+            ?.Select(offset => Math.Clamp(offset, 0, 59))
+            .Distinct()
+            .OrderBy(offset => offset)
+            .ToArray();
+
+        if (configuredOffsets is { Length: > 0 })
+        {
+            return configuredOffsets;
+        }
+
+        var fallback = _config.GetValue<int?>("ExternalApis:WakettApi:PriceMinuteOffset") ?? 6;
+        return new[] { Math.Clamp(fallback, 0, 59) };
     }
 
     public async Task<WakettPriceUploadResult?> FetchAndStoreAsync(
         CancellationToken cancellationToken = default)
     {
-        if (!TryLoadConfiguredSymbols(out var baseSymbols, out var missingSymbols, out var allSecurityIds))
+        var symbolConfiguration = await LoadSymbolConfigurationAsync(cancellationToken);
+        if (symbolConfiguration is null)
         {
             return null;
         }
 
-        var missingBars = await FindMissingBarTimestampsAsync(allSecurityIds, cancellationToken);
-        if (missingBars.Count == 0)
+        var fetchStopwatch = Stopwatch.StartNew();
+        var baseSymbols = symbolConfiguration.BaseSymbols;
+        var uploadSecurityIds = symbolConfiguration.UploadSecurityIds;
+        var uploadSecurityIdSet = new HashSet<int>(uploadSecurityIds);
+        var pairToSecurityId = symbolConfiguration.PairToSecurityId;
+
+        if (uploadSecurityIds.Length == 0)
         {
-            _logger.LogInformation("No missing Wakett price bars detected in the last 24 hours.");
+            _logger.LogInformation("No Wakett securities require database uploads.");
             return null;
         }
 
-        var securityPairs = await LoadSecurityPairsAsync(allSecurityIds, cancellationToken);
-        var wakettSymbols = BuildWakettRequestSymbols(baseSymbols);
-        WakettPriceUploadResult? lastResult = null;
+        using var connection = await OpenConnectionAsync(cancellationToken);
+
+        _logger.LogInformation("[Wakett] Beginning fetch cycle for {Count} securities.", uploadSecurityIds.Length);
+
+        var stageStopwatch = Stopwatch.StartNew();
+        await ClearStageTablesAsync(connection, cancellationToken);
+        stageStopwatch.Stop();
+        _logger.LogInformation("[Wakett] Cleared staging tables in {ElapsedMs} ms.", stageStopwatch.ElapsedMilliseconds);
+
+        var missingBars = new List<(int MinuteOffset, DateTime BarTimeUtc)>();
+        var missingDetection = Stopwatch.StartNew();
+        foreach (var minuteOffset in PriceMinuteOffsets)
+        {
+            var offsetTimer = Stopwatch.StartNew();
+            var missingForOffset = await FindMissingBarTimestampsAsync(
+                uploadSecurityIds,
+                minuteOffset,
+                connection,
+                cancellationToken);
+            missingBars.AddRange(missingForOffset.Select(bar => (minuteOffset, bar)));
+            offsetTimer.Stop();
+            _logger.LogInformation(
+                "[Wakett] Missing scan for offset {Offset} found {MissingCount} gaps in {ElapsedMs} ms.",
+                minuteOffset,
+                missingForOffset.Count,
+                offsetTimer.ElapsedMilliseconds);
+        }
+        missingDetection.Stop();
+        _logger.LogInformation(
+            "[Wakett] Completed missing-bar discovery across {OffsetCount} offsets in {ElapsedMs} ms.",
+            PriceMinuteOffsets.Count,
+            missingDetection.ElapsedMilliseconds);
 
         var nowUtc = DateTimeOffset.UtcNow;
+        var historicalWindowStart = nowUtc.Subtract(HistoricalWindow);
 
-        foreach (var barTimeUtc in missingBars.OrderBy(t => t))
+        var fetchableMissingBars = missingBars
+            .Where(entry => entry.BarTimeUtc.AddMinutes(entry.MinuteOffset) >= historicalWindowStart.UtcDateTime)
+            .ToList();
+
+        if (fetchableMissingBars.Count == 0)
         {
+            _logger.LogInformation(
+                "No missing Wakett price bars detected within the last {Hours} hours for configured minute offsets.",
+                HistoricalWindow.TotalHours);
+            return null;
+        }
+
+        var loadPairsTimer = Stopwatch.StartNew();
+        var securityPairs = await LoadSecurityPairsAsync(uploadSecurityIds, connection, cancellationToken);
+        loadPairsTimer.Stop();
+        _logger.LogInformation(
+            "[Wakett] Loaded {Count} security pairs in {ElapsedMs} ms.",
+            securityPairs.Count,
+            loadPairsTimer.ElapsedMilliseconds);
+        var wakettSymbols = BuildWakettRequestSymbols(baseSymbols);
+        var uploadBatches = new List<PriceUploadBatch>();
+        WakettPriceUploadResult? lastResult = null;
+
+        foreach (var (minuteOffset, barTimeUtc) in fetchableMissingBars
+            .OrderBy(entry => entry.BarTimeUtc.AddMinutes(entry.MinuteOffset)))
+        {
+            var loopTimer = Stopwatch.StartNew();
 
             var baseTimestamp = new DateTimeOffset(barTimeUtc, TimeSpan.Zero);
-            var minuteOffset = PriceMinuteOffset;
             var requestTimestamp = baseTimestamp.AddMinutes(minuteOffset);
             var expectedBarTimestamp = baseTimestamp.AddMinutes(minuteOffset);
+            var expectedBarTimestampUtc = DateTime.SpecifyKind(expectedBarTimestamp.UtcDateTime, DateTimeKind.Utc);
 
             if (requestTimestamp > nowUtc)
             {
@@ -85,12 +190,44 @@ public class WakettPriceFetcher
                 continue;
             }
 
+            if (requestTimestamp < historicalWindowStart)
+            {
+                _logger.LogInformation(
+                    "Skipping Wakett price request for timestamp {TimestampUtc} because it is outside the 6-hour history window.",
+                    requestTimestamp.UtcDateTime);
+                continue;
+            }
+
+            var presenceTimer = Stopwatch.StartNew();
+            if (!await ArePricesMissingForTimestampAsync(
+                uploadSecurityIds,
+                expectedBarTimestampUtc,
+                connection,
+                cancellationToken))
+            {
+                _logger.LogInformation(
+                    "Skipping Wakett price request for timestamp {TimestampUtc} because all price bars already exist.",
+                    expectedBarTimestampUtc);
+                continue;
+            }
+            presenceTimer.Stop();
+            _logger.LogInformation(
+                "[Wakett] Presence check for {TimestampUtc} took {ElapsedMs} ms.",
+                expectedBarTimestampUtc,
+                presenceTimer.ElapsedMilliseconds);
+
             _logger.LogInformation(
                 "Requesting Wakett prices for timestamp {TimestampUtc}.",
                 requestTimestamp.UtcDateTime);
 
-                var response = await _client.GetPricesAsync(wakettSymbols, requestTimestamp);
-            var computedRates = BuildComputedRates(baseSymbols, missingSymbols, response?.Prices, _logger);
+            var apiTimer = Stopwatch.StartNew();
+            var response = await _client.GetPricesAsync(wakettSymbols, requestTimestamp);
+            apiTimer.Stop();
+            _logger.LogInformation(
+                "[Wakett] Wakett API call for {TimestampUtc} returned in {ElapsedMs} ms.",
+                requestTimestamp.UtcDateTime,
+                apiTimer.ElapsedMilliseconds);
+            var computedRates = BuildComputedRates(baseSymbols, response?.Prices, _logger);
             if (computedRates.Count == 0)
             {
                 _logger.LogWarning(
@@ -135,18 +272,43 @@ public class WakettPriceFetcher
                     continue;
                 }
 
-                var securityKey = rate.Definition.SecurityId.ToString(CultureInfo.InvariantCulture);
-                dbRecords[rate.Definition.SecurityId] = new DbPriceRecord(
-                    rate.Definition.SecurityId,
+                var (uploadPair, uploadRate, usdInverted) = NormalizeToUsdQuote(dbPair, adjustedRate, inverted);
+                var uploadSecurityId = pairToSecurityId.TryGetValue(CreatePairKey(uploadPair), out var mappedSecurityId)
+                    ? mappedSecurityId
+                    : rate.Definition.SecurityId;
+
+                if (!uploadSecurityIdSet.Contains(uploadSecurityId))
+                {
+                    continue;
+                }
+
+                if (securityPairs.TryGetValue(uploadSecurityId, out var uploadSecurityPair)
+                    && !PairMatches(uploadSecurityPair, uploadPair))
+                {
+                    _logger.LogWarning(
+                        "Skipping security {SecurityId} because normalized pair {Base}/{Quote} does not match database pair {DbBase}/{DbQuote}.",
+                        uploadSecurityId,
+                        uploadPair.Base,
+                        uploadPair.Quote,
+                        uploadSecurityPair.Base,
+                        uploadSecurityPair.Quote);
+                    continue;
+                }
+
+                var uploadSymbol = FormatCurrencyPair(uploadPair);
+                var finalInverted = inverted || usdInverted;
+                var securityKey = uploadSecurityId.ToString(CultureInfo.InvariantCulture);
+                dbRecords[uploadSecurityId] = new DbPriceRecord(
+                    uploadSecurityId,
                     securityKey,
                     timestampUtc,
-                    adjustedRate);
+                    uploadRate);
 
-                uploadItems[rate.Definition.SecurityId] = new WakettPriceUploadItem(
-                    rate.Definition.SecurityId,
-                    rate.Definition.Symbol,
-                    adjustedRate,
-                    inverted);
+                uploadItems[uploadSecurityId] = new WakettPriceUploadItem(
+                    uploadSecurityId,
+                    uploadSymbol,
+                    uploadRate,
+                    finalInverted);
             }
 
             if (dbRecords.Count == 0)
@@ -157,51 +319,125 @@ public class WakettPriceFetcher
                 continue;
             }
 
-            await StoreAsync(dbRecords.Values, cancellationToken);
-
             var ordered = uploadItems.Values
                 .OrderBy(i => i.SecurityId)
                 .ToList();
 
             _logger.LogInformation(
-                "Uploaded {Count} FX prices to Stage_HistClose for {TimestampUtc}.",
+                "Queued {Count} FX prices for flattening and upload for {TimestampUtc} (offset {Offset}).",
                 ordered.Count,
-                timestampUtc);
+                timestampUtc,
+                minuteOffset);
 
-            lastResult = new WakettPriceUploadResult(timestampUtc, ordered);
+            uploadBatches.Add(new PriceUploadBatch(
+                timestampUtc,
+                minuteOffset,
+                dbRecords.Values.ToList(),
+                ordered));
+
+            loopTimer.Stop();
+            _logger.LogInformation(
+                "[Wakett] Fetch and compute for {TimestampUtc} completed in {ElapsedMs} ms.",
+                timestampUtc,
+                loopTimer.ElapsedMilliseconds);
         }
 
+        if (uploadBatches.Count == 0)
+        {
+            _logger.LogInformation("No Wakett price uploads were queued after fetching recent prices.");
+            return null;
+        }
+
+        foreach (var batch in uploadBatches)
+        {
+            var storeTimer = Stopwatch.StartNew();
+            await StoreRawAsync(connection, batch.Records, cancellationToken);
+            storeTimer.Stop();
+            _logger.LogInformation(
+                "[Wakett] Stored {Count} records for {TimestampUtc} in {ElapsedMs} ms.",
+                batch.Records.Count,
+                batch.TimestampUtc,
+                storeTimer.ElapsedMilliseconds);
+
+            _logger.LogInformation(
+                "Uploaded {Count} FX prices to Stage_HistClose for {TimestampUtc}.",
+                batch.UploadItems.Count,
+                batch.TimestampUtc);
+
+            lastResult = new WakettPriceUploadResult(batch.TimestampUtc, batch.UploadItems);
+        }
+
+        fetchStopwatch.Stop();
+        _logger.LogInformation("[Wakett] Fetch cycle completed in {ElapsedMs} ms.", fetchStopwatch.ElapsedMilliseconds);
         return lastResult;
     }
 
     public async Task<bool> AreRecentPricesCompleteAsync(CancellationToken cancellationToken = default)
     {
-        if (!TryLoadConfiguredSymbols(out _, out _, out var securityIds))
+        var symbolConfiguration = await LoadSymbolConfigurationAsync(cancellationToken);
+        if (symbolConfiguration is null)
         {
             return false;
         }
 
-        var missingBars = await FindMissingBarTimestampsAsync(securityIds, cancellationToken);
-        if (missingBars.Count == 0)
+        var securityIds = symbolConfiguration.UploadSecurityIds;
+        var uploadSecurityIds = symbolConfiguration.UploadSecurityIds;
+
+        if (uploadSecurityIds.Length == 0)
+        {
+            _logger.LogInformation("No Wakett securities require database uploads.");
+            return true;
+        }
+
+        var nowUtc = DateTimeOffset.UtcNow;
+        var historicalWindowStart = nowUtc.Subtract(HistoricalWindow).UtcDateTime;
+
+        var missingByOffset = new List<(int MinuteOffset, IReadOnlyList<DateTime> Missing)>();
+        using var connection = await OpenConnectionAsync(cancellationToken);
+
+        foreach (var minuteOffset in PriceMinuteOffsets)
+        {
+            var missingBars = await FindMissingBarTimestampsAsync(
+                uploadSecurityIds,
+                minuteOffset,
+                connection,
+                cancellationToken);
+            var relevantMissing = missingBars
+                .Where(bar => bar.AddMinutes(minuteOffset) >= historicalWindowStart)
+                .ToList();
+
+            if (relevantMissing.Count > 0)
+            {
+                missingByOffset.Add((minuteOffset, relevantMissing));
+            }
+        }
+
+        if (missingByOffset.Count == 0)
         {
             _logger.LogInformation("All Wakett prices are present for the last 24 trading hours.");
             return true;
         }
 
-        _logger.LogWarning(
-            "Detected {Count} missing Wakett price bar(s) within the last 24 trading hours.",
-            missingBars.Count);
-        _logger.LogWarning(
-            "Missing bar timestamps (UTC): {BarTimes}",
-            string.Join(", ", missingBars
-                .OrderBy(t => t)
-                .Select(t => t.ToString("yyyy-MM-dd HH:mm"))));
+        foreach (var (minuteOffset, missingBars) in missingByOffset)
+        {
+            _logger.LogWarning(
+                "Detected {Count} missing Wakett price bar(s) at minute offset {MinuteOffset} within the last 24 trading hours.",
+                missingBars.Count,
+                minuteOffset);
+            _logger.LogWarning(
+                "Missing bar timestamps (UTC): {BarTimes}",
+                string.Join(
+                    ", ",
+                    missingBars
+                        .OrderBy(t => t)
+                        .Select(t => t.ToString("yyyy-MM-dd HH:mm"))));
+        }
+
         return false;
     }
 
     internal static IReadOnlyList<ComputedRate> BuildComputedRates(
         IEnumerable<WakettSecuritySymbol> baseSymbols,
-        IEnumerable<WakettSecuritySymbol> missingSymbols,
         IEnumerable<WakettPrice>? prices,
         ILogger? logger)
     {
@@ -274,27 +510,6 @@ public class WakettPriceFetcher
 
             AddRate(graph, pair, rateValue);
             result.Add(new ComputedRate(symbol, pair, rateValue));
-        }
-
-        foreach (var symbol in missingSymbols)
-        {
-            if (!TryParsePair(symbol.Symbol, out var pair))
-            {
-                logger?.LogWarning(
-                    "Unable to parse currency pair for missing symbol {Symbol}.",
-                    symbol.Symbol);
-                continue;
-            }
-
-            if (TryComputeCrossRate(graph, pair, out var rate))
-            {
-                AddRate(graph, pair, rate);
-                result.Add(new ComputedRate(symbol, pair, rate));
-            }
-            else
-            {
-                logger?.LogWarning("Unable to reconstruct price for symbol {Symbol}.", symbol.Symbol);
-            }
         }
 
         return result;
@@ -450,34 +665,194 @@ public class WakettPriceFetcher
         inverse[pair.Base] = 1m / rate;
     }
 
-    private bool TryLoadConfiguredSymbols(
-        out IReadOnlyList<WakettSecuritySymbol> baseSymbols,
-        out IReadOnlyList<WakettSecuritySymbol> missingSymbols,
-        out int[] allSecurityIds)
+    private async Task<SymbolConfiguration?> LoadSymbolConfigurationAsync(CancellationToken cancellationToken)
     {
-        baseSymbols = _config
-            .GetSection("ExternalApis:WakettApi:Symbols")
-            .Get<List<WakettSecuritySymbol>>() ?? new();
+        var basePairs = LoadConfiguredBasePairs();
+        if (basePairs.Count == 0)
+        {
+            _logger.LogWarning("No Wakett base pairs configured. Aborting Wakett price processing.");
+            return null;
+        }
+
+        var allowedCurrencies = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in basePairs)
+        {
+            allowedCurrencies.Add(pair.Base);
+            allowedCurrencies.Add(pair.Quote);
+        }
+
+        var securityDefinitions = await LoadSecurityDefinitionsAsync(allowedCurrencies, cancellationToken);
+        if (securityDefinitions.Count == 0)
+        {
+            _logger.LogWarning(
+                "No FX securities were found in {Table} for the configured Wakett currencies.",
+                _securityTable);
+            return null;
+        }
+
+        var pairToSecurityId = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var definition in securityDefinitions)
+        {
+            var key = CreatePairKey(definition.Pair);
+            if (!pairToSecurityId.ContainsKey(key))
+            {
+                pairToSecurityId[key] = definition.SecurityId;
+            }
+        }
+
+        var baseSymbols = new List<WakettSecuritySymbol>();
+
+        foreach (var pair in basePairs)
+        {
+            var match = securityDefinitions.FirstOrDefault(def => PairMatches(def.Pair, pair));
+            if (match is null)
+            {
+                _logger.LogWarning(
+                    "Unable to locate security for Wakett base pair {Base}/{Quote}.",
+                    pair.Base,
+                    pair.Quote);
+                continue;
+            }
+
+            baseSymbols.Add(new WakettSecuritySymbol
+            {
+                SecurityId = match.SecurityId,
+                Symbol = FormatCurrencyPair(pair)
+            });
+        }
 
         if (baseSymbols.Count == 0)
         {
-            _logger.LogWarning("No Wakett symbols configured. Aborting Wakett price processing.");
-            missingSymbols = Array.Empty<WakettSecuritySymbol>();
-            allSecurityIds = Array.Empty<int>();
-            return false;
+            _logger.LogWarning("None of the configured Wakett base pairs are present in the security table.");
+            return null;
         }
 
-        missingSymbols = _config
-            .GetSection("ExternalApis:WakettApi:MissingSymbols")
-            .Get<List<WakettSecuritySymbol>>() ?? new();
+        var uploadSecurityIds = pairToSecurityId.Values.Distinct().ToArray();
 
-        allSecurityIds = baseSymbols
-            .Concat(missingSymbols)
-            .Select(s => s.SecurityId)
-            .Distinct()
-            .ToArray();
+        return new SymbolConfiguration(baseSymbols, uploadSecurityIds, pairToSecurityId);
+    }
 
-        return true;
+    private IReadOnlyList<CurrencyPair> LoadConfiguredBasePairs()
+    {
+        var configured = _config
+            .GetSection("ExternalApis:WakettApi:BasePairs")
+            .Get<string[]>() ?? Array.Empty<string>();
+
+        var pairs = new List<CurrencyPair>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var entry in configured)
+        {
+            if (!TryParsePair(entry, out var pair))
+            {
+                _logger.LogWarning(
+                    "Skipping invalid Wakett base pair configuration value '{Value}'.",
+                    entry);
+                continue;
+            }
+
+            var key = FormatCurrencyPair(pair);
+            if (!seen.Add(key))
+            {
+                continue;
+            }
+
+            pairs.Add(pair);
+        }
+
+        return pairs;
+    }
+
+    private async Task<List<SecuritySymbolDefinition>> LoadSecurityDefinitionsAsync(
+        ISet<string> allowedCurrencies,
+        CancellationToken cancellationToken)
+    {
+        if (allowedCurrencies.Count == 0)
+        {
+            return new List<SecuritySymbolDefinition>();
+        }
+
+        var sql = $@"SELECT SecurityId, Symbol
+FROM {_securityTable}
+WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
+
+        using var connection = _context.CreateConnection();
+        if (connection is DbConnection dbConnection)
+        {
+            await dbConnection.OpenAsync(cancellationToken).ConfigureAwait(false);
+        }
+        else
+        {
+            connection.Open();
+        }
+
+        var definition = new CommandDefinition(sql, cancellationToken: cancellationToken);
+        var rows = await connection.QueryAsync<SecuritySymbolRow>(definition);
+        var definitions = new List<SecuritySymbolDefinition>();
+
+        foreach (var row in rows)
+        {
+            if (string.IsNullOrWhiteSpace(row.Symbol))
+            {
+                continue;
+            }
+
+            var normalized = NormalizeSymbol(row.Symbol);
+            if (normalized.Length != 6)
+            {
+                continue;
+            }
+
+            var pair = new CurrencyPair(normalized[..3], normalized.Substring(3, 3));
+            if (!allowedCurrencies.Contains(pair.Base) || !allowedCurrencies.Contains(pair.Quote))
+            {
+                continue;
+            }
+
+            definitions.Add(new SecuritySymbolDefinition(row.SecurityId, pair));
+        }
+
+        return definitions;
+    }
+
+    private static string FormatCurrencyPair(CurrencyPair pair) => $"{pair.Base}/{pair.Quote}";
+
+    private static string CreatePairKey(CurrencyPair pair) => $"{pair.Base.ToUpperInvariant()}/{pair.Quote.ToUpperInvariant()}";
+
+    private static (CurrencyPair Pair, decimal Rate, bool Inverted) NormalizeToUsdQuote(
+        CurrencyPair pair,
+        decimal rate,
+        bool inverted)
+    {
+        if (rate <= 0m)
+        {
+            return (pair, rate, inverted);
+        }
+
+        if (pair.Quote.Equals("USD", StringComparison.OrdinalIgnoreCase))
+        {
+            return (pair, rate, inverted);
+        }
+
+        if (pair.Base.Equals("USD", StringComparison.OrdinalIgnoreCase))
+        {
+            var flipped = new CurrencyPair(pair.Quote, pair.Base);
+            return (flipped, 1m / rate, true);
+        }
+
+        return (pair, rate, inverted);
+    }
+
+    private static bool PairMatches(CurrencyPair candidate, CurrencyPair target)
+    {
+        if (candidate.Equals(target))
+        {
+            return true;
+        }
+
+        return candidate.Base.Equals(target.Quote, StringComparison.OrdinalIgnoreCase)
+            && candidate.Quote.Equals(target.Base, StringComparison.OrdinalIgnoreCase);
     }
 
     private static IReadOnlyList<WakettSecuritySymbol> BuildWakettRequestSymbols(
@@ -511,6 +886,8 @@ public class WakettPriceFetcher
 
     private async Task<IReadOnlyList<DateTime>> FindMissingBarTimestampsAsync(
         IReadOnlyCollection<int> securityIds,
+        int minuteOffset,
+        IDbConnection? connection,
         CancellationToken cancellationToken)
     {
         if (securityIds.Count == 0)
@@ -524,66 +901,112 @@ public class WakettPriceFetcher
             return Array.Empty<DateTime>();
         }
 
-        var minuteOffset = PriceMinuteOffset;
         var startHourUtc = expectedTimestamps[0];
         var endHourUtc = expectedTimestamps[^1];
         var startUtc = startHourUtc.AddMinutes(minuteOffset);
         var endUtc = endHourUtc.AddMinutes(minuteOffset);
 
-        const string sql = @"SELECT SecurityId, BarTimeUtc FROM [Intraday].[mkt].[PriceBar] WHERE TimeframeMinute = 60 AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset AND BarTimeUtc BETWEEN @StartUtc AND @EndUtc";
+        var ownsConnection = connection is null;
+        connection ??= await OpenConnectionAsync(cancellationToken);
 
-        using var connection = _context.CreateConnection();
-        if (connection is DbConnection dbConnection)
+        try
         {
-            await dbConnection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            connection.Open();
-        }
+            var rows = await connection.QueryAsync<(int SecurityId, DateTime BarTimeUtc)>(
+                _priceBarWindowQuery,
+                new
+                {
+                    SecurityIds = securityIds.ToArray(),
+                    StartUtc = startUtc,
+                    EndUtc = endUtc,
+                    MinuteOffset = minuteOffset
+                });
 
-        var rows = await connection.QueryAsync<(int SecurityId, DateTime BarTimeUtc)>(
-        sql,
-        new
-        {
-            SecurityIds = securityIds.ToArray(),
-            StartUtc = startUtc,
-            EndUtc = endUtc,
-            MinuteOffset = minuteOffset
-        });
-
-        var existing = new Dictionary<DateTime, HashSet<int>>();
-        foreach (var row in rows)
-        {
-            var normalized = DateTime.SpecifyKind(row.BarTimeUtc, DateTimeKind.Utc);
-            normalized = new DateTime(
-                normalized.Year,
-                normalized.Month,
-                normalized.Day,
-                normalized.Hour,
-                0,
-                0,
-                DateTimeKind.Utc);
-
-            if (!existing.TryGetValue(normalized, out var set))
+            var existing = new Dictionary<DateTime, HashSet<int>>();
+            foreach (var row in rows)
             {
-                set = new HashSet<int>();
-                existing[normalized] = set;
+                var normalized = DateTime.SpecifyKind(row.BarTimeUtc, DateTimeKind.Utc);
+                normalized = new DateTime(
+                    normalized.Year,
+                    normalized.Month,
+                    normalized.Day,
+                    normalized.Hour,
+                    0,
+                    0,
+                    DateTimeKind.Utc);
+
+                if (!existing.TryGetValue(normalized, out var set))
+                {
+                    set = new HashSet<int>();
+                    existing[normalized] = set;
+                }
+
+                set.Add(row.SecurityId);
             }
 
-            set.Add(row.SecurityId);
-        }
-
-        var missing = new List<DateTime>();
-        foreach (var timestamp in expectedTimestamps)
-        {
-            if (!existing.TryGetValue(timestamp, out var set) || set.Count < securityIds.Count)
+            var missing = new List<DateTime>();
+            foreach (var timestamp in expectedTimestamps)
             {
-                missing.Add(timestamp);
+                if (!existing.TryGetValue(timestamp, out var set) || set.Count < securityIds.Count)
+                {
+                    missing.Add(timestamp);
+                }
+            }
+
+            return missing;
+        }
+        finally
+        {
+            if (ownsConnection)
+            {
+                connection.Dispose();
             }
         }
+    }
 
-        return missing;
+    private async Task<bool> ArePricesMissingForTimestampAsync(
+        IReadOnlyCollection<int> securityIds,
+        DateTime expectedBarTimestampUtc,
+        IDbConnection? connection,
+        CancellationToken cancellationToken)
+    {
+        if (securityIds.Count == 0)
+        {
+            return false;
+        }
+
+        var ids = securityIds.ToArray();
+        var ownsConnection = connection is null;
+        connection ??= await OpenConnectionAsync(cancellationToken);
+
+        try
+        {
+            var rows = await connection.QueryAsync<int>(
+                _priceBarTimestampPresenceSql,
+                new
+                {
+                    SecurityIds = ids,
+                    BarTimeUtc = expectedBarTimestampUtc
+                });
+
+            var present = new HashSet<int>();
+            foreach (var securityId in rows)
+            {
+                present.Add(securityId);
+                if (present.Count == ids.Length)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+        finally
+        {
+            if (ownsConnection)
+            {
+                connection.Dispose();
+            }
+        }
     }
 
     internal static IReadOnlyList<DateTime> BuildExpectedBarHours(DateTime endHourUtc, int count)
@@ -637,39 +1060,49 @@ public class WakettPriceFetcher
         return local.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday;
     }
 
+    private static TimeZoneInfo NewYorkZone => TimeZoneInfo.FindSystemTimeZoneById(
+        System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Windows)
+            ? "Eastern Standard Time"
+            : "America/New_York");
+
     private async Task<Dictionary<int, CurrencyPair>> LoadSecurityPairsAsync(
         IEnumerable<int> securityIds,
+        IDbConnection? connection,
         CancellationToken cancellationToken)
     {
         var ids = securityIds.Distinct().ToArray();
         if (ids.Length == 0)
             return new Dictionary<int, CurrencyPair>();
 
-        const string sql = "SELECT SecurityId, BloombergTicker FROM core.Security WHERE SecurityId IN @Ids";
-        using var connection = _context.CreateConnection();
-        if (connection is DbConnection dbConnection)
-        {
-            await dbConnection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            connection.Open();
-        }
+        var sql = $"SELECT SecurityId, BloombergTicker FROM {_securityTable} WHERE SecurityId IN @Ids";
+        var ownsConnection = connection is null;
+        connection ??= await OpenConnectionAsync(cancellationToken);
 
         var pairs = new Dictionary<int, CurrencyPair>();
-        var rows = await connection.QueryAsync<(int SecurityId, string? Ticker)>(sql, new { Ids = ids });
-        foreach (var row in rows)
+        try
         {
-            if (!string.IsNullOrWhiteSpace(row.Ticker) && TryParsePair(row.Ticker, out var pair))
+            var rows = await connection.QueryAsync<(int SecurityId, string? Ticker)>(sql, new { Ids = ids });
+            foreach (var row in rows)
             {
-                pairs[row.SecurityId] = pair;
+                if (!string.IsNullOrWhiteSpace(row.Ticker) && TryParsePair(row.Ticker, out var pair))
+                {
+                    pairs[row.SecurityId] = pair;
+                }
+            }
+
+            return pairs;
+        }
+        finally
+        {
+            if (ownsConnection)
+            {
+                connection.Dispose();
             }
         }
-
-        return pairs;
     }
 
-    private async Task StoreAsync(
+    private async Task StoreRawAsync(
+        IDbConnection connection,
         IEnumerable<DbPriceRecord> records,
         CancellationToken cancellationToken)
     {
@@ -680,20 +1113,9 @@ public class WakettPriceFetcher
             .Distinct()
             .ToArray();
 
-        const string deleteSql = "DELETE FROM [Intraday].[mkt].[Stage_HistClose] WHERE BarTimeUtc = @BarTimeUtc AND SecurityId IN @SecurityIds";
-        const string insertSql = "INSERT INTO [Intraday].[mkt].[Stage_HistClose] (SecurityId, BarTimeUtc, [Close]) VALUES (@SecurityId, @BarTimeUtc, @Close)";
-
-        using var connection = _context.CreateConnection();
-        if (connection is DbConnection dbConnection)
-        {
-            await dbConnection.OpenAsync(cancellationToken).ConfigureAwait(false);
-        }
-        else
-        {
-            connection.Open();
-        }
-
         IDbTransaction? transaction = null;
+        var timestamp = recordList.Count > 0 ? recordList[0].BarTimeUtc : (DateTime?)null;
+        var stageTimer = Stopwatch.StartNew();
 
         try
         {
@@ -706,9 +1128,9 @@ public class WakettPriceFetcher
                     SecurityIds = securityKeys
                 };
 
-                await connection.ExecuteAsync(deleteSql, parameters, transaction);
+                await connection.ExecuteAsync(_stageDeleteSql, parameters, transaction);
                 await connection.ExecuteAsync(
-                    insertSql,
+                    _stageInsertSql,
                     recordList.Select(r => new { SecurityId = r.SecurityKey, r.BarTimeUtc, Close = r.Close }),
                     transaction);
 
@@ -718,172 +1140,72 @@ public class WakettPriceFetcher
         finally
         {
             transaction?.Dispose();
+            stageTimer.Stop();
+            if (timestamp is not null)
+            {
+                _logger.LogInformation(
+                    "[Wakett] Stage_HistClose delete/insert for {TimestampUtc} affected {Count} records in {ElapsedMs} ms.",
+                    timestamp.Value,
+                    recordList.Count,
+                    stageTimer.ElapsedMilliseconds);
+            }
         }
 
         if (recordList.Count > 0)
         {
-            await PriceProcessingProcedures.LoadRawFromStageAsync(connection, 60, cancellationToken);
-
-            var minuteOffset = PriceMinuteOffset;
-            var selectRaw =
-                "SELECT SecurityId, BarTimeUtc, [Close] FROM [Intraday].[mkt].[PriceBar] WHERE TimeframeMinute = 60 AND SecurityId IN @SecurityIds AND DATEPART(MINUTE, BarTimeUtc) = @MinuteOffset";
-            var existing = (await connection.QueryAsync<HistClose>(selectRaw, new { SecurityIds = securityKeys, MinuteOffset = minuteOffset }))
-                .GroupBy(r => (r.SecurityId, r.BarTimeUtc))
-                .Select(g => g.Last())
-                .ToList();
-
-            var flatRecords = new List<FlatPrice>();
-            foreach (var grp in existing.GroupBy(r => r.SecurityId))
+            var loadRawTimer = Stopwatch.StartNew();
+            foreach (var timeframe in PriceTimeframeMinutes)
             {
-                var ordered = grp.OrderBy(r => r.BarTimeUtc).ToList();
-                var rawEu = RawNMin(ordered, 60, "EU", minuteOffset);
-                var flatEu = Flatten(rawEu, SessionBounds["EU"].Zone)
-                    .Select(r => new FlatPrice
-                    {
-                        SecurityId = grp.Key,
-                        BarTimeUtc = r.TimestampUtc,
-                        Close = r.Close,
-                        Session = "EU"
-                    });
-                flatRecords.AddRange(flatEu);
-
-                var rawUs = RawNMin(ordered, 60, "US", minuteOffset);
-                var flatUs = Flatten(rawUs, SessionBounds["US"].Zone)
-                    .Select(r => new FlatPrice
-                    {
-                        SecurityId = grp.Key,
-                        BarTimeUtc = r.TimestampUtc,
-                        Close = r.Close,
-                        Session = "US"
-                    });
-                flatRecords.AddRange(flatUs);
+                await _priceProcedures.LoadRawFromStageAsync(
+                    connection,
+                    timeframe,
+                    _priceBarOptions.SourceId,
+                    cancellationToken);
             }
 
-            if (flatRecords.Count > 0)
-            {
-                await connection.ExecuteAsync("DELETE FROM [Intraday].[dbo].[mkt_FlatBar_Staging]");
-
-                var table = new DataTable();
-                table.Columns.Add("SecurityId", typeof(string));
-                table.Columns.Add("BarTimeUtc", typeof(DateTime));
-                table.Columns.Add("Close", typeof(decimal));
-                table.Columns.Add("Session", typeof(string));
-
-                foreach (var record in flatRecords)
-                {
-                    table.Rows.Add(record.SecurityId, record.BarTimeUtc, record.Close, record.Session);
-                }
-
-                if (connection is SqlConnection sqlConnection)
-                {
-                    using var bulkCopy = new SqlBulkCopy(sqlConnection);
-                    bulkCopy.DestinationTableName = "[Intraday].[dbo].[mkt_FlatBar_Staging]";
-                    await bulkCopy.WriteToServerAsync(table);
-                }
-                else
-                {
-                    throw new InvalidOperationException("Expected SqlConnection for bulk copy operations.");
-                }
-            }
-
-            await PriceProcessingProcedures.LoadFlatFromMinimalAsync(connection, 60, cancellationToken);
+            loadRawTimer.Stop();
+            _logger.LogInformation(
+                "[Wakett] LoadRawFromStage completed for {TimestampUtc} in {ElapsedMs} ms.",
+                timestamp,
+                loadRawTimer.ElapsedMilliseconds);
         }
     }
 
-    private static readonly Dictionary<string, (TimeZoneInfo Zone, TimeSpan Start, TimeSpan End)> SessionBounds = new()
+    private async Task<IDbConnection> OpenConnectionAsync(CancellationToken cancellationToken)
     {
-        ["US"] = (NewYorkZone, TimeSpan.Parse("09:00"), TimeSpan.Parse("15:59")),
-        ["EU"] = (NewYorkZone, TimeSpan.Parse("02:00"), TimeSpan.Parse("08:59"))
-    };
-
-    private static TimeZoneInfo NewYorkZone => TimeZoneInfo.FindSystemTimeZoneById(
-        RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? "Eastern Standard Time" : "America/New_York");
-
-    private static List<(DateTime TimestampUtc, decimal Close)> RawNMin(List<HistClose> series, int minutes, string session, int offset)
-    {
-        var bounds = SessionBounds[session];
-        var zone = bounds.Zone;
-        var result = new List<(DateTime, decimal)>();
-        DateTime? currentBucket = null;
-        decimal lastClose = 0;
-        var sessionStartAligned = AlignSessionStart(bounds.Start, minutes);
-        foreach (var item in series.OrderBy(s => s.BarTimeUtc))
+        var connection = _context.CreateConnection();
+        if (connection is DbConnection dbConnection)
         {
-            var local = TimeZoneInfo.ConvertTimeFromUtc(item.BarTimeUtc, zone);
-            if (offset != 0) local = local.AddMinutes(-offset);
-            var start = local.TimeOfDay;
-            var end = start.Add(TimeSpan.FromMinutes(minutes - 1));
-
-            if (start < bounds.Start || end > bounds.End) continue;
-            var bucket = AlignToSessionBucket(local, sessionStartAligned, minutes);
-
-            if (currentBucket != bucket)
-            {
-                if (currentBucket.HasValue)
-                    result.Add((TimeZoneInfo.ConvertTimeToUtc(currentBucket.Value.AddMinutes(offset), zone), lastClose));
-                currentBucket = bucket;
-            }
-            lastClose = item.Close;
+            await dbConnection.OpenAsync(cancellationToken).ConfigureAwait(false);
         }
-        if (currentBucket.HasValue)
-            result.Add((TimeZoneInfo.ConvertTimeToUtc(currentBucket.Value.AddMinutes(offset), zone), lastClose));
-        return result;
+        else
+        {
+            connection.Open();
+        }
+
+        return connection;
     }
 
-    private static DateTime AlignToSessionBucket(DateTime local, TimeSpan sessionStartAligned, int minutes)
+    private async Task ClearStageTablesAsync(IDbConnection connection, CancellationToken cancellationToken)
     {
-        var alignedDayStart = new DateTime(local.Year, local.Month, local.Day).Add(sessionStartAligned);
-        if (local.TimeOfDay <= sessionStartAligned)
-        {
-            return alignedDayStart;
-        }
-
-        var minutesSinceAlignedStart = (int)Math.Floor((local.TimeOfDay - sessionStartAligned).TotalMinutes / minutes) * minutes;
-        return alignedDayStart.AddMinutes(minutesSinceAlignedStart);
+        await connection.ExecuteAsync(_stageClearSql);
     }
 
+    private IReadOnlyList<int> PriceTimeframeMinutes => _priceTimeframeMinutes;
 
-    private static TimeSpan AlignSessionStart(TimeSpan sessionStart, int minutes)
+    private int BasePriceTimeframeMinute => PriceTimeframeMinutes.First();
+
+    private sealed record SymbolConfiguration(
+        IReadOnlyList<WakettSecuritySymbol> BaseSymbols,
+        int[] UploadSecurityIds,
+        IReadOnlyDictionary<string, int> PairToSecurityId);
+
+    private sealed record SecuritySymbolDefinition(int SecurityId, CurrencyPair Pair);
+
+    private sealed class SecuritySymbolRow
     {
-        if (minutes <= 0)
-        {
-            throw new ArgumentOutOfRangeException(nameof(minutes), "Aggregation interval must be positive.");
-        }
-
-        if (sessionStart == TimeSpan.Zero)
-        {
-            return TimeSpan.Zero;
-        }
-
-        var totalMinutes = (int)Math.Ceiling(sessionStart.TotalMinutes / minutes) * minutes;
-        return TimeSpan.FromMinutes(totalMinutes);
-    }
-
-    private static List<(DateTime TimestampUtc, decimal Close)> Flatten(List<(DateTime TimestampUtc, decimal Close)> raw, TimeZoneInfo zone)
-    {
-        if (raw.Count == 0) return new();
-        var times = raw.Select(r => r.TimestampUtc).ToList();
-        var px = raw.Select(r => r.Close).ToList();
-        var localTimes = times.Select(t => TimeZoneInfo.ConvertTimeFromUtc(t, zone)).ToList();
-        var ret = new decimal[px.Count];
-        for (int i = 1; i < px.Count; i++)
-        {
-            var prev = px[i - 1];
-            ret[i] = prev != 0 ? (px[i] - prev) / prev : 0m;
-            if (localTimes[i].Date != localTimes[i - 1].Date)
-                ret[i] = 0m;
-        }
-        var flat = new decimal[px.Count];
-        flat[px.Count - 1] = px[px.Count - 1];
-        for (int i = px.Count - 2; i >= 0; i--)
-        {
-            var inc = ret[i + 1];
-            flat[i] = flat[i + 1] / (1 + inc);
-        }
-        var result = new List<(DateTime, decimal)>();
-        for (int i = 0; i < px.Count; i++)
-            result.Add((times[i], flat[i]));
-        return result;
+        public int SecurityId { get; set; }
+        public string? Symbol { get; set; }
     }
 
     internal readonly record struct CurrencyPair(string Base, string Quote);
@@ -893,7 +1215,13 @@ public class WakettPriceFetcher
         CurrencyPair Pair,
         decimal Rate);
 
-    private sealed record DbPriceRecord(
+    private sealed record PriceUploadBatch(
+        DateTime TimestampUtc,
+        int MinuteOffset,
+        IReadOnlyCollection<DbPriceRecord> Records,
+        IReadOnlyList<WakettPriceUploadItem> UploadItems);
+
+    internal sealed record DbPriceRecord(
         int SecurityId,
         string SecurityKey,
         DateTime BarTimeUtc,
