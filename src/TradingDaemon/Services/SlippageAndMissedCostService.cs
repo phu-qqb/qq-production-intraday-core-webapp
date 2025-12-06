@@ -68,18 +68,17 @@ ORDER BY Symbol, BarTimeUtc";
         var startUtc = DateTime.SpecifyKind(tradingDate.ToDateTime(TimeOnly.MinValue), DateTimeKind.Utc);
         var endUtc = startUtc.AddDays(1);
 
-        await using var connection = _context.CreateConnection();
+        using var connection = _context.CreateConnection();
 
-        var ordersTask = connection.QueryAsync<OrderRow>(
-            new CommandDefinition(FormatSql(OrdersSqlTemplate), new { StartUtc = startUtc, EndUtc = endUtc }, cancellationToken: cancellationToken));
+        var orders = (await connection.QueryAsync<OrderRow>(
+                new CommandDefinition(FormatSql(OrdersSqlTemplate), new { StartUtc = startUtc, EndUtc = endUtc }, cancellationToken: cancellationToken)))
+            .Where(o => !string.IsNullOrWhiteSpace(o.Symbol))
+            .ToList();
 
-        var fillsTask = connection.QueryAsync<FillRow>(
-            new CommandDefinition(FormatSql(FillsSqlTemplate), new { StartUtc = startUtc, EndUtc = endUtc }, cancellationToken: cancellationToken));
-
-        await Task.WhenAll(ordersTask, fillsTask);
-
-        var orders = (await ordersTask).Where(o => !string.IsNullOrWhiteSpace(o.Symbol)).ToList();
-        var fills = (await fillsTask).Where(f => !string.IsNullOrWhiteSpace(f.Symbol)).ToList();
+        var fills = (await connection.QueryAsync<FillRow>(
+                new CommandDefinition(FormatSql(FillsSqlTemplate), new { StartUtc = startUtc, EndUtc = endUtc }, cancellationToken: cancellationToken)))
+            .Where(f => !string.IsNullOrWhiteSpace(f.Symbol))
+            .ToList();
 
         var symbolSet = orders.Select(o => NormalizeSymbolForQuery(o.Symbol))
             .Concat(fills.Select(f => NormalizeSymbolForQuery(f.Symbol)))
