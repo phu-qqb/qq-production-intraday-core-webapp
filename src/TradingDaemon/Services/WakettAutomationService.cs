@@ -77,7 +77,6 @@ public sealed class WakettAutomationService : BackgroundService
             _logger.LogInformation(
                 "Wakett automation will not start because today is {DayOfWeek} in New York time.",
                 initialLocal.DayOfWeek);
-            _applicationLifetime.StopApplication();
             return;
         }
 
