@@ -69,13 +69,22 @@ public sealed class WakettAutomationService : BackgroundService
     {
         _logger.LogInformation("Starting Wakett automation service.");
 
+        var initialNowUtc = _timeProvider.GetUtcNow().UtcDateTime;
+        var initialLocal = TimeZoneInfo.ConvertTimeFromUtc(initialNowUtc, NewYorkTimeZone);
+
+        if (IsWeekend(initialLocal))
+        {
+            _logger.LogInformation(
+                "Wakett automation will not start because today is {DayOfWeek} in New York time.",
+                initialLocal.DayOfWeek);
+            return;
+        }
+
         var sessionActive = false;
         var sessionShutdownDeadlineUtc = (DateTime?)null;
         var currentAutomationWindowStartUtc = DateTime.MinValue;
         var currentSessionStartUtc = DateTime.MinValue;
         var currentSessionEndUtc = DateTime.MinValue;
-
-        var initialNowUtc = _timeProvider.GetUtcNow().UtcDateTime;
         var nextAutomationWindowStartUtc = GetNextAutomationWindowStartUtc(initialNowUtc);
 
         var nextPriceFetchUtc = DateTime.MaxValue;
