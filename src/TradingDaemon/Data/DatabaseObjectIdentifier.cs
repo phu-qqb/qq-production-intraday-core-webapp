@@ -11,6 +11,7 @@ public static class DatabaseObjects
     public static readonly DatabaseObjectIdentifier IntradayModel = new("Intraday.model.Model");
     public static readonly DatabaseObjectIdentifier IntradayCoreSecurity = new("Intraday.core.Security");
     public static readonly DatabaseObjectIdentifier IntradayMarketPriceBar = new("Intraday.mkt.PriceBar");
+    public static readonly DatabaseObjectIdentifier IntradayMarketPriceBarView = new("Intraday.mkt.vwPriceBar");
     public static readonly DatabaseObjectIdentifier IntradayMarketFlatBar = new("Intraday.mkt.FlatBar");
     public static readonly DatabaseObjectIdentifier IntradayMarketStageHistClose = new("Intraday.mkt.Stage_HistClose");
     public static readonly DatabaseObjectIdentifier IntradayStagingFlatBar = new("Intraday.dbo.mkt_FlatBar_Staging");

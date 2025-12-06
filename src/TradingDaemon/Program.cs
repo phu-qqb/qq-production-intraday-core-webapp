@@ -59,6 +59,7 @@ builder.Services.AddTransient<PriceFetcher>();
 builder.Services.AddTransient<WeightCalculator>();
 builder.Services.AddTransient<OrderSender>();
 builder.Services.AddTransient<PnlReportService>();
+builder.Services.AddTransient<SlippageAndMissedCostService>();
 
 builder.Services.AddTransient<ReportRunner>();
 
@@ -99,5 +100,6 @@ app.MapTradingEndpoints();
 app.MapReportEndpoints();
 app.MapWakettEndpoints();
 app.MapEmailEndpoints();
+app.MapSlippageEndpoints();
 
 app.Run();
