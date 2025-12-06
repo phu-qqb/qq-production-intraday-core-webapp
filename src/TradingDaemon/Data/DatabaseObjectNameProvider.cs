@@ -76,6 +76,7 @@ public sealed class DatabaseObjectNameProvider : IDatabaseObjectNameProvider
             [DatabaseObjects.IntradayModel.Key] = BuildIntradayObjectName(intradayDatabaseName, "model", "Model"),
             [DatabaseObjects.IntradayCoreSecurity.Key] = BuildIntradayObjectName(intradayDatabaseName, "core", "Security"),
             [DatabaseObjects.IntradayMarketPriceBar.Key] = BuildIntradayObjectName(intradayDatabaseName, "mkt", "PriceBar"),
+            [DatabaseObjects.IntradayMarketPriceBarView.Key] = BuildIntradayObjectName(intradayDatabaseName, "mkt", "vwPriceBar"),
             [DatabaseObjects.IntradayMarketFlatBar.Key] = BuildIntradayObjectName(intradayDatabaseName, "mkt", "FlatBar"),
             [DatabaseObjects.IntradayMarketStageHistClose.Key] = BuildIntradayObjectName(intradayDatabaseName, "mkt", "Stage_HistClose"),
             [DatabaseObjects.IntradayStagingFlatBar.Key] = BuildIntradayObjectName(intradayDatabaseName, "dbo", "mkt_FlatBar_Staging"),
