@@ -271,7 +271,13 @@ ORDER BY Symbol, BarTimeUtc";
 
     private static string NormalizeSymbolForQuery(string? symbol)
     {
-        return string.IsNullOrWhiteSpace(symbol) ? string.Empty : symbol.Trim().ToUpperInvariant();
+        if (string.IsNullOrWhiteSpace(symbol))
+        {
+            return string.Empty;
+        }
+
+        var normalized = symbol.Trim().ToUpperInvariant();
+        return normalized.Replace("/", string.Empty);
     }
 
     private static string NormalizeSymbol(string? symbol)
