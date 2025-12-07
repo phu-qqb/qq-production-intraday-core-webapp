@@ -33,7 +33,7 @@ WHERE ScheduledTimestamp >= @StartUtc AND ScheduledTimestamp < @EndUtc";
     Symbol,
     Side,
     ExecuteSize,
-    TradeTimestamp
+    ExecuteTimestamp
 FROM {WakettFill}
 WHERE TradeTimestamp >= @StartUtc AND TradeTimestamp < @EndUtc";
 
@@ -213,7 +213,7 @@ ORDER BY Symbol, BarTimeUtc";
         decimal total = 0m;
         var fillsBySymbol = fills
             .GroupBy(f => NormalizeSymbol(f.Symbol))
-            .ToDictionary(g => g.Key, g => g.OrderBy(f => f.TradeTimestamp).ToList(), StringComparer.OrdinalIgnoreCase);
+            .ToDictionary(g => g.Key, g => g.OrderBy(f => f.ExecuteTimestamp).ToList(), StringComparer.OrdinalIgnoreCase);
 
         foreach (var (symbol, bars) in barsBySymbol)
         {
@@ -236,7 +236,7 @@ ORDER BY Symbol, BarTimeUtc";
                 var currentBar = bars[i];
                 while (symbolFills is not null
                     && fillIndex < symbolFills.Count
-                    && symbolFills[fillIndex].TradeTimestamp.UtcDateTime < currentBar.BarTimeUtc)
+                    && symbolFills[fillIndex].ExecuteTimestamp.UtcDateTime <= currentBar.BarTimeUtc)
                 {
                     var fill = symbolFills[fillIndex];
                     var sideMultiplier = GetSideMultiplier(fill.Side);
@@ -389,7 +389,7 @@ ORDER BY Symbol, BarTimeUtc";
         string Symbol,
         string? Side,
         decimal? ExecuteSize,
-        DateTimeOffset TradeTimestamp);
+        DateTimeOffset ExecuteTimestamp);
 
     private sealed record PriceBarRow(string Symbol, DateTime BarTimeUtc, decimal Close);
 }
