@@ -408,9 +408,12 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
         var securityIds = byCurrency.Values
             .SelectMany(a => a.SecurityIds)
             .Distinct()
-            .ToArray();
+            .ToHashSet();
 
-        var priceLookup = securityIds.Length > 0
+        var usdConversionIds = GetUsdConversionSecurityIds(byCurrency.Keys, symbolInfos.Values.Distinct());
+        securityIds.UnionWith(usdConversionIds);
+
+        var priceLookup = securityIds.Count > 0
             ? await LoadLatestPricesForDayAsync(connection, securityIds, endUtc, cancellationToken)
             : new Dictionary<long, decimal?>();
 
@@ -497,6 +500,54 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
             .OrderByDescending(p => Math.Abs(p.MarketValueUsd ?? 0m))
             .ThenBy(p => p.Symbol, StringComparer.OrdinalIgnoreCase)
             .ToList();
+    }
+
+    private static HashSet<long> GetUsdConversionSecurityIds(
+        IEnumerable<string> currencies,
+        IEnumerable<SymbolInfo> symbolInfos)
+    {
+        var ids = new HashSet<long>();
+
+        foreach (var currency in currencies)
+        {
+            if (string.Equals(currency, "USD", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (TryFindSecurityId(symbolInfos, currency, "USD", out var quoteUsdId))
+            {
+                ids.Add(quoteUsdId);
+                continue;
+            }
+
+            if (TryFindSecurityId(symbolInfos, "USD", currency, out var usdBaseId))
+            {
+                ids.Add(usdBaseId);
+            }
+        }
+
+        return ids;
+    }
+
+    private static bool TryFindSecurityId(
+        IEnumerable<SymbolInfo> symbolInfos,
+        string baseCurrency,
+        string quoteCurrency,
+        out long securityId)
+    {
+        foreach (var info in symbolInfos)
+        {
+            if (string.Equals(info.Pair.BaseCurrency, baseCurrency, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(info.Pair.QuoteCurrency, quoteCurrency, StringComparison.OrdinalIgnoreCase))
+            {
+                securityId = info.SecurityId;
+                return true;
+            }
+        }
+
+        securityId = default;
+        return false;
     }
 
     private static Dictionary<string, List<(string Target, decimal Rate)>> BuildConversionGraph(
