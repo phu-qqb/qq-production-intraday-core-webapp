@@ -135,7 +135,7 @@ ORDER BY Symbol, BarTimeUtc";
                 continue;
             }
 
-            var barIndex = bars.FindIndex(b => b.BarTimeUtc == order.ScheduledTimestamp);
+            var barIndex = bars.FindIndex(b => b.BarTimeUtc == order.ScheduledTimestamp.UtcDateTime);
             if (barIndex < 0 || barIndex >= bars.Count - 1)
             {
                 _logger.LogDebug("No matching bar for order at {Timestamp} ({Symbol})", order.ScheduledTimestamp, pair.FormattedSymbol);
@@ -294,7 +294,7 @@ ORDER BY Symbol, BarTimeUtc";
         string? Side,
         decimal? SizeValue,
         decimal? Aum,
-        DateTime ScheduledTimestamp);
+        DateTimeOffset ScheduledTimestamp);
 
     private sealed record FillRow(
         long WakettFillId,
