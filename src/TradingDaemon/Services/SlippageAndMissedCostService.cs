@@ -80,8 +80,13 @@ ORDER BY Symbol, BarTimeUtc";
             .Where(f => !string.IsNullOrWhiteSpace(f.Symbol))
             .ToList();
 
-        var symbolSet = orders.Select(o => NormalizeSymbolForQuery(o.Symbol))
-            .Concat(fills.Select(f => NormalizeSymbolForQuery(f.Symbol)))
+        var symbolQueries = BuildSymbolQueries(
+                orders.Select(o => o.Symbol)
+                    .Concat(fills.Select(f => f.Symbol)))
+            .ToList();
+
+        var symbolSet = symbolQueries
+            .Select(q => q.QuerySymbol)
             .Where(s => s.Length > 0)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
@@ -98,7 +103,41 @@ ORDER BY Symbol, BarTimeUtc";
             cancellationToken: cancellationToken);
 
         var priceBars = await connection.QueryAsync<PriceBarRow>(priceBarsDefinition);
-        var barsBySymbol = priceBars
+        var priceBarsByQuery = priceBars
+            .GroupBy(b => NormalizeSymbol(b.Symbol))
+            .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
+
+        var symbolQueriesByQuery = symbolQueries
+            .GroupBy(q => q.QuerySymbol)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
+        var adjustedPriceBars = new List<PriceBarRow>();
+
+        foreach (var (querySymbol, bars) in priceBarsByQuery)
+        {
+            var adjustedSymbol = querySymbol;
+            var invertPrices = false;
+
+            if (symbolQueriesByQuery.TryGetValue(querySymbol, out var query))
+            {
+                adjustedSymbol = query.TargetSymbol;
+                invertPrices = query.InvertPrice;
+            }
+
+            foreach (var bar in bars)
+            {
+                var close = bar.Close;
+
+                if (invertPrices && close != 0m)
+                {
+                    close = 1m / close;
+                }
+
+                adjustedPriceBars.Add(new PriceBarRow(adjustedSymbol, bar.BarTimeUtc, close));
+            }
+        }
+
+        var barsBySymbol = adjustedPriceBars
             .GroupBy(b => NormalizeSymbol(b.Symbol))
             .ToDictionary(g => g.Key, g => g.OrderBy(b => b.BarTimeUtc).ToList(), StringComparer.OrdinalIgnoreCase);
 
@@ -295,6 +334,47 @@ ORDER BY Symbol, BarTimeUtc";
 
         return normalized;
     }
+
+    private static IReadOnlyCollection<SymbolQuery> BuildSymbolQueries(IEnumerable<string> symbols)
+    {
+        var queries = new Dictionary<string, SymbolQuery>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var symbol in symbols)
+        {
+            if (string.IsNullOrWhiteSpace(symbol))
+            {
+                continue;
+            }
+
+            if (CurrencyPairParser.TryParse(symbol, out var pair))
+            {
+                var querySymbol = NormalizeSymbolForQuery(pair.FormattedSymbol);
+                var targetSymbol = NormalizeSymbol(pair.FormattedSymbol);
+                var invertPrices = false;
+
+                if (string.Equals(pair.BaseCurrency, "USD", StringComparison.OrdinalIgnoreCase))
+                {
+                    querySymbol = NormalizeSymbolForQuery(pair.ReversedFormattedSymbol);
+                    invertPrices = true;
+                }
+
+                queries.TryAdd(querySymbol, new SymbolQuery(querySymbol, targetSymbol, invertPrices));
+            }
+            else
+            {
+                var normalized = NormalizeSymbolForQuery(symbol);
+
+                if (normalized.Length > 0)
+                {
+                    queries.TryAdd(normalized, new SymbolQuery(normalized, NormalizeSymbol(symbol), false));
+                }
+            }
+        }
+
+        return queries.Values;
+    }
+
+    private sealed record SymbolQuery(string QuerySymbol, string TargetSymbol, bool InvertPrice);
 
     private sealed record OrderRow(
         long WakettOrderId,
