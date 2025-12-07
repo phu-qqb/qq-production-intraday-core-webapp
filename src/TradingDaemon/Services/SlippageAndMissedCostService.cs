@@ -195,7 +195,9 @@ ORDER BY Symbol, BarTimeUtc";
             for (var i = 0; i < bars.Count - 1; i++)
             {
                 var currentBar = bars[i];
-                while (symbolFills is not null && fillIndex < symbolFills.Count && symbolFills[fillIndex].TradeTimestamp < currentBar.BarTimeUtc)
+                while (symbolFills is not null
+                    && fillIndex < symbolFills.Count
+                    && symbolFills[fillIndex].TradeTimestamp.UtcDateTime < currentBar.BarTimeUtc)
                 {
                     var fill = symbolFills[fillIndex];
                     var sideMultiplier = GetSideMultiplier(fill.Side);
@@ -269,7 +271,13 @@ ORDER BY Symbol, BarTimeUtc";
 
     private static string NormalizeSymbolForQuery(string? symbol)
     {
-        return string.IsNullOrWhiteSpace(symbol) ? string.Empty : symbol.Trim().ToUpperInvariant();
+        if (string.IsNullOrWhiteSpace(symbol))
+        {
+            return string.Empty;
+        }
+
+        var normalized = symbol.Trim().ToUpperInvariant();
+        return normalized.Replace("/", string.Empty);
     }
 
     private static string NormalizeSymbol(string? symbol)
@@ -301,7 +309,7 @@ ORDER BY Symbol, BarTimeUtc";
         string Symbol,
         string? Side,
         decimal? ExecuteSize,
-        DateTime TradeTimestamp);
+        DateTimeOffset TradeTimestamp);
 
     private sealed record PriceBarRow(string Symbol, DateTime BarTimeUtc, decimal Close);
 }
