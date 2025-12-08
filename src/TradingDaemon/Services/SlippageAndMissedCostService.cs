@@ -548,72 +548,85 @@ ORDER BY Symbol, BarTimeUtc";
     {
         var missedTrades = new List<MissedTrade>();
 
-        var targetSizeBySymbol = orders
+        var fillsBySymbol = fills
+            .GroupBy(f => NormalizeSymbol(f.Symbol))
+            .ToDictionary(
+                g => g.Key,
+                g => g.OrderBy(f => f.ExecuteTimestamp.UtcDateTime).ToList(),
+                StringComparer.OrdinalIgnoreCase);
+
+        var ordersBySymbol = orders
             .GroupBy(o => NormalizeSymbol(o.Symbol))
             .ToDictionary(
                 g => g.Key,
-                g => g.Sum(o => (o.SizeValue ?? 0m) * (o.Aum ?? 0m) * GetSideMultiplier(o.Side)),
+                g => g.OrderBy(o => o.ScheduledTimestamp.UtcDateTime).ToList(),
                 StringComparer.OrdinalIgnoreCase);
 
-        var fillsBySymbol = fills
-            .GroupBy(f => NormalizeSymbol(f.Symbol))
-            .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
-
-        foreach (var order in orders)
+        foreach (var orderGroup in ordersBySymbol)
         {
-            var normalizedSymbol = NormalizeSymbol(order.Symbol);
+            var normalizedSymbol = orderGroup.Key;
 
             if (!barsBySymbol.TryGetValue(normalizedSymbol, out var bars) || bars.Count == 0)
             {
                 continue;
             }
 
-            var scheduledUtc = order.ScheduledTimestamp.UtcDateTime;
-            var barIndex = bars.FindIndex(b => b.BarTimeUtc == scheduledUtc);
+            var symbolFills = fillsBySymbol.TryGetValue(normalizedSymbol, out var fillsList)
+                ? fillsList
+                : new List<FillRow>();
 
-            if (barIndex <= 0 || barIndex >= bars.Count)
+            var cumulativeFilled = 0m;
+            var fillIndex = 0;
+
+            foreach (var order in orderGroup.Value)
             {
-                continue;
+                var scheduledUtc = order.ScheduledTimestamp.UtcDateTime;
+                var barIndex = bars.FindIndex(b => b.BarTimeUtc == scheduledUtc);
+
+                if (barIndex <= 0 || barIndex >= bars.Count)
+                {
+                    continue;
+                }
+
+                var currentBar = bars[barIndex];
+                var previousBar = bars[barIndex - 1];
+
+                if (currentBar.Close == 0m || previousBar.Close == 0m)
+                {
+                    continue;
+                }
+
+                var barEnd = currentBar.BarTimeUtc.AddMinutes(timeframeMinutes);
+
+                while (fillIndex < symbolFills.Count && symbolFills[fillIndex].ExecuteTimestamp.UtcDateTime < barEnd)
+                {
+                    var fill = symbolFills[fillIndex];
+                    cumulativeFilled += (fill.ExecuteSize ?? 0m) * GetSideMultiplier(fill.Side);
+                    fillIndex++;
+                }
+
+                var targetSize = (order.SizeValue ?? 0m) * (order.Aum ?? 0m) * GetSideMultiplier(order.Side);
+                var filledSize = cumulativeFilled;
+
+                var sizeDifference = targetSize - filledSize;
+
+                if (Math.Abs(sizeDifference) < 1_000m)
+                {
+                    continue;
+                }
+
+                var priceDelta = currentBar.Close - previousBar.Close;
+                var missedPnl = sizeDifference * priceDelta;
+
+                missedTrades.Add(new MissedTrade(
+                    order.Symbol,
+                    currentBar.BarTimeUtc,
+                    targetSize,
+                    filledSize,
+                    sizeDifference,
+                    priceDelta,
+                    missedPnl));
             }
-
-            var currentBar = bars[barIndex];
-            var previousBar = bars[barIndex - 1];
-
-            if (currentBar.Close == 0m || previousBar.Close == 0m)
-            {
-                continue;
-            }
-
-            var barStart = currentBar.BarTimeUtc;
-            var barEnd = barStart.AddMinutes(timeframeMinutes);
-
-            var barFills = fillsBySymbol.TryGetValue(normalizedSymbol, out var symbolFills)
-                ? symbolFills.Where(f => f.ExecuteTimestamp.UtcDateTime >= barStart && f.ExecuteTimestamp.UtcDateTime < barEnd)
-                : Enumerable.Empty<FillRow>();
-
-            var filledSize = barFills.Sum(f => (f.ExecuteSize ?? 0m) * GetSideMultiplier(f.Side));
-            if (!targetSizeBySymbol.TryGetValue(normalizedSymbol, out var targetSize))
-            {
-                continue;
-            }
-            var sizeDifference = targetSize - filledSize;
-
-            if (Math.Abs(sizeDifference) < 1_000m)
-            {
-                continue;
-            }
-
-            var priceDelta = currentBar.Close - previousBar.Close;
-            var missedPnl = sizeDifference * priceDelta;
-
-            missedTrades.Add(new MissedTrade(
-                order.Symbol,
-                currentBar.BarTimeUtc,
-                targetSize,
-                filledSize,
-                sizeDifference,
-                priceDelta,
-                missedPnl));
         }
 
         return missedTrades;
