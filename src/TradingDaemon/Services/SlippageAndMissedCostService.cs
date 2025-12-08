@@ -556,6 +556,23 @@ ORDER BY Symbol, BarTimeUtc";
             .GroupBy(f => NormalizeSymbol(f.Symbol))
             .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
 
+        var cumulativeFillsBySymbol = fillsBySymbol.ToDictionary(
+            kvp => kvp.Key,
+            kvp =>
+            {
+                var running = 0m;
+                var cumulative = new List<(DateTime Timestamp, decimal CumulativeSize)>();
+
+                foreach (var fill in kvp.Value.OrderBy(f => f.ExecuteTimestamp))
+                {
+                    running += (fill.ExecuteSize ?? 0m) * GetSideMultiplier(fill.Side);
+                    cumulative.Add((fill.ExecuteTimestamp.UtcDateTime, running));
+                }
+
+                return cumulative;
+            },
+            StringComparer.OrdinalIgnoreCase);
+
         foreach (var order in orders)
         {
             var normalizedSymbol = NormalizeSymbol(order.Symbol);
@@ -584,11 +601,14 @@ ORDER BY Symbol, BarTimeUtc";
             var barStart = currentBar.BarTimeUtc;
             var barEnd = barStart.AddMinutes(timeframeMinutes);
 
-            var barFills = fillsBySymbol.TryGetValue(normalizedSymbol, out var symbolFills)
-                ? symbolFills.Where(f => f.ExecuteTimestamp.UtcDateTime >= barStart && f.ExecuteTimestamp.UtcDateTime < barEnd)
-                : Enumerable.Empty<FillRow>();
+            var filledSize = 0m;
+            if (cumulativeFillsBySymbol.TryGetValue(normalizedSymbol, out var cumulativeFills))
+            {
+                var cumulativeEntry = cumulativeFills
+                    .LastOrDefault(f => f.Timestamp < barEnd);
 
-            var filledSize = barFills.Sum(f => (f.ExecuteSize ?? 0m) * GetSideMultiplier(f.Side));
+                filledSize = cumulativeEntry.CumulativeSize;
+            }
             if (!targetSizeBySymbol.TryGetValue(normalizedSymbol, out var targetSize))
             {
                 continue;
