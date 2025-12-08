@@ -23,7 +23,13 @@ public sealed class WakettAutomationService : BackgroundService
 
     private static readonly IReadOnlyList<TimeSpan> PriceFetchOffsets = BuildQuarterOffsets(TimeSpan.FromMinutes(7));
     private static readonly IReadOnlyList<TimeSpan> WeightCalculationOffsets = BuildQuarterOffsets(TimeSpan.FromMinutes(7.5));
-    private static readonly IReadOnlyList<TimeSpan> FillCheckOffsets = BuildQuarterOffsets(TimeSpan.FromMinutes(0));
+    private static readonly IReadOnlyList<TimeSpan> FillCheckOffsets = new[]
+    {
+        TimeSpan.FromMinutes(9),
+        TimeSpan.FromMinutes(24),
+        TimeSpan.FromMinutes(39),
+        TimeSpan.FromMinutes(54)
+    };
     private static readonly IReadOnlyList<TimeSpan> OrderSubmissionOffsets = BuildQuarterOffsets(TimeSpan.FromMinutes(1));
     private static readonly IReadOnlyList<TimeSpan> PnlReportOffsets = new[] { TimeSpan.FromMinutes(15) };
 
@@ -32,6 +38,7 @@ public sealed class WakettAutomationService : BackgroundService
     private readonly OrderSender _orderSender;
     private readonly WakettTradeFetcher _tradeFetcher;
     private readonly PnlReportService _pnlReportService;
+    private readonly SlippageAndMissedCostService _slippageAndMissedCostService;
     private readonly IEmailNotificationService _emailNotificationService;
     private readonly IHostApplicationLifetime _applicationLifetime;
     private readonly ILogger<WakettAutomationService> _logger;
@@ -45,6 +52,7 @@ public sealed class WakettAutomationService : BackgroundService
         OrderSender orderSender,
         WakettTradeFetcher tradeFetcher,
         PnlReportService pnlReportService,
+        SlippageAndMissedCostService slippageAndMissedCostService,
         IEmailNotificationService emailNotificationService,
         IHostApplicationLifetime applicationLifetime,
         IOptions<WakettAutomationOptions> options,
@@ -57,6 +65,7 @@ public sealed class WakettAutomationService : BackgroundService
         _orderSender = orderSender;
         _tradeFetcher = tradeFetcher;
         _pnlReportService = pnlReportService;
+        _slippageAndMissedCostService = slippageAndMissedCostService;
         _emailNotificationService = emailNotificationService;
         _applicationLifetime = applicationLifetime;
         _logger = logger;
@@ -189,7 +198,7 @@ public sealed class WakettAutomationService : BackgroundService
                 while (nowUtc >= nextFillCheckUtc)
                 {
                     var scheduledRunUtc = nextFillCheckUtc;
-                    await RunFillCheckAsync(stoppingToken);
+                    await RunFillAndSlippageWorkflowAsync(stoppingToken);
                     nextFillCheckUtc = GetNextSessionEventUtc(
                         scheduledRunUtc.AddSeconds(1),
                         FillCheckOffsets,
@@ -463,6 +472,33 @@ public sealed class WakettAutomationService : BackgroundService
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogError(ex, "Unexpected failure while fetching Wakett fills.");
+        }
+    }
+
+    private async Task RunFillAndSlippageWorkflowAsync(CancellationToken stoppingToken)
+    {
+        await RunFillCheckAsync(stoppingToken);
+        await RunSlippageComputationAsync(stoppingToken);
+    }
+
+    private async Task RunSlippageComputationAsync(CancellationToken stoppingToken)
+    {
+        var localNow = TimeZoneInfo.ConvertTimeFromUtc(_timeProvider.GetUtcNow().UtcDateTime, NewYorkTimeZone);
+        var tradingDate = DateOnly.FromDateTime(localNow);
+
+        _logger.LogInformation(
+            "Computing slippage and missed trade costs via automation for {TradingDate}.",
+            tradingDate);
+
+        try
+        {
+            await _slippageAndMissedCostService.ComputeAsync(
+                new SlippageRequest { Date = tradingDate.ToDateTime(TimeOnly.MinValue) },
+                stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex, "Failed to compute slippage and missed trade costs via automation.");
         }
     }
 
