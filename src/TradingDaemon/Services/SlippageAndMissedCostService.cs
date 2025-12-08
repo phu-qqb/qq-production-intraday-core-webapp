@@ -166,7 +166,7 @@ ORDER BY Symbol, BarTimeUtc";
             ? AggregateToUsd(realPnlByCurrency, conversionGraph)
             : null;
         var slippageCost = theoreticalUsd.HasValue && realUsd.HasValue
-            ? theoreticalUsd.Value - realUsd.Value
+            ? realUsd.Value - theoreticalUsd.Value
             : (decimal?)null;
 
         Console.WriteLine($"Slippage computation for {tradingDate:yyyy-MM-dd}");
