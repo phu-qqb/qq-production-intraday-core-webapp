@@ -173,7 +173,6 @@ ORDER BY Symbol, BarTimeUtc";
             .GroupBy(b => NormalizeSymbol(b.Symbol))
             .ToDictionary(g => g.Key, g => g.OrderBy(b => b.BarTimeUtc).ToList(), StringComparer.OrdinalIgnoreCase);
 
-        var theoreticalPnlByCurrency = CalculateTheoreticalPnlByCurrency(orders, barsBySymbol);
         var lastClosePrices = ExtractLastClosePrices(barsBySymbol);
         var previousClosePrices = ExtractLastClosePricesBeforeTimestamp(barsBySymbol, startUtc);
         var conversionGraph = BuildConversionGraph(lastClosePrices);
@@ -181,6 +180,10 @@ ORDER BY Symbol, BarTimeUtc";
 
         var realPnlFills = AddVirtualStartingFills(fills, startingPositions, previousClosePrices, startUtc);
         var realPnlResult = CalculateRealPnlByCurrency(realPnlFills, lastClosePrices, conversionGraph);
+        var theoreticalFills = ConvertOrdersToTheoreticalFills(orders, barsBySymbol);
+        var theoreticalPnlFills = AddVirtualStartingFills(theoreticalFills, startingPositions, previousClosePrices, startUtc);
+        var theoreticalPnlResult = CalculateRealPnlByCurrency(theoreticalPnlFills, lastClosePrices, conversionGraph);
+        var theoreticalPnlByCurrency = theoreticalPnlResult.Totals;
         var theoreticalPnlByCurrencyUsd = hasConversionPrices
             ? ConvertPnlsToUsdByCurrency(theoreticalPnlByCurrency, conversionGraph)
             : new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
@@ -273,15 +276,16 @@ ORDER BY Symbol, BarTimeUtc";
             hasConversionPrices);
     }
 
-    private Dictionary<string, decimal> CalculateTheoreticalPnlByCurrency(
+    private IReadOnlyCollection<FillRow> ConvertOrdersToTheoreticalFills(
         IReadOnlyCollection<OrderRow> orders,
         IReadOnlyDictionary<string, List<PriceBarRow>> barsBySymbol)
     {
-        var totals = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+        var theoreticalFills = new List<FillRow>();
 
         foreach (var order in orders)
         {
-            if (!CurrencyPairParser.TryParse(order.Symbol, out var pair))
+            var normalizedSymbol = NormalizeSymbol(order.Symbol);
+            if (!CurrencyPairParser.TryParse(normalizedSymbol, out var pair))
             {
                 _logger.LogDebug("Skipping theoretical PnL for unparsable symbol {Symbol}", order.Symbol);
                 continue;
@@ -292,43 +296,36 @@ ORDER BY Symbol, BarTimeUtc";
                 continue;
             }
 
-            var normalizedSymbol = NormalizeSymbol(order.Symbol);
-            if (!barsBySymbol.TryGetValue(normalizedSymbol, out var bars) || bars.Count < 2)
+            if (!barsBySymbol.TryGetValue(normalizedSymbol, out var bars) || bars.Count == 0)
             {
                 _logger.LogDebug("No price bars for symbol {Symbol} to compute theoretical PnL", order.Symbol);
                 continue;
             }
 
-            var barIndex = bars.FindIndex(b => b.BarTimeUtc == order.ScheduledTimestamp.UtcDateTime);
-            if (barIndex < 0 || barIndex >= bars.Count - 1)
+            var scheduledUtc = order.ScheduledTimestamp.UtcDateTime;
+            var matchingBar = bars.FirstOrDefault(b => b.BarTimeUtc == scheduledUtc);
+            if (matchingBar is null || matchingBar.Close == 0m)
             {
-                _logger.LogDebug("No matching bar for order at {Timestamp} ({Symbol})", order.ScheduledTimestamp, pair.FormattedSymbol);
+                _logger.LogDebug("No matching price bar for order at {Timestamp} ({Symbol})", order.ScheduledTimestamp, pair.FormattedSymbol);
                 continue;
             }
 
-            var currentBar = bars[barIndex];
-            var nextBar = bars[barIndex + 1];
-
-            if (currentBar.Close == 0m)
+            var size = (order.SizeValue ?? 0m) * (order.Aum ?? 0m);
+            if (size == 0m)
             {
                 continue;
             }
 
-            var priceReturn = (nextBar.Close - currentBar.Close) / currentBar.Close;
-            var sideMultiplier = GetSideMultiplier(order.Side);
-            var notionalUsd = (order.SizeValue ?? 0m) * (order.Aum ?? 0m) * sideMultiplier;
-
-            var pnlQuote = notionalUsd * priceReturn;
-
-            if (pnlQuote != 0m)
-            {
-                totals[pair.QuoteCurrency] = totals.TryGetValue(pair.QuoteCurrency, out var existing)
-                    ? existing + pnlQuote
-                    : pnlQuote;
-            }
+            theoreticalFills.Add(new FillRow(
+                WakettFillId: 0,
+                Symbol: normalizedSymbol,
+                Side: order.Side,
+                ExecuteSize: size,
+                ExecutePrice: matchingBar.Close,
+                ExecuteTimestamp: order.ScheduledTimestamp));
         }
 
-        return totals;
+        return theoreticalFills;
     }
 
     private static IReadOnlyDictionary<string, decimal> CalculatePositionsAtStartOfDay(
