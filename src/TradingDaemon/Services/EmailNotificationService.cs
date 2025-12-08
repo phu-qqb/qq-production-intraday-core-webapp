@@ -72,40 +72,40 @@ public class EmailNotificationService : IEmailNotificationService, IDisposable
     private static string BuildPlainTextBody(PnlReport report, SlippageResult? slippageResult)
     {
         var sb = new StringBuilder();
-        sb.AppendLine($"Date: {report.TradingDate:yyyy-MM-dd}");
-        sb.AppendLine($"PnL: {FormatPnl(report.Pnl)}");
-        sb.AppendLine($"Gross Market Value: {FormatPnl(report.GrossMarketValue)}");
-        sb.AppendLine($"Total Net Exposure: {FormatPnl(report.TotalNetExposure)}");
-        sb.AppendLine();
-        sb.AppendLine("Positions:");
-
-        if (report.Positions.Count == 0)
-        {
-            sb.AppendLine("  (no open positions)");
-        }
-        else
-        {
-            foreach (var position in report.Positions.OrderByDescending(p => Math.Abs(p.MarketValueUsd ?? 0m)))
-            {
-                sb.Append("  - ");
-                sb.Append(position.Symbol);
-                sb.Append(": Qty=");
-                sb.Append(position.NetQuantity.ToString("F2", CultureInfo.InvariantCulture));
-                sb.Append(", Price=");
-                sb.Append(FormatOptionalNumber(position.LastPrice));
-                sb.Append(", USD Value=");
-                sb.Append(FormatOptionalPnl(position.MarketValueUsd));
-                sb.AppendLine();
-            }
-        }
 
         if (slippageResult is not null)
         {
+            sb.AppendLine($"Date: {report.TradingDate:yyyy-MM-dd}");
+            sb.AppendLine($"PnL (USD): {FormatOptionalPnl(slippageResult.RealPnlUsd)}");
+            sb.AppendLine($"Theoretical PnL (USD): {FormatOptionalPnl(slippageResult.TheoreticalPnlUsd)}");
+            sb.AppendLine($"Slippage and missed trade cost (USD): {FormatOptionalPnl(slippageResult.SlippageAndMissedCostUsd)}");
             sb.AppendLine();
-            sb.AppendLine("Slippage and Missed Cost:");
-            sb.AppendLine($"  - Theoretical PnL (USD aggregate): {FormatOptionalPnl(slippageResult.TheoreticalPnlUsd)}");
-            sb.AppendLine($"  - Real PnL (USD aggregate after trading costs): {FormatOptionalPnl(slippageResult.RealPnlUsd)}");
-            sb.AppendLine($"  - Slippage and missed trade cost (USD): {FormatOptionalPnl(slippageResult.SlippageAndMissedCostUsd)}");
+            sb.AppendLine($"Gross Market Value: {FormatPnl(report.GrossMarketValue)}");
+            sb.AppendLine($"Total Net Exposure: {FormatPnl(report.TotalNetExposure)}");
+            sb.AppendLine();
+            sb.AppendLine("Positions:");
+
+            if (report.Positions.Count == 0)
+            {
+                sb.AppendLine("  (no open positions)");
+            }
+            else
+            {
+                foreach (var position in report.Positions.OrderByDescending(p => Math.Abs(p.MarketValueUsd ?? 0m)))
+                {
+                    sb.Append("  - ");
+                    sb.Append(position.Symbol);
+                    sb.Append(": Qty=");
+                    sb.Append(position.NetQuantity.ToString("F2", CultureInfo.InvariantCulture));
+                    sb.Append(", Price=");
+                    sb.Append(FormatOptionalNumber(position.LastPrice));
+                    sb.Append(", USD Value=");
+                    sb.Append(FormatOptionalPnl(position.MarketValueUsd));
+                    sb.AppendLine();
+                }
+            }
+
+            sb.AppendLine();
 
             sb.AppendLine("  - Theoretical PnL by currency (USD basis):");
             AppendPnlByCurrency(sb, slippageResult.TheoreticalPnlByCurrency);
@@ -221,11 +221,11 @@ public class EmailNotificationService : IEmailNotificationService, IDisposable
     }
 
     private static string FormatPnl(decimal value)
-        => value.ToString("#,##0.000", CultureInfo.InvariantCulture);
+        => value.ToString("#,##0", CultureInfo.InvariantCulture);
 
     private static string FormatOptionalPnl(decimal? value)
         => value.HasValue
-            ? value.Value.ToString("#,##0.000", CultureInfo.InvariantCulture)
+            ? value.Value.ToString("#,##0", CultureInfo.InvariantCulture)
             : "n/a";
 
     private static string FormatOptionalNumber(decimal? value)
