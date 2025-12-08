@@ -181,8 +181,7 @@ ORDER BY Symbol, BarTimeUtc";
         var realPnlFills = AddVirtualStartingFills(fills, startingPositions, previousClosePrices, startUtc);
         var realPnlResult = CalculateRealPnlByCurrency(realPnlFills, lastClosePrices, conversionGraph);
         var theoreticalFills = ConvertOrdersToTheoreticalFills(orders, barsBySymbol);
-        var theoreticalPnlFills = AddVirtualStartingFills(theoreticalFills, startingPositions, previousClosePrices, startUtc);
-        var theoreticalPnlResult = CalculateRealPnlByCurrency(theoreticalPnlFills, lastClosePrices, conversionGraph);
+        var theoreticalPnlResult = CalculateRealPnlByCurrency(theoreticalFills, lastClosePrices, conversionGraph);
         var theoreticalPnlByCurrency = theoreticalPnlResult.Totals;
         var theoreticalPnlByCurrencyUsd = hasConversionPrices
             ? ConvertPnlsToUsdByCurrency(theoreticalPnlByCurrency, conversionGraph)
@@ -282,12 +281,15 @@ ORDER BY Symbol, BarTimeUtc";
     {
         var theoreticalFills = new List<FillRow>();
 
-        foreach (var order in orders)
+        var ordersBySymbol = orders
+            .GroupBy(o => NormalizeSymbol(o.Symbol))
+            .ToDictionary(g => g.Key, g => g.OrderBy(o => o.ScheduledTimestamp).ToList(), StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (normalizedSymbol, symbolOrders) in ordersBySymbol)
         {
-            var normalizedSymbol = NormalizeSymbol(order.Symbol);
             if (!CurrencyPairParser.TryParse(normalizedSymbol, out var pair))
             {
-                _logger.LogDebug("Skipping theoretical PnL for unparsable symbol {Symbol}", order.Symbol);
+                _logger.LogDebug("Skipping theoretical PnL for unparsable symbol {Symbol}", normalizedSymbol);
                 continue;
             }
 
@@ -298,31 +300,45 @@ ORDER BY Symbol, BarTimeUtc";
 
             if (!barsBySymbol.TryGetValue(normalizedSymbol, out var bars) || bars.Count == 0)
             {
-                _logger.LogDebug("No price bars for symbol {Symbol} to compute theoretical PnL", order.Symbol);
+                _logger.LogDebug("No price bars for symbol {Symbol} to compute theoretical PnL", normalizedSymbol);
                 continue;
             }
 
-            var scheduledUtc = order.ScheduledTimestamp.UtcDateTime;
-            var matchingBar = bars.FirstOrDefault(b => b.BarTimeUtc == scheduledUtc);
-            if (matchingBar is null || matchingBar.Close == 0m)
+            decimal targetPosition = 0m;
+
+            foreach (var order in symbolOrders)
             {
-                _logger.LogDebug("No matching price bar for order at {Timestamp} ({Symbol})", order.ScheduledTimestamp, pair.FormattedSymbol);
-                continue;
-            }
+                var scheduledUtc = order.ScheduledTimestamp.UtcDateTime;
+                var matchingBar = bars.FirstOrDefault(b => b.BarTimeUtc == scheduledUtc);
+                if (matchingBar is null || matchingBar.Close == 0m)
+                {
+                    _logger.LogDebug("No matching price bar for order at {Timestamp} ({Symbol})", order.ScheduledTimestamp, pair.FormattedSymbol);
+                    continue;
+                }
 
-            var size = (order.SizeValue ?? 0m) * (order.Aum ?? 0m);
-            if (size == 0m)
-            {
-                continue;
-            }
+                var absoluteSize = (order.SizeValue ?? 0m) * (order.Aum ?? 0m);
+                if (absoluteSize == 0m)
+                {
+                    continue;
+                }
 
-            theoreticalFills.Add(new FillRow(
-                WakettFillId: 0,
-                Symbol: normalizedSymbol,
-                Side: order.Side,
-                ExecuteSize: size,
-                ExecutePrice: matchingBar.Close,
-                ExecuteTimestamp: order.ScheduledTimestamp));
+                var signedTarget = absoluteSize * GetSideMultiplier(order.Side);
+                var delta = signedTarget - targetPosition;
+
+                if (delta != 0m)
+                {
+                    var side = delta > 0m ? "BUY" : "SELL";
+                    theoreticalFills.Add(new FillRow(
+                        WakettFillId: 0,
+                        Symbol: normalizedSymbol,
+                        Side: side,
+                        ExecuteSize: Math.Abs(delta),
+                        ExecutePrice: matchingBar.Close,
+                        ExecuteTimestamp: order.ScheduledTimestamp));
+                }
+
+                targetPosition = signedTarget;
+            }
         }
 
         return theoreticalFills;
