@@ -110,11 +110,11 @@ public class EmailNotificationService : IEmailNotificationService, IDisposable
             sb.AppendLine("  - Theoretical PnL by currency (USD basis):");
             AppendPnlByCurrency(sb, slippageResult.TheoreticalPnlByCurrency);
 
-            sb.AppendLine("  - Real PnL by currency (quote currency):");
+            sb.AppendLine("  - Real PnL by currency (USD using last available close):");
             AppendPnlByCurrency(sb, slippageResult.RealPnlByCurrency);
 
             sb.AppendLine(
-                "  Note: Theoretical PnL values are presented in USD (even when the pair is not quoted in USD); real PnL values are presented in the quote currency.");
+                "  Note: Theoretical and real PnL values are presented in USD using the last available close prices (currency list retained for clarity).");
         }
 
         return sb.ToString();
@@ -161,7 +161,7 @@ public class EmailNotificationService : IEmailNotificationService, IDisposable
                 WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.TheoreticalPnlUsd)));
             sb.AppendFormat(
                 CultureInfo.InvariantCulture,
-                "<li>Real PnL (USD aggregate after trading costs): {0}</li>",
+                "<li>Real PnL (USD aggregate): {0}</li>",
                 WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.RealPnlUsd)));
             sb.AppendFormat(
                 CultureInfo.InvariantCulture,
@@ -172,11 +172,11 @@ public class EmailNotificationService : IEmailNotificationService, IDisposable
             sb.Append("<h3>Theoretical PnL by currency (USD basis)</h3>");
             AppendPnlTable(sb, slippageResult.TheoreticalPnlByCurrency);
 
-            sb.Append("<h3>Real PnL by currency (quote currency)</h3>");
+            sb.Append("<h3>Real PnL by currency (USD using last available close)</h3>");
             AppendPnlTable(sb, slippageResult.RealPnlByCurrency);
 
             sb.Append(
-                "<p><em>Note: Theoretical PnL values are presented in USD (even when the pair is not quoted in USD); real PnL values are presented in the quote currency.</em></p>");
+                "<p><em>Note: Theoretical and real PnL values are presented in USD using the last available close prices (currency list retained for clarity).</em></p>");
         }
 
         sb.Append("</body></html>");
