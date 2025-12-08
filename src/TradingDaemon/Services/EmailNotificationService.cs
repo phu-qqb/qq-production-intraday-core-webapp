@@ -161,7 +161,7 @@ public class EmailNotificationService : IEmailNotificationService, IDisposable
                 WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.TheoreticalPnlUsd)));
             sb.AppendFormat(
                 CultureInfo.InvariantCulture,
-                "<li>Real PnL (USD aggregate after trading costs): {0}</li>",
+                "<li>Real PnL (USD aggregate): {0}</li>",
                 WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.RealPnlUsd)));
             sb.AppendFormat(
                 CultureInfo.InvariantCulture,

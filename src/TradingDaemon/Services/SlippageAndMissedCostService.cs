@@ -191,14 +191,12 @@ ORDER BY Symbol, BarTimeUtc";
         var realUsd = realPnlByCurrencyUsd.Count > 0
             ? realPnlByCurrencyUsd.Values.Sum()
             : (decimal?)null;
+        var realUsdAfterTradingCost = realUsd.HasValue
+            ? realUsd.Value - realPnlResult.TotalTradingCostUsd
+            : (decimal?)null;
 
-        if (realUsd.HasValue)
-        {
-            realUsd -= realPnlResult.TotalTradingCostUsd;
-        }
-
-        var slippageCost = theoreticalUsd.HasValue && realUsd.HasValue
-            ? realUsd.Value - theoreticalUsd.Value
+        var slippageCost = theoreticalUsd.HasValue && realUsdAfterTradingCost.HasValue
+            ? realUsdAfterTradingCost.Value - theoreticalUsd.Value
             : (decimal?)null;
 
         Console.WriteLine($"Slippage computation for {tradingDate:yyyy-MM-dd}");
@@ -221,9 +219,12 @@ ORDER BY Symbol, BarTimeUtc";
                 ? $" - Theoretical PnL (USD): {theoreticalUsd.Value}"
                 : " - Theoretical PnL could not be fully converted to USD.");
             Console.WriteLine(realUsd.HasValue
-                ? $" - Real PnL (USD, after trading costs): {realUsd.Value}"
+                ? $" - Real PnL (USD aggregate): {realUsd.Value}"
                 : " - Real PnL could not be fully converted to USD.");
             Console.WriteLine($" - Total trading cost (USD): {realPnlResult.TotalTradingCostUsd}");
+            Console.WriteLine(realUsdAfterTradingCost.HasValue
+                ? $" - Real PnL after trading costs (USD): {realUsdAfterTradingCost.Value}"
+                : " - Real PnL after trading costs could not be fully converted to USD.");
             Console.WriteLine(slippageCost.HasValue
                 ? $" - Slippage and missed trade cost (USD): {slippageCost.Value}"
                 : " - Slippage and missed trade cost could not be aggregated to USD.");
