@@ -255,6 +255,11 @@ ORDER BY Symbol, BarTimeUtc";
             }
         }
 
+        var totalMissedUsd = AggregateMissedPnlUsd(missedTrades, conversionGraph);
+        Console.WriteLine(totalMissedUsd.HasValue
+            ? $"Total missed PnL (USD): {totalMissedUsd.Value}"
+            : "Total missed PnL could not be fully converted to USD.");
+
         return new SlippageResult(
             tradingDate,
             theoreticalPnlByCurrency,
@@ -618,6 +623,11 @@ ORDER BY Symbol, BarTimeUtc";
                 var priceDelta = currentBar.Close - previousBar.Close;
                 var missedPnl = sizeDifference * priceDelta;
 
+                if (!CurrencyPairParser.TryParse(order.Symbol, out var pair))
+                {
+                    continue;
+                }
+
                 missedTrades.Add(new MissedTrade(
                     order.Symbol,
                     currentBar.BarTimeUtc,
@@ -625,11 +635,58 @@ ORDER BY Symbol, BarTimeUtc";
                     filledSize,
                     sizeDifference,
                     priceDelta,
-                    missedPnl));
+                    missedPnl,
+                    pair.QuoteCurrency));
             }
         }
 
         return missedTrades;
+    }
+
+    private decimal? AggregateMissedPnlUsd(
+        IReadOnlyCollection<MissedTrade> missedTrades,
+        IReadOnlyDictionary<string, List<(string Target, decimal Rate)>> conversionGraph)
+    {
+        if (missedTrades.Count == 0)
+        {
+            return 0m;
+        }
+
+        decimal total = 0m;
+        var convertedAny = false;
+
+        foreach (var trade in missedTrades)
+        {
+            if (string.IsNullOrWhiteSpace(trade.PnlCurrency))
+            {
+                continue;
+            }
+
+            decimal conversionRate;
+
+            if (string.Equals(trade.PnlCurrency, "USD", StringComparison.OrdinalIgnoreCase))
+            {
+                conversionRate = 1m;
+            }
+            else if (TryGetConversionRate(trade.PnlCurrency, "USD", conversionGraph, out var rate) && rate != 0m)
+            {
+                conversionRate = rate;
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Unable to convert missed trade PnL from {Currency} to USD for {Symbol} at {Timestamp}.",
+                    trade.PnlCurrency,
+                    trade.Symbol,
+                    trade.BarTimeUtc);
+                continue;
+            }
+
+            total += trade.MissedPnl * conversionRate;
+            convertedAny = true;
+        }
+
+        return convertedAny ? total : (decimal?)null;
     }
 
     private Dictionary<string, List<(string Target, decimal Rate)>> BuildConversionGraph(
@@ -950,5 +1007,6 @@ ORDER BY Symbol, BarTimeUtc";
         decimal FilledSize,
         decimal SizeDifference,
         decimal PriceDelta,
-        decimal MissedPnl);
+        decimal MissedPnl,
+        string PnlCurrency);
 }
