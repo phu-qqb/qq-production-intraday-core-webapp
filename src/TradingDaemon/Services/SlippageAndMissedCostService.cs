@@ -322,6 +322,12 @@ ORDER BY Symbol, BarTimeUtc";
 
                 pnlQuote += executePrice * executeSize * multiplier;
                 position += executeSize * multiplier;
+
+                var notionalQuote = Math.Abs(executePrice * executeSize);
+                if (TryConvertToUsd(notionalQuote, pair.QuoteCurrency, conversionGraph, out var notionalUsd))
+                {
+                    totalTradingCostUsd += notionalUsd * TradingCostUsdPerUsdNotional;
+                }
             }
 
             if (position != 0m)
@@ -337,11 +343,6 @@ ORDER BY Symbol, BarTimeUtc";
                     : pnlQuote;
             }
 
-            var notionalQuote = executePrice * executeSize;
-            if (TryConvertToUsd(notionalQuote, pair.QuoteCurrency, conversionGraph, out var notionalUsd))
-            {
-                totalTradingCostUsd += notionalUsd * TradingCostUsdPerUsdNotional;
-            }
         }
 
         return new RealPnlComputationResult(totals, totalTradingCostUsd);
