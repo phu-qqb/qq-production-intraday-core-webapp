@@ -181,12 +181,15 @@ ORDER BY Symbol, BarTimeUtc";
 
         var realPnlFills = AddVirtualStartingFills(fills, startingPositions, previousClosePrices, startUtc);
         var realPnlResult = CalculateRealPnlByCurrency(realPnlFills, lastClosePrices, conversionGraph);
+        var theoreticalPnlByCurrencyUsd = hasConversionPrices
+            ? ConvertPnlsToUsdByCurrency(theoreticalPnlByCurrency, conversionGraph)
+            : new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
         var realPnlByCurrencyUsd = hasConversionPrices
             ? ConvertPnlsToUsdByCurrency(realPnlResult.Totals, conversionGraph)
             : new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 
-        var theoreticalUsd = theoreticalPnlByCurrency.TryGetValue("USD", out var theoreticalUsdTotal)
-            ? theoreticalPnlByCurrency.Sum(x => x.Value)
+        var theoreticalUsd = theoreticalPnlByCurrencyUsd.Count > 0
+            ? theoreticalPnlByCurrencyUsd.Values.Sum()
             : (decimal?)null;
         var realUsd = realPnlByCurrencyUsd.Count > 0
             ? realPnlByCurrencyUsd.Values.Sum()
@@ -200,8 +203,8 @@ ORDER BY Symbol, BarTimeUtc";
             : (decimal?)null;
 
         Console.WriteLine($"Slippage computation for {tradingDate:yyyy-MM-dd}");
-        Console.WriteLine("Theoretical PnL by currency:");
-        foreach (var entry in theoreticalPnlByCurrency.OrderBy(e => e.Key, StringComparer.OrdinalIgnoreCase))
+        Console.WriteLine("Theoretical PnL by currency (USD using last available close):");
+        foreach (var entry in theoreticalPnlByCurrencyUsd.OrderBy(e => e.Key, StringComparer.OrdinalIgnoreCase))
         {
             Console.WriteLine($" - {entry.Key}: {entry.Value}");
         }
@@ -262,7 +265,7 @@ ORDER BY Symbol, BarTimeUtc";
 
         return new SlippageResult(
             tradingDate,
-            theoreticalPnlByCurrency,
+            theoreticalPnlByCurrencyUsd,
             realPnlByCurrencyUsd,
             theoreticalUsd,
             realUsd,
