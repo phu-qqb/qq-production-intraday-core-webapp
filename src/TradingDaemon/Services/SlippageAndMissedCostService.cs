@@ -586,7 +586,7 @@ ORDER BY Symbol, BarTimeUtc";
                 : Enumerable.Empty<FillRow>();
 
             var filledSize = barFills.Sum(f => (f.ExecuteSize ?? 0m) * GetSideMultiplier(f.Side));
-            var targetSize = (order.SizeValue ?? 0m) * GetSideMultiplier(order.Side);
+            var targetSize = (order.SizeValue ?? 0m) * (order.Aum ?? 0m) * GetSideMultiplier(order.Side);
             var sizeDifference = targetSize - filledSize;
 
             if (Math.Abs(sizeDifference) < 1_000m)
