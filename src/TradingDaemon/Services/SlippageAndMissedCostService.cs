@@ -549,6 +549,13 @@ ORDER BY Symbol, BarTimeUtc";
     {
         var missedTrades = new List<MissedTrade>();
 
+        var targetSizeBySymbol = orders
+            .GroupBy(o => NormalizeSymbol(o.Symbol))
+            .ToDictionary(
+                g => g.Key,
+                g => g.Sum(o => (o.SizeValue ?? 0m) * (o.Aum ?? 0m) * GetSideMultiplier(o.Side)),
+                StringComparer.OrdinalIgnoreCase);
+
         var fillsBySymbol = fills
             .GroupBy(f => NormalizeSymbol(f.Symbol))
             .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
@@ -586,7 +593,10 @@ ORDER BY Symbol, BarTimeUtc";
                 : Enumerable.Empty<FillRow>();
 
             var filledSize = barFills.Sum(f => (f.ExecuteSize ?? 0m) * GetSideMultiplier(f.Side));
-            var targetSize = (order.SizeValue ?? 0m) * (order.Aum ?? 0m) * GetSideMultiplier(order.Side);
+            if (!targetSizeBySymbol.TryGetValue(normalizedSymbol, out var targetSize))
+            {
+                continue;
+            }
             var sizeDifference = targetSize - filledSize;
 
             if (Math.Abs(sizeDifference) < 1_000m)
