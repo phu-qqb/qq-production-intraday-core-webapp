@@ -547,33 +547,9 @@ ORDER BY Symbol, BarTimeUtc";
     {
         var missedTrades = new List<MissedTrade>();
 
-        var targetSizeBySymbol = orders
-            .GroupBy(o => NormalizeSymbol(o.Symbol))
-            .ToDictionary(
-                g => g.Key,
-                g => g.Sum(o => (o.SizeValue ?? 0m) * (o.Aum ?? 0m) * GetSideMultiplier(o.Side)),
-                StringComparer.OrdinalIgnoreCase);
-
         var fillsBySymbol = fills
             .GroupBy(f => NormalizeSymbol(f.Symbol))
             .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
-
-        var cumulativeFillsBySymbol = fillsBySymbol.ToDictionary(
-            kvp => kvp.Key,
-            kvp =>
-            {
-                var running = 0m;
-                var cumulative = new List<(DateTime Timestamp, decimal CumulativeSize)>();
-
-                foreach (var fill in kvp.Value.OrderBy(f => f.ExecuteTimestamp))
-                {
-                    running += (fill.ExecuteSize ?? 0m) * GetSideMultiplier(fill.Side);
-                    cumulative.Add((fill.ExecuteTimestamp.UtcDateTime, running));
-                }
-
-                return cumulative;
-            },
-            StringComparer.OrdinalIgnoreCase);
 
         foreach (var order in orders)
         {
@@ -603,18 +579,19 @@ ORDER BY Symbol, BarTimeUtc";
             var barStart = currentBar.BarTimeUtc;
             var barEnd = barStart.AddMinutes(timeframeMinutes);
 
-            var filledSize = 0m;
-            if (cumulativeFillsBySymbol.TryGetValue(normalizedSymbol, out var cumulativeFills))
-            {
-                var cumulativeEntry = cumulativeFills
-                    .LastOrDefault(f => f.Timestamp < barEnd);
+            var targetSize = (order.SizeValue ?? 0m) * (order.Aum ?? 0m) * GetSideMultiplier(order.Side);
 
-                filledSize = cumulativeEntry.CumulativeSize;
-            }
-            if (!targetSizeBySymbol.TryGetValue(normalizedSymbol, out var targetSize))
+            var filledSize = 0m;
+            if (fillsBySymbol.TryGetValue(normalizedSymbol, out var symbolFills))
             {
-                continue;
+                foreach (var fill in symbolFills.Where(f =>
+                             f.ExecuteTimestamp.UtcDateTime >= barStart &&
+                             f.ExecuteTimestamp.UtcDateTime < barEnd))
+                {
+                    filledSize += (fill.ExecuteSize ?? 0m) * GetSideMultiplier(fill.Side);
+                }
             }
+
             var sizeDifference = targetSize - filledSize;
 
             if (Math.Abs(sizeDifference) < 1_000m)
