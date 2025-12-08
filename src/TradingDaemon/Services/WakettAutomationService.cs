@@ -72,6 +72,8 @@ public sealed class WakettAutomationService : BackgroundService
         var initialNowUtc = _timeProvider.GetUtcNow().UtcDateTime;
         var initialLocal = TimeZoneInfo.ConvertTimeFromUtc(initialNowUtc, NewYorkTimeZone);
 
+        await RunInitialTradeFetchAsync(initialLocal, stoppingToken);
+
         if (IsWeekend(initialLocal))
         {
             _logger.LogInformation(
@@ -372,6 +374,51 @@ public sealed class WakettAutomationService : BackgroundService
         return null;
     }
 
+    private async Task RunInitialTradeFetchAsync(DateTime initialLocal, CancellationToken stoppingToken)
+    {
+        if (string.IsNullOrWhiteSpace(_options.FillAccount))
+        {
+            _logger.LogWarning(
+                "Skipping initial Wakett fill fetch because Automation:Wakett:FillAccount is not configured.");
+            return;
+        }
+
+        var lastTradingDay = GetMostRecentNonWeekendDay(initialLocal);
+        var dateString = lastTradingDay.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
+
+        var request = new FetchWakettFillsRequest
+        {
+            Account = _options.FillAccount,
+            From = dateString,
+            To = dateString,
+            Strategy = _options.FillStrategy
+        };
+
+        _logger.LogInformation(
+            "Requesting initial Wakett fills for account {Account} covering {From} to {To} (strategy: {Strategy}).",
+            request.Account,
+            request.From,
+            request.To,
+            request.Strategy ?? "<all>");
+
+        try
+        {
+            await _tradeFetcher.FetchAndStoreAsync(request, stoppingToken);
+        }
+        catch (TaskCanceledException ex) when (!stoppingToken.IsCancellationRequested)
+        {
+            _logger.LogError(ex, "Initial Wakett fill fetch timed out while calling the Wakett API.");
+        }
+        catch (WakettTradeFetcherException ex)
+        {
+            _logger.LogError(ex, "Initial Wakett fill fetch returned an error: {Message}", ex.Message);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex, "Unexpected failure while fetching initial Wakett fills.");
+        }
+    }
+
     private async Task RunFillCheckAsync(CancellationToken stoppingToken)
     {
         if (string.IsNullOrWhiteSpace(_options.FillAccount))
@@ -503,6 +550,18 @@ public sealed class WakettAutomationService : BackgroundService
 
     private static bool IsWeekend(DateTime value)
         => value.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday;
+
+    private static DateOnly GetMostRecentNonWeekendDay(DateTime local)
+    {
+        var candidate = local.AddDays(-1);
+
+        while (IsWeekend(candidate))
+        {
+            candidate = candidate.AddDays(-1);
+        }
+
+        return DateOnly.FromDateTime(candidate);
+    }
 
     private static TimeZoneInfo NewYorkTimeZone
         => TimeZoneInfo.FindSystemTimeZoneById(
