@@ -19,6 +19,8 @@ public sealed class SlippageAndMissedCostService
     private readonly string _priceBarView;
     private readonly string _timeframeLiteral;
 
+    private const decimal TradingCostUsdPerUsdNotional = 5m / 1_000_000m;
+
     private const string OrdersSqlTemplate = @"SELECT
     WakettOrderId,
     Symbol,
@@ -154,10 +156,11 @@ ORDER BY Symbol, BarTimeUtc";
 
         var theoreticalPnlByCurrency = CalculateTheoreticalPnlByCurrency(orders, barsBySymbol);
         var lastClosePrices = ExtractLastClosePrices(barsBySymbol);
-        var realPnlByCurrency = CalculateRealPnlByCurrency(fills, lastClosePrices);
-
         var conversionGraph = BuildConversionGraph(lastClosePrices);
         var hasConversionPrices = conversionGraph.Count > 0;
+
+        var realPnlResult = CalculateRealPnlByCurrency(fills, lastClosePrices, conversionGraph);
+        var realPnlByCurrency = realPnlResult.Totals;
 
         var theoreticalUsd = hasConversionPrices
             ? AggregateToUsd(theoreticalPnlByCurrency, conversionGraph)
@@ -165,6 +168,12 @@ ORDER BY Symbol, BarTimeUtc";
         var realUsd = hasConversionPrices
             ? AggregateToUsd(realPnlByCurrency, conversionGraph)
             : null;
+
+        if (realUsd.HasValue)
+        {
+            realUsd -= realPnlResult.TotalTradingCostUsd;
+        }
+
         var slippageCost = theoreticalUsd.HasValue && realUsd.HasValue
             ? realUsd.Value - theoreticalUsd.Value
             : (decimal?)null;
@@ -182,15 +191,16 @@ ORDER BY Symbol, BarTimeUtc";
             Console.WriteLine($" - {entry.Key}: {entry.Value}");
         }
 
-        if (slippageCost.HasValue || theoreticalUsd.HasValue || realUsd.HasValue)
+        if (slippageCost.HasValue || theoreticalUsd.HasValue || realUsd.HasValue || realPnlResult.TotalTradingCostUsd != 0m)
         {
             Console.WriteLine("Aggregated USD values using last available close prices:");
             Console.WriteLine(theoreticalUsd.HasValue
                 ? $" - Theoretical PnL (USD): {theoreticalUsd.Value}"
                 : " - Theoretical PnL could not be fully converted to USD.");
             Console.WriteLine(realUsd.HasValue
-                ? $" - Real PnL (USD): {realUsd.Value}"
+                ? $" - Real PnL (USD, after trading costs): {realUsd.Value}"
                 : " - Real PnL could not be fully converted to USD.");
+            Console.WriteLine($" - Total trading cost (USD): {realPnlResult.TotalTradingCostUsd}");
             Console.WriteLine(slippageCost.HasValue
                 ? $" - Slippage and missed trade cost (USD): {slippageCost.Value}"
                 : " - Slippage and missed trade cost could not be aggregated to USD.");
@@ -272,11 +282,13 @@ ORDER BY Symbol, BarTimeUtc";
         return totals;
     }
 
-    private Dictionary<string, decimal> CalculateRealPnlByCurrency(
+    private RealPnlComputationResult CalculateRealPnlByCurrency(
         IReadOnlyCollection<FillRow> fills,
-        IReadOnlyDictionary<string, decimal> lastClosePricesBySymbol)
+        IReadOnlyDictionary<string, decimal> lastClosePricesBySymbol,
+        IReadOnlyDictionary<string, List<(string Target, decimal Rate)>> conversionGraph)
     {
         var totals = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+        var totalTradingCostUsd = 0m;
 
         var fillsBySymbol = fills
             .GroupBy(f => NormalizeSymbol(f.Symbol))
@@ -324,9 +336,15 @@ ORDER BY Symbol, BarTimeUtc";
                     ? existing + pnlQuote
                     : pnlQuote;
             }
+
+            var notionalQuote = executePrice * executeSize;
+            if (TryConvertToUsd(notionalQuote, pair.QuoteCurrency, conversionGraph, out var notionalUsd))
+            {
+                totalTradingCostUsd += notionalUsd * TradingCostUsdPerUsdNotional;
+            }
         }
 
-        return totals;
+        return new RealPnlComputationResult(totals, totalTradingCostUsd);
     }
 
     private static decimal GetCashFlowSideMultiplier(string? side)
@@ -517,6 +535,48 @@ ORDER BY Symbol, BarTimeUtc";
 
         rate = 0m;
         return false;
+    }
+
+    private bool TryConvertToUsd(
+        decimal amount,
+        string currency,
+        IReadOnlyDictionary<string, List<(string Target, decimal Rate)>> conversionGraph,
+        out decimal converted)
+    {
+        if (string.Equals(currency, "USD", StringComparison.OrdinalIgnoreCase))
+        {
+            converted = amount;
+            return true;
+        }
+
+        if (conversionGraph.Count == 0)
+        {
+            converted = 0m;
+            return false;
+        }
+
+        if (TryGetConversionRate(currency, "USD", conversionGraph, out var rate) && rate != 0m)
+        {
+            converted = amount * rate;
+            return true;
+        }
+
+        _logger.LogWarning("Unable to convert {Currency} trading cost notional to USD using close prices.", currency);
+        converted = 0m;
+        return false;
+    }
+
+    private sealed class RealPnlComputationResult
+    {
+        public RealPnlComputationResult(Dictionary<string, decimal> totals, decimal totalTradingCostUsd)
+        {
+            Totals = totals;
+            TotalTradingCostUsd = totalTradingCostUsd;
+        }
+
+        public Dictionary<string, decimal> Totals { get; }
+
+        public decimal TotalTradingCostUsd { get; }
     }
 
     private static TimeZoneInfo NewYorkTimeZone
