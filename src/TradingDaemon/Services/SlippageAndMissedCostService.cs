@@ -18,6 +18,7 @@ public sealed class SlippageAndMissedCostService
     private readonly string _fillTable;
     private readonly string _priceBarView;
     private readonly string _timeframeLiteral;
+    private readonly int _timeframeMinutes;
 
     private const decimal TradingCostUsdPerUsdNotional = 5m / 1_000_000m;
 
@@ -62,7 +63,8 @@ ORDER BY Symbol, BarTimeUtc";
         _context = context;
         _logger = logger;
         var options = priceBarOptions?.Value ?? new PriceBarOptions();
-        _timeframeLiteral = Math.Max(1, options.TimeframeMinute).ToString(CultureInfo.InvariantCulture);
+        _timeframeMinutes = Math.Max(1, options.TimeframeMinute);
+        _timeframeLiteral = _timeframeMinutes.ToString(CultureInfo.InvariantCulture);
         _orderTable = databaseObjectNameProvider.GetObjectName(DatabaseObjects.WakettOrder);
         _fillTable = databaseObjectNameProvider.GetObjectName(DatabaseObjects.WakettFill);
         _priceBarView = databaseObjectNameProvider.GetObjectName(DatabaseObjects.IntradayMarketPriceBarView);
@@ -231,6 +233,23 @@ ORDER BY Symbol, BarTimeUtc";
         else
         {
             Console.WriteLine("Price bars were not available; USD aggregation skipped.");
+        }
+
+        var missedTrades = IdentifyMissedTrades(orders, fills, barsBySymbol, _timeframeMinutes);
+        Console.WriteLine($"Missed trades for {tradingDate:yyyy-MM-dd}:");
+        if (missedTrades.Count == 0)
+        {
+            Console.WriteLine(" - None");
+        }
+        else
+        {
+            foreach (var trade in missedTrades.OrderBy(m => m.Symbol, StringComparer.OrdinalIgnoreCase)
+                         .ThenBy(m => m.BarTimeUtc))
+            {
+                Console.WriteLine(
+                    $" - {trade.Symbol} at {trade.BarTimeUtc:HH:mm} UTC | Target: {trade.TargetSize}, Filled: {trade.FilledSize}, " +
+                    $"Diff: {trade.SizeDifference}, Price Δ: {trade.PriceDelta}, Missed PnL: {trade.MissedPnl}");
+            }
         }
 
         return new SlippageResult(
@@ -522,6 +541,85 @@ ORDER BY Symbol, BarTimeUtc";
         return result;
     }
 
+    private static IReadOnlyCollection<MissedTrade> IdentifyMissedTrades(
+        IReadOnlyCollection<OrderRow> orders,
+        IReadOnlyCollection<FillRow> fills,
+        IReadOnlyDictionary<string, List<PriceBarRow>> barsBySymbol,
+        int timeframeMinutes)
+    {
+        var missedTrades = new List<MissedTrade>();
+
+        var targetSizeBySymbol = orders
+            .GroupBy(o => NormalizeSymbol(o.Symbol))
+            .ToDictionary(
+                g => g.Key,
+                g => g.Sum(o => (o.SizeValue ?? 0m) * (o.Aum ?? 0m) * GetSideMultiplier(o.Side)),
+                StringComparer.OrdinalIgnoreCase);
+
+        var fillsBySymbol = fills
+            .GroupBy(f => NormalizeSymbol(f.Symbol))
+            .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
+
+        foreach (var order in orders)
+        {
+            var normalizedSymbol = NormalizeSymbol(order.Symbol);
+
+            if (!barsBySymbol.TryGetValue(normalizedSymbol, out var bars) || bars.Count == 0)
+            {
+                continue;
+            }
+
+            var scheduledUtc = order.ScheduledTimestamp.UtcDateTime;
+            var barIndex = bars.FindIndex(b => b.BarTimeUtc == scheduledUtc);
+
+            if (barIndex <= 0 || barIndex >= bars.Count)
+            {
+                continue;
+            }
+
+            var currentBar = bars[barIndex];
+            var previousBar = bars[barIndex - 1];
+
+            if (currentBar.Close == 0m || previousBar.Close == 0m)
+            {
+                continue;
+            }
+
+            var barStart = currentBar.BarTimeUtc;
+            var barEnd = barStart.AddMinutes(timeframeMinutes);
+
+            var barFills = fillsBySymbol.TryGetValue(normalizedSymbol, out var symbolFills)
+                ? symbolFills.Where(f => f.ExecuteTimestamp.UtcDateTime >= barStart && f.ExecuteTimestamp.UtcDateTime < barEnd)
+                : Enumerable.Empty<FillRow>();
+
+            var filledSize = barFills.Sum(f => (f.ExecuteSize ?? 0m) * GetSideMultiplier(f.Side));
+            if (!targetSizeBySymbol.TryGetValue(normalizedSymbol, out var targetSize))
+            {
+                continue;
+            }
+            var sizeDifference = targetSize - filledSize;
+
+            if (Math.Abs(sizeDifference) < 1_000m)
+            {
+                continue;
+            }
+
+            var priceDelta = currentBar.Close - previousBar.Close;
+            var missedPnl = sizeDifference * priceDelta;
+
+            missedTrades.Add(new MissedTrade(
+                order.Symbol,
+                currentBar.BarTimeUtc,
+                targetSize,
+                filledSize,
+                sizeDifference,
+                priceDelta,
+                missedPnl));
+        }
+
+        return missedTrades;
+    }
+
     private Dictionary<string, List<(string Target, decimal Rate)>> BuildConversionGraph(
         IReadOnlyDictionary<string, decimal> closePrices)
     {
@@ -805,4 +903,13 @@ ORDER BY Symbol, BarTimeUtc";
         DateTimeOffset ExecuteTimestamp);
 
     private sealed record PriceBarRow(string Symbol, DateTime BarTimeUtc, decimal Close);
+
+    private sealed record MissedTrade(
+        string Symbol,
+        DateTime BarTimeUtc,
+        decimal TargetSize,
+        decimal FilledSize,
+        decimal SizeDifference,
+        decimal PriceDelta,
+        decimal MissedPnl);
 }
