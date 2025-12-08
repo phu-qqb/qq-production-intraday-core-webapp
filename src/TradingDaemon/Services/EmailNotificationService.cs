@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Generic;
 using System.Net;
 using System.Globalization;
 using System.Linq;
@@ -11,7 +13,10 @@ namespace TradingDaemon.Services;
 
 public interface IEmailNotificationService
 {
-    Task SendPnLReportAsync(PnlReport report, CancellationToken cancellationToken = default);
+    Task SendPnLReportAsync(
+        PnlReport report,
+        SlippageResult? slippageResult = null,
+        CancellationToken cancellationToken = default);
     Task SendTestEmailAsync(string? subject = null, string? body = null, CancellationToken cancellationToken = default);
 }
 
@@ -47,7 +52,10 @@ public class EmailNotificationService : IEmailNotificationService, IDisposable
         }
     }
 
-    public async Task SendPnLReportAsync(PnlReport report, CancellationToken cancellationToken = default)
+    public async Task SendPnLReportAsync(
+        PnlReport report,
+        SlippageResult? slippageResult = null,
+        CancellationToken cancellationToken = default)
     {
         if (_recipients.Count == 0)
         {
@@ -55,19 +63,19 @@ public class EmailNotificationService : IEmailNotificationService, IDisposable
         }
 
         var subject = $"Intraday PnL for {report.TradingDate:yyyy-MM-dd}";
-        var bodyText = BuildPlainTextBody(report);
-        var bodyHtml = BuildHtmlBody(report);
+        var bodyText = BuildPlainTextBody(report, slippageResult);
+        var bodyHtml = BuildHtmlBody(report, slippageResult);
 
         await SendEmailInternalAsync(subject, bodyText, bodyHtml, cancellationToken);
     }
 
-    private static string BuildPlainTextBody(PnlReport report)
+    private static string BuildPlainTextBody(PnlReport report, SlippageResult? slippageResult)
     {
         var sb = new StringBuilder();
         sb.AppendLine($"Date: {report.TradingDate:yyyy-MM-dd}");
-        sb.AppendLine($"PnL: {FormatCurrency(report.Pnl)}");
-        sb.AppendLine($"Gross Market Value: {FormatCurrency(report.GrossMarketValue)}");
-        sb.AppendLine($"Total Net Exposure: {FormatCurrency(report.TotalNetExposure)}");
+        sb.AppendLine($"PnL: {FormatPnl(report.Pnl)}");
+        sb.AppendLine($"Gross Market Value: {FormatPnl(report.GrossMarketValue)}");
+        sb.AppendLine($"Total Net Exposure: {FormatPnl(report.TotalNetExposure)}");
         sb.AppendLine();
         sb.AppendLine("Positions:");
 
@@ -86,22 +94,40 @@ public class EmailNotificationService : IEmailNotificationService, IDisposable
                 sb.Append(", Price=");
                 sb.Append(FormatOptionalNumber(position.LastPrice));
                 sb.Append(", USD Value=");
-                sb.Append(FormatOptionalCurrency(position.MarketValueUsd));
+                sb.Append(FormatOptionalPnl(position.MarketValueUsd));
                 sb.AppendLine();
             }
+        }
+
+        if (slippageResult is not null)
+        {
+            sb.AppendLine();
+            sb.AppendLine("Slippage and Missed Cost:");
+            sb.AppendLine($"  - Theoretical PnL (USD aggregate): {FormatOptionalPnl(slippageResult.TheoreticalPnlUsd)}");
+            sb.AppendLine($"  - Real PnL (USD aggregate after trading costs): {FormatOptionalPnl(slippageResult.RealPnlUsd)}");
+            sb.AppendLine($"  - Slippage and missed trade cost (USD): {FormatOptionalPnl(slippageResult.SlippageAndMissedCostUsd)}");
+
+            sb.AppendLine("  - Theoretical PnL by currency (USD basis):");
+            AppendPnlByCurrency(sb, slippageResult.TheoreticalPnlByCurrency);
+
+            sb.AppendLine("  - Real PnL by currency (quote currency):");
+            AppendPnlByCurrency(sb, slippageResult.RealPnlByCurrency);
+
+            sb.AppendLine(
+                "  Note: Theoretical PnL values are presented in USD (even when the pair is not quoted in USD); real PnL values are presented in the quote currency.");
         }
 
         return sb.ToString();
     }
 
-    private static string BuildHtmlBody(PnlReport report)
+    private static string BuildHtmlBody(PnlReport report, SlippageResult? slippageResult)
     {
         var sb = new StringBuilder();
         sb.Append("<html><body><h1>Intraday PnL</h1>");
         sb.AppendFormat(CultureInfo.InvariantCulture, "<p><strong>Date:</strong> {0:yyyy-MM-dd}</p>", report.TradingDate);
-        sb.AppendFormat(CultureInfo.InvariantCulture, "<p><strong>PnL:</strong> {0}</p>", FormatCurrency(report.Pnl));
-        sb.AppendFormat(CultureInfo.InvariantCulture, "<p><strong>Gross Market Value:</strong> {0}</p>", FormatCurrency(report.GrossMarketValue));
-        sb.AppendFormat(CultureInfo.InvariantCulture, "<p><strong>Total Net Exposure:</strong> {0}</p>", FormatCurrency(report.TotalNetExposure));
+        sb.AppendFormat(CultureInfo.InvariantCulture, "<p><strong>PnL:</strong> {0}</p>", FormatPnl(report.Pnl));
+        sb.AppendFormat(CultureInfo.InvariantCulture, "<p><strong>Gross Market Value:</strong> {0}</p>", FormatPnl(report.GrossMarketValue));
+        sb.AppendFormat(CultureInfo.InvariantCulture, "<p><strong>Total Net Exposure:</strong> {0}</p>", FormatPnl(report.TotalNetExposure));
 
         sb.Append("<h2>Positions</h2>");
 
@@ -119,22 +145,87 @@ public class EmailNotificationService : IEmailNotificationService, IDisposable
                 sb.AppendFormat(CultureInfo.InvariantCulture, "<td>{0}</td>", WebUtility.HtmlEncode(position.Symbol));
                 sb.AppendFormat(CultureInfo.InvariantCulture, "<td>{0}</td>", position.NetQuantity.ToString("F2", CultureInfo.InvariantCulture));
                 sb.AppendFormat(CultureInfo.InvariantCulture, "<td>{0}</td>", WebUtility.HtmlEncode(FormatOptionalNumber(position.LastPrice)));
-                sb.AppendFormat(CultureInfo.InvariantCulture, "<td>{0}</td>", WebUtility.HtmlEncode(FormatOptionalCurrency(position.MarketValueUsd)));
+                sb.AppendFormat(CultureInfo.InvariantCulture, "<td>{0}</td>", WebUtility.HtmlEncode(FormatOptionalPnl(position.MarketValueUsd)));
                 sb.Append("</tr>");
             }
             sb.Append("</tbody></table>");
+        }
+
+        if (slippageResult is not null)
+        {
+            sb.Append("<h2>Slippage and Missed Cost</h2>");
+            sb.Append("<ul>");
+            sb.AppendFormat(
+                CultureInfo.InvariantCulture,
+                "<li>Theoretical PnL (USD aggregate): {0}</li>",
+                WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.TheoreticalPnlUsd)));
+            sb.AppendFormat(
+                CultureInfo.InvariantCulture,
+                "<li>Real PnL (USD aggregate after trading costs): {0}</li>",
+                WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.RealPnlUsd)));
+            sb.AppendFormat(
+                CultureInfo.InvariantCulture,
+                "<li>Slippage and missed trade cost (USD): {0}</li>",
+                WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.SlippageAndMissedCostUsd)));
+            sb.Append("</ul>");
+
+            sb.Append("<h3>Theoretical PnL by currency (USD basis)</h3>");
+            AppendPnlTable(sb, slippageResult.TheoreticalPnlByCurrency);
+
+            sb.Append("<h3>Real PnL by currency (quote currency)</h3>");
+            AppendPnlTable(sb, slippageResult.RealPnlByCurrency);
+
+            sb.Append(
+                "<p><em>Note: Theoretical PnL values are presented in USD (even when the pair is not quoted in USD); real PnL values are presented in the quote currency.</em></p>");
         }
 
         sb.Append("</body></html>");
         return sb.ToString();
     }
 
-    private static string FormatCurrency(decimal value)
-        => value.ToString("F2", CultureInfo.InvariantCulture);
+    private static void AppendPnlByCurrency(StringBuilder sb, IReadOnlyDictionary<string, decimal> pnlByCurrency)
+    {
+        if (pnlByCurrency.Count == 0)
+        {
+            sb.AppendLine("    (no data)");
+            return;
+        }
 
-    private static string FormatOptionalCurrency(decimal? value)
+        foreach (var entry in pnlByCurrency.OrderBy(e => e.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            sb.Append("    ");
+            sb.Append(entry.Key);
+            sb.Append(": ");
+            sb.AppendLine(FormatPnl(entry.Value));
+        }
+    }
+
+    private static void AppendPnlTable(StringBuilder sb, IReadOnlyDictionary<string, decimal> pnlByCurrency)
+    {
+        if (pnlByCurrency.Count == 0)
+        {
+            sb.Append("<p>(no data)</p>");
+            return;
+        }
+
+        sb.Append("<table border=\"1\" cellpadding=\"6\" cellspacing=\"0\"><thead><tr><th>Currency</th><th>PnL</th></tr></thead><tbody>");
+        foreach (var entry in pnlByCurrency.OrderBy(e => e.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            sb.Append("<tr>");
+            sb.AppendFormat(CultureInfo.InvariantCulture, "<td>{0}</td>", WebUtility.HtmlEncode(entry.Key));
+            sb.AppendFormat(CultureInfo.InvariantCulture, "<td>{0}</td>", WebUtility.HtmlEncode(FormatPnl(entry.Value)));
+            sb.Append("</tr>");
+        }
+
+        sb.Append("</tbody></table>");
+    }
+
+    private static string FormatPnl(decimal value)
+        => value.ToString("#,##0.000", CultureInfo.InvariantCulture);
+
+    private static string FormatOptionalPnl(decimal? value)
         => value.HasValue
-            ? value.Value.ToString("F2", CultureInfo.InvariantCulture)
+            ? value.Value.ToString("#,##0.000", CultureInfo.InvariantCulture)
             : "n/a";
 
     private static string FormatOptionalNumber(decimal? value)
