@@ -125,9 +125,9 @@ public class EmailNotificationService : IEmailNotificationService, IDisposable
         var sb = new StringBuilder();
         sb.Append("<html><body><h1>Intraday PnL</h1>");
         sb.AppendFormat(CultureInfo.InvariantCulture, "<p><strong>Date:</strong> {0:yyyy-MM-dd}</p>", report.TradingDate);
-        sb.AppendFormat(CultureInfo.InvariantCulture, "<p><strong>PnL:</strong> {0}</p>", FormatPnl(report.Pnl));
-        sb.AppendFormat(CultureInfo.InvariantCulture, "<p><strong>Gross Market Value:</strong> {0}</p>", FormatPnl(report.GrossMarketValue));
-        sb.AppendFormat(CultureInfo.InvariantCulture, "<p><strong>Total Net Exposure:</strong> {0}</p>", FormatPnl(report.TotalNetExposure));
+        sb.AppendFormat(CultureInfo.InvariantCulture, "<p><strong>PnL (USD):</strong> {0}</p>", FormatOptionalPnl(slippageResult.RealPnlUsd));
+        sb.AppendFormat(CultureInfo.InvariantCulture, "<p><strong>Theoretical PnL (USD):</strong> {0}</p>", FormatOptionalPnl(slippageResult.TheoreticalPnlUsd));
+        sb.AppendFormat(CultureInfo.InvariantCulture, "<p><strong>TSlippage and missed trade cost (USD):</strong> {0}</p>", FormatOptionalPnl(slippageResult.SlippageAndMissedCostUsd));
 
         sb.Append("<h2>Positions</h2>");
 
