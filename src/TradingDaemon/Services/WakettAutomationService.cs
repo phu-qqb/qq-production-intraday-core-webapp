@@ -31,7 +31,7 @@ public sealed class WakettAutomationService : BackgroundService
         TimeSpan.FromMinutes(54)
     };
     private static readonly IReadOnlyList<TimeSpan> OrderSubmissionOffsets = BuildQuarterOffsets(TimeSpan.FromMinutes(1));
-    private static readonly IReadOnlyList<TimeSpan> PnlReportOffsets = new[] { TimeSpan.FromMinutes(15) };
+    private static readonly IReadOnlyList<TimeSpan> PnlReportOffsets = new[] { TimeSpan.FromMinutes(9) };
 
     private readonly WakettPriceFetcher _priceFetcher;
     private readonly WeightCalculator _weightCalculator;
@@ -198,7 +198,7 @@ public sealed class WakettAutomationService : BackgroundService
                 while (nowUtc >= nextFillCheckUtc)
                 {
                     var scheduledRunUtc = nextFillCheckUtc;
-                    await RunFillAndSlippageWorkflowAsync(stoppingToken);
+                    await RunFillCheckAsync(stoppingToken);
                     nextFillCheckUtc = GetNextSessionEventUtc(
                         scheduledRunUtc.AddSeconds(1),
                         FillCheckOffsets,
@@ -351,8 +351,9 @@ public sealed class WakettAutomationService : BackgroundService
     {
         try
         {
+            var slippageResult = await RunSlippageComputationAsync(stoppingToken);
             var report = await _pnlReportService.ComputeAndStoreCurrentDayPnlAsync(cancellationToken: stoppingToken);
-            await _emailNotificationService.SendPnLReportAsync(report, stoppingToken);
+            await _emailNotificationService.SendPnLReportAsync(report, slippageResult, stoppingToken);
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
@@ -361,6 +362,28 @@ public sealed class WakettAutomationService : BackgroundService
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to compute or send automated Wakett PnL report.");
+        }
+    }
+
+    private async Task<SlippageResult?> RunSlippageComputationAsync(CancellationToken stoppingToken)
+    {
+        var localNow = TimeZoneInfo.ConvertTimeFromUtc(_timeProvider.GetUtcNow().UtcDateTime, NewYorkTimeZone);
+        var tradingDate = DateOnly.FromDateTime(localNow);
+
+        _logger.LogInformation(
+            "Computing slippage and missed trade costs via automation for {TradingDate}.",
+            tradingDate);
+
+        try
+        {
+            return await _slippageAndMissedCostService.ComputeAsync(
+                new SlippageRequest { Date = tradingDate.ToDateTime(TimeOnly.MinValue) },
+                stoppingToken);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex, "Failed to compute slippage and missed trade costs via automation.");
+            return null;
         }
     }
 
@@ -472,33 +495,6 @@ public sealed class WakettAutomationService : BackgroundService
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogError(ex, "Unexpected failure while fetching Wakett fills.");
-        }
-    }
-
-    private async Task RunFillAndSlippageWorkflowAsync(CancellationToken stoppingToken)
-    {
-        await RunFillCheckAsync(stoppingToken);
-        await RunSlippageComputationAsync(stoppingToken);
-    }
-
-    private async Task RunSlippageComputationAsync(CancellationToken stoppingToken)
-    {
-        var localNow = TimeZoneInfo.ConvertTimeFromUtc(_timeProvider.GetUtcNow().UtcDateTime, NewYorkTimeZone);
-        var tradingDate = DateOnly.FromDateTime(localNow);
-
-        _logger.LogInformation(
-            "Computing slippage and missed trade costs via automation for {TradingDate}.",
-            tradingDate);
-
-        try
-        {
-            await _slippageAndMissedCostService.ComputeAsync(
-                new SlippageRequest { Date = tradingDate.ToDateTime(TimeOnly.MinValue) },
-                stoppingToken);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            _logger.LogError(ex, "Failed to compute slippage and missed trade costs via automation.");
         }
     }
 
