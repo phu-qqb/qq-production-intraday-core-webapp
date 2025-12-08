@@ -186,7 +186,7 @@ ORDER BY Symbol, BarTimeUtc";
             : new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 
         var theoreticalUsd = theoreticalPnlByCurrency.TryGetValue("USD", out var theoreticalUsdTotal)
-            ? theoreticalUsdTotal
+            ? theoreticalPnlByCurrency.Sum(x => x.Value)
             : (decimal?)null;
         var realUsd = realPnlByCurrencyUsd.Count > 0
             ? realPnlByCurrencyUsd.Values.Sum()
@@ -450,7 +450,7 @@ ORDER BY Symbol, BarTimeUtc";
                 continue;
             }
 
-            var side = position > 0m ? "SELL" : "BUY";
+            var side = position > 0m ? "BUY" : "SELL";
 
             augmented.Add(new FillRow(
                 WakettFillId: 0,
