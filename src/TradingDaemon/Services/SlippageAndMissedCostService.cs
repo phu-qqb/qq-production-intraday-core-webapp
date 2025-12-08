@@ -181,14 +181,16 @@ ORDER BY Symbol, BarTimeUtc";
 
         var realPnlFills = AddVirtualStartingFills(fills, startingPositions, previousClosePrices, startUtc);
         var realPnlResult = CalculateRealPnlByCurrency(realPnlFills, lastClosePrices, conversionGraph);
-        var realPnlByCurrency = realPnlResult.Totals;
+        var realPnlByCurrencyUsd = hasConversionPrices
+            ? ConvertPnlsToUsdByCurrency(realPnlResult.Totals, conversionGraph)
+            : new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
 
         var theoreticalUsd = theoreticalPnlByCurrency.TryGetValue("USD", out var theoreticalUsdTotal)
             ? theoreticalUsdTotal
             : (decimal?)null;
-        var realUsd = hasConversionPrices
-            ? AggregateToUsd(realPnlByCurrency, conversionGraph)
-            : null;
+        var realUsd = realPnlByCurrencyUsd.Count > 0
+            ? realPnlByCurrencyUsd.Values.Sum()
+            : (decimal?)null;
 
         if (realUsd.HasValue)
         {
@@ -206,8 +208,8 @@ ORDER BY Symbol, BarTimeUtc";
             Console.WriteLine($" - {entry.Key}: {entry.Value}");
         }
 
-        Console.WriteLine("Real PnL by currency:");
-        foreach (var entry in realPnlByCurrency.OrderBy(e => e.Key, StringComparer.OrdinalIgnoreCase))
+        Console.WriteLine("Real PnL by currency (USD using last available close):");
+        foreach (var entry in realPnlByCurrencyUsd.OrderBy(e => e.Key, StringComparer.OrdinalIgnoreCase))
         {
             Console.WriteLine($" - {entry.Key}: {entry.Value}");
         }
@@ -255,7 +257,7 @@ ORDER BY Symbol, BarTimeUtc";
         return new SlippageResult(
             tradingDate,
             theoreticalPnlByCurrency,
-            realPnlByCurrency,
+            realPnlByCurrencyUsd,
             theoreticalUsd,
             realUsd,
             slippageCost,
@@ -311,11 +313,7 @@ ORDER BY Symbol, BarTimeUtc";
 
             if (pnlQuote != 0m)
             {
-                var currency = string.Equals(pair.QuoteCurrency, "USD", StringComparison.OrdinalIgnoreCase)
-                    ? pair.QuoteCurrency
-                    : "USD";
-
-                totals[currency] = totals.TryGetValue(currency, out var existing)
+                totals[pair.QuoteCurrency] = totals.TryGetValue(pair.QuoteCurrency, out var existing)
                     ? existing + pnlQuote
                     : pnlQuote;
             }
@@ -674,6 +672,33 @@ ORDER BY Symbol, BarTimeUtc";
         }
 
         return convertedAny ? total : null;
+    }
+
+    private IReadOnlyDictionary<string, decimal> ConvertPnlsToUsdByCurrency(
+        IReadOnlyDictionary<string, decimal> pnlByCurrency,
+        IReadOnlyDictionary<string, List<(string Target, decimal Rate)>> conversionGraph)
+    {
+        var converted = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (currency, amount) in pnlByCurrency)
+        {
+            if (string.Equals(currency, "USD", StringComparison.OrdinalIgnoreCase))
+            {
+                converted[currency] = amount;
+                continue;
+            }
+
+            if (TryGetConversionRate(currency, "USD", conversionGraph, out var rate) && rate != 0m)
+            {
+                converted[currency] = amount * rate;
+            }
+            else
+            {
+                _logger.LogWarning("Unable to convert {Currency} PnL to USD using close prices.", currency);
+            }
+        }
+
+        return converted;
     }
 
     private static void AddEdge(
