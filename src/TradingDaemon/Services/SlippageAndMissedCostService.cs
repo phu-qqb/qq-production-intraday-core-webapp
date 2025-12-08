@@ -309,8 +309,10 @@ ORDER BY Symbol, BarTimeUtc";
             foreach (var order in symbolOrders)
             {
                 var scheduledUtc = order.ScheduledTimestamp.UtcDateTime;
-                var matchingBar = bars.FirstOrDefault(b => b.BarTimeUtc == scheduledUtc);
-                if (matchingBar is null || matchingBar.Close == 0m)
+                var matchingBar = bars.FirstOrDefault(b => b.BarTimeUtc == scheduledUtc && b.Close != 0m)
+                    ?? bars.LastOrDefault(b => b.BarTimeUtc < scheduledUtc && b.Close != 0m);
+
+                if (matchingBar is null)
                 {
                     _logger.LogDebug("No matching price bar for order at {Timestamp} ({Symbol})", order.ScheduledTimestamp, pair.FormattedSymbol);
                     continue;
