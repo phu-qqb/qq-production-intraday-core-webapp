@@ -162,9 +162,9 @@ ORDER BY Symbol, BarTimeUtc";
         var realPnlResult = CalculateRealPnlByCurrency(fills, lastClosePrices, conversionGraph);
         var realPnlByCurrency = realPnlResult.Totals;
 
-        var theoreticalUsd = hasConversionPrices
-            ? AggregateToUsd(theoreticalPnlByCurrency, conversionGraph)
-            : null;
+        var theoreticalUsd = theoreticalPnlByCurrency.TryGetValue("USD", out var theoreticalUsdTotal)
+            ? theoreticalUsdTotal
+            : (decimal?)null;
         var realUsd = hasConversionPrices
             ? AggregateToUsd(realPnlByCurrency, conversionGraph)
             : null;
@@ -273,7 +273,11 @@ ORDER BY Symbol, BarTimeUtc";
 
             if (pnlQuote != 0m)
             {
-                totals[pair.QuoteCurrency] = totals.TryGetValue(pair.QuoteCurrency, out var existing)
+                var currency = string.Equals(pair.QuoteCurrency, "USD", StringComparison.OrdinalIgnoreCase)
+                    ? pair.QuoteCurrency
+                    : "USD";
+
+                totals[currency] = totals.TryGetValue(currency, out var existing)
                     ? existing + pnlQuote
                     : pnlQuote;
             }
