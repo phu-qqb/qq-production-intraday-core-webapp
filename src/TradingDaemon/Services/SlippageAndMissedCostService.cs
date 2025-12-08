@@ -289,7 +289,7 @@ ORDER BY Symbol, BarTimeUtc";
                 continue;
             }
 
-            if (string.IsNullOrWhiteSpace(pair.BaseCurrency))
+            if (string.IsNullOrWhiteSpace(pair.QuoteCurrency))
             {
                 continue;
             }
@@ -300,7 +300,7 @@ ORDER BY Symbol, BarTimeUtc";
             }
 
             var position = 0m;
-            var pnlBase = 0m;
+            var pnlQuote = 0m;
 
             foreach (var fill in symbolFills)
             {
@@ -308,21 +308,21 @@ ORDER BY Symbol, BarTimeUtc";
                 var executeSize = fill.ExecuteSize ?? 0m;
                 var executePrice = fill.ExecutePrice ?? 0m;
 
-                pnlBase += executePrice * executeSize * multiplier;
+                pnlQuote += executePrice * executeSize * multiplier;
                 position += executeSize * multiplier;
             }
 
             if (position != 0m)
             {
                 var flattenMultiplier = position > 0m ? -1m : 1m;
-                pnlBase += lastClose * Math.Abs(position) * flattenMultiplier;
+                pnlQuote += lastClose * Math.Abs(position) * flattenMultiplier;
             }
 
-            if (pnlBase != 0m)
+            if (pnlQuote != 0m)
             {
-                totals[pair.BaseCurrency] = totals.TryGetValue(pair.BaseCurrency, out var existing)
-                    ? existing + pnlBase
-                    : pnlBase;
+                totals[pair.QuoteCurrency] = totals.TryGetValue(pair.QuoteCurrency, out var existing)
+                    ? existing + pnlQuote
+                    : pnlQuote;
             }
         }
 
