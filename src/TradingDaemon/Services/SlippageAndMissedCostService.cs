@@ -51,6 +51,8 @@ WHERE TimeframeMinute = {TimeframeMinute}
     AND Symbol IN @Symbols
 ORDER BY Symbol, BarTimeUtc";
 
+    private static readonly DateOnly HistoricalFillStartDate = new(2025, 12, 1);
+
     public SlippageAndMissedCostService(
         DapperContext context,
         ILogger<SlippageAndMissedCostService> logger,
@@ -73,6 +75,10 @@ ORDER BY Symbol, BarTimeUtc";
         var endLocal = startLocal.AddDays(1);
         var startUtc = TimeZoneInfo.ConvertTimeToUtc(startLocal, NewYorkTimeZone);
         var endUtc = TimeZoneInfo.ConvertTimeToUtc(endLocal, NewYorkTimeZone);
+        var previousWeekdayLocal = GetPreviousWeekday(tradingDate).ToDateTime(TimeOnly.MinValue);
+        var priceBarStartUtc = TimeZoneInfo.ConvertTimeToUtc(previousWeekdayLocal, NewYorkTimeZone);
+        var historicalFillStartUtc = TimeZoneInfo.ConvertTimeToUtc(HistoricalFillStartDate.ToDateTime(TimeOnly.MinValue), NewYorkTimeZone);
+        var historicalFillEndUtc = startUtc;
 
         using var connection = _context.CreateConnection();
 
@@ -86,9 +92,20 @@ ORDER BY Symbol, BarTimeUtc";
             .Where(f => !string.IsNullOrWhiteSpace(f.Symbol))
             .ToList();
 
+        var historicalFills = (await connection.QueryAsync<FillRow>(
+                new CommandDefinition(
+                    FormatSql(FillsSqlTemplate),
+                    new { StartUtc = historicalFillStartUtc, EndUtc = historicalFillEndUtc },
+                    cancellationToken: cancellationToken)))
+            .Where(f => !string.IsNullOrWhiteSpace(f.Symbol))
+            .ToList();
+
+        var startingPositions = CalculatePositionsAtStartOfDay(historicalFills);
+
         var symbolQueries = BuildSymbolQueries(
                 orders.Select(o => o.Symbol)
-                    .Concat(fills.Select(f => f.Symbol)))
+                    .Concat(fills.Select(f => f.Symbol))
+                    .Concat(startingPositions.Keys))
             .ToList();
 
         var symbolSet = symbolQueries
@@ -112,7 +129,7 @@ ORDER BY Symbol, BarTimeUtc";
 
         var priceBarsDefinition = new CommandDefinition(
             FormatSql(PriceBarsSqlTemplate),
-            new { StartUtc = startUtc, EndUtc = endUtc, Symbols = symbolSet },
+            new { StartUtc = priceBarStartUtc, EndUtc = endUtc, Symbols = symbolSet },
             cancellationToken: cancellationToken);
 
         var priceBars = await connection.QueryAsync<PriceBarRow>(priceBarsDefinition);
@@ -156,10 +173,12 @@ ORDER BY Symbol, BarTimeUtc";
 
         var theoreticalPnlByCurrency = CalculateTheoreticalPnlByCurrency(orders, barsBySymbol);
         var lastClosePrices = ExtractLastClosePrices(barsBySymbol);
+        var previousClosePrices = ExtractLastClosePricesBeforeTimestamp(barsBySymbol, startUtc);
         var conversionGraph = BuildConversionGraph(lastClosePrices);
         var hasConversionPrices = conversionGraph.Count > 0;
 
-        var realPnlResult = CalculateRealPnlByCurrency(fills, lastClosePrices, conversionGraph);
+        var realPnlFills = AddVirtualStartingFills(fills, startingPositions, previousClosePrices, startUtc);
+        var realPnlResult = CalculateRealPnlByCurrency(realPnlFills, lastClosePrices, conversionGraph);
         var realPnlByCurrency = realPnlResult.Totals;
 
         var theoreticalUsd = hasConversionPrices
@@ -282,6 +301,36 @@ ORDER BY Symbol, BarTimeUtc";
         return totals;
     }
 
+    private static IReadOnlyDictionary<string, decimal> CalculatePositionsAtStartOfDay(
+        IReadOnlyCollection<FillRow> historicalFills)
+    {
+        var positions = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+
+        var fillsBySymbol = historicalFills
+            .GroupBy(f => NormalizeSymbol(f.Symbol))
+            .ToDictionary(g => g.Key, g => g.OrderBy(f => f.ExecuteTimestamp).ToList(), StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (symbol, symbolFills) in fillsBySymbol)
+        {
+            var position = 0m;
+
+            foreach (var fill in symbolFills)
+            {
+                var multiplier = GetCashFlowSideMultiplier(fill.Side);
+                var executeSize = fill.ExecuteSize ?? 0m;
+
+                position += executeSize * multiplier;
+            }
+
+            if (position != 0m)
+            {
+                positions[symbol] = position;
+            }
+        }
+
+        return positions;
+    }
+
     private RealPnlComputationResult CalculateRealPnlByCurrency(
         IReadOnlyCollection<FillRow> fills,
         IReadOnlyDictionary<string, decimal> lastClosePricesBySymbol,
@@ -348,6 +397,46 @@ ORDER BY Symbol, BarTimeUtc";
         return new RealPnlComputationResult(totals, totalTradingCostUsd);
     }
 
+    private IReadOnlyCollection<FillRow> AddVirtualStartingFills(
+        IReadOnlyCollection<FillRow> fills,
+        IReadOnlyDictionary<string, decimal> startingPositions,
+        IReadOnlyDictionary<string, decimal> previousClosePrices,
+        DateTime startUtc)
+    {
+        if (startingPositions.Count == 0)
+        {
+            return fills;
+        }
+
+        var augmented = fills.ToList();
+        var startTimestamp = new DateTimeOffset(startUtc, TimeSpan.Zero);
+
+        foreach (var (symbol, position) in startingPositions)
+        {
+            if (position == 0m)
+            {
+                continue;
+            }
+
+            if (!previousClosePrices.TryGetValue(symbol, out var previousClose) || previousClose == 0m)
+            {
+                continue;
+            }
+
+            var side = position > 0m ? "SELL" : "BUY";
+
+            augmented.Add(new FillRow(
+                WakettFillId: 0,
+                Symbol: symbol,
+                Side: side,
+                ExecuteSize: Math.Abs(position),
+                ExecutePrice: previousClose,
+                ExecuteTimestamp: startTimestamp));
+        }
+
+        return augmented;
+    }
+
     private static decimal GetCashFlowSideMultiplier(string? side)
     {
         if (string.IsNullOrWhiteSpace(side))
@@ -383,6 +472,28 @@ ORDER BY Symbol, BarTimeUtc";
             if (matching is not null && matching.Close != 0m)
             {
                 result[symbol] = matching.Close;
+            }
+        }
+
+        return result;
+    }
+
+    private static IReadOnlyDictionary<string, decimal> ExtractLastClosePricesBeforeTimestamp(
+        IReadOnlyDictionary<string, List<PriceBarRow>> barsBySymbol,
+        DateTime targetUtc)
+    {
+        var result = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (symbol, bars) in barsBySymbol)
+        {
+            var lastBefore = bars
+                .Where(b => b.BarTimeUtc < targetUtc)
+                .OrderBy(b => b.BarTimeUtc)
+                .LastOrDefault();
+
+            if (lastBefore != null)
+            {
+                result[symbol] = lastBefore.Close;
             }
         }
 
@@ -583,6 +694,18 @@ ORDER BY Symbol, BarTimeUtc";
     private static TimeZoneInfo NewYorkTimeZone
         => TimeZoneInfo.FindSystemTimeZoneById(
             OperatingSystem.IsWindows() ? "Eastern Standard Time" : "America/New_York");
+
+    private static DateOnly GetPreviousWeekday(DateOnly date)
+    {
+        var previous = date.AddDays(-1);
+
+        while (previous.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday)
+        {
+            previous = previous.AddDays(-1);
+        }
+
+        return previous;
+    }
 
     private string FormatSql(string template)
     {
