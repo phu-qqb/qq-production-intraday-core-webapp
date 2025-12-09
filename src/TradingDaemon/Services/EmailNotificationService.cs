@@ -77,13 +77,7 @@ public class EmailNotificationService : IEmailNotificationService, IDisposable
         {
             sb.AppendLine($"Date: {report.TradingDate:yyyy-MM-dd}");
             sb.AppendLine("Execution summary:");
-            sb.AppendLine($"- Real PnL (net): {FormatOptionalPnl(slippageResult.RealPnlUsd)}");
-            sb.AppendLine($"- Theoretical PnL (net): {FormatOptionalPnl(slippageResult.TheoreticalNetPnlUsd)}");
-            sb.AppendLine($"- Theoretical PnL (gross): {FormatOptionalPnl(slippageResult.TheoreticalPnlUsd)}");
-            sb.AppendLine($"- Theoretical costs ($10/M): {FormatOptionalPnl(slippageResult.TheoreticalTradingCostUsd)}");
-            sb.AppendLine($"- Commissions ($5/M): {FormatOptionalPnl(slippageResult.CommissionsUsd)}");
-            sb.AppendLine($"- Missed trades PnL: {FormatOptionalPnl(slippageResult.MissedTradesPnlUsd)}");
-            sb.AppendLine($"- Execution slippage: {FormatOptionalPnl(slippageResult.ExecutionSlippageUsd)}");
+            AppendExecutionSummaryText(sb, slippageResult);
             sb.AppendLine();
             sb.AppendLine($"Gross Market Value: {FormatPnl(report.GrossMarketValue)}");
             sb.AppendLine($"Total Net Exposure: {FormatPnl(report.TotalNetExposure)}");
@@ -132,36 +126,7 @@ public class EmailNotificationService : IEmailNotificationService, IDisposable
         sb.AppendFormat(CultureInfo.InvariantCulture, "<p><strong>Date:</strong> {0:yyyy-MM-dd}</p>", report.TradingDate);
         if (slippageResult is not null)
         {
-            sb.Append("<h2>Execution summary</h2><ul>");
-            sb.AppendFormat(
-                CultureInfo.InvariantCulture,
-                "<li>Real PnL (net): {0}</li>",
-                WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.RealPnlUsd)));
-            sb.AppendFormat(
-                CultureInfo.InvariantCulture,
-                "<li>Theoretical PnL (net): {0}</li>",
-                WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.TheoreticalNetPnlUsd)));
-            sb.AppendFormat(
-                CultureInfo.InvariantCulture,
-                "<li>Theoretical PnL (gross): {0}</li>",
-                WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.TheoreticalPnlUsd)));
-            sb.AppendFormat(
-                CultureInfo.InvariantCulture,
-                "<li>Theoretical costs ($10/M): {0}</li>",
-                WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.TheoreticalTradingCostUsd)));
-            sb.AppendFormat(
-                CultureInfo.InvariantCulture,
-                "<li>Commissions ($5/M): {0}</li>",
-                WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.CommissionsUsd)));
-            sb.AppendFormat(
-                CultureInfo.InvariantCulture,
-                "<li>Missed trades PnL: {0}</li>",
-                WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.MissedTradesPnlUsd)));
-            sb.AppendFormat(
-                CultureInfo.InvariantCulture,
-                "<li>Execution slippage: {0}</li>",
-                WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.ExecutionSlippageUsd)));
-            sb.Append("</ul>");
+            AppendExecutionSummaryTable(sb, slippageResult);
         }
 
         sb.Append("<h2>Positions</h2>");
@@ -271,6 +236,89 @@ public class EmailNotificationService : IEmailNotificationService, IDisposable
         => value.HasValue
             ? value.Value.ToString("F5", CultureInfo.InvariantCulture)
             : "n/a";
+
+    private static void AppendExecutionSummaryText(StringBuilder sb, SlippageResult slippageResult)
+    {
+        var realLines = new (string Label, decimal? Value)[]
+        {
+            ("Real PnL (net)", slippageResult.RealPnlUsd),
+            ("Commissions ($5/M)", slippageResult.CommissionsUsd),
+            ("Execution slippage", slippageResult.ExecutionSlippageUsd),
+            ("Missed trades PnL", slippageResult.MissedTradesPnlUsd)
+        };
+
+        var theoreticalLines = new (string Label, decimal? Value)[]
+        {
+            ("Theoretical PnL (net)", slippageResult.TheoreticalNetPnlUsd),
+            ("Theoretical PnL (gross)", slippageResult.TheoreticalPnlUsd),
+            ("Theoretical costs ($10/M)", slippageResult.TheoreticalTradingCostUsd)
+        };
+
+        AppendAlignedBlock(sb, "Real", realLines);
+        AppendAlignedBlock(sb, "Theoretical", theoreticalLines);
+
+        static void AppendAlignedBlock(StringBuilder builder, string title, IReadOnlyCollection<(string Label, decimal? Value)> lines)
+        {
+            builder.AppendLine($"- {title}:");
+            var labelWidth = lines.Max(l => l.Label.Length);
+
+            foreach (var (label, value) in lines)
+            {
+                builder.Append("  - ");
+                builder.Append(label.PadRight(labelWidth));
+                builder.Append(": ");
+                builder.AppendLine(FormatOptionalPnl(value));
+            }
+        }
+    }
+
+    private static void AppendExecutionSummaryTable(StringBuilder sb, SlippageResult slippageResult)
+    {
+        var realLines = new (string Label, decimal? Value)[]
+        {
+            ("Real PnL (net)", slippageResult.RealPnlUsd),
+            ("Commissions ($5/M)", slippageResult.CommissionsUsd),
+            ("Execution slippage", slippageResult.ExecutionSlippageUsd),
+            ("Missed trades PnL", slippageResult.MissedTradesPnlUsd)
+        };
+
+        var theoreticalLines = new (string Label, decimal? Value)[]
+        {
+            ("Theoretical PnL (net)", slippageResult.TheoreticalNetPnlUsd),
+            ("Theoretical PnL (gross)", slippageResult.TheoreticalPnlUsd),
+            ("Theoretical costs ($10/M)", slippageResult.TheoreticalTradingCostUsd)
+        };
+
+        sb.Append("<h2>Execution summary</h2>");
+        sb.Append("<table style=\"border-collapse:collapse;\">");
+
+        AppendSection("Real", realLines);
+        AppendSection("Theoretical", theoreticalLines);
+
+        sb.Append("</table>");
+
+        void AppendSection(string title, IReadOnlyCollection<(string Label, decimal? Value)> lines)
+        {
+            sb.AppendFormat(
+                CultureInfo.InvariantCulture,
+                "<tr><th colspan=\"2\" style=\"text-align:left;padding:8px 0 4px;font-size:14px;\">{0}</th></tr>",
+                WebUtility.HtmlEncode(title));
+
+            foreach (var (label, value) in lines)
+            {
+                sb.Append("<tr>");
+                sb.AppendFormat(
+                    CultureInfo.InvariantCulture,
+                    "<td style=\"padding:4px 12px 4px 0;white-space:nowrap;\">{0}</td>",
+                    WebUtility.HtmlEncode(label));
+                sb.AppendFormat(
+                    CultureInfo.InvariantCulture,
+                    "<td style=\"padding:4px 0 4px 12px;text-align:right;font-family:monospace;\">{0}</td>",
+                    WebUtility.HtmlEncode(FormatOptionalPnl(value)));
+                sb.Append("</tr>");
+            }
+        }
+    }
 
     public async Task SendTestEmailAsync(string? subject = null, string? body = null, CancellationToken cancellationToken = default)
     {
