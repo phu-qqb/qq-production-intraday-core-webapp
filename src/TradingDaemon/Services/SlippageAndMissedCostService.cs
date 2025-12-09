@@ -37,8 +37,10 @@ WHERE ScheduledTimestamp >= @StartUtc AND ScheduledTimestamp < @EndUtc";
     WakettFillId,
     Symbol,
     Side,
+    OrderPrice,
     ExecuteSize,
     ExecutePrice,
+    Rate,
     ExecuteTimestamp
 FROM {WakettFill}
 WHERE ExecuteTimestamp >= @StartUtc AND ExecuteTimestamp < @EndUtc";
@@ -263,9 +265,7 @@ ORDER BY Symbol, BarTimeUtc";
             ? $"Total missed PnL: {missedTradesCostUsd.Value}"
             : "Total missed PnL could not be fully converted to USD.");
 
-        var executionSlippageUsd = realUsd.HasValue && theoreticalNetUsd.HasValue && missedTradesCostUsd.HasValue && commissionsUsd.HasValue
-            ? realUsd.Value - missedTradesCostUsd.Value + commissionsUsd.Value - theoreticalUsd.Value
-            : (decimal?)null;
+        var executionSlippageUsd = CalculateExecutionSlippageUsd(fills);
 
         if (hasConversionPrices)
         {
@@ -380,8 +380,10 @@ ORDER BY Symbol, BarTimeUtc";
                         WakettFillId: 0,
                         Symbol: normalizedSymbol,
                         Side: side,
+                        OrderPrice: null,
                         ExecuteSize: Math.Abs(delta),
                         ExecutePrice: matchingBar.Close,
+                        Rate: null,
                         ExecuteTimestamp: order.ScheduledTimestamp));
                 }
 
@@ -402,8 +404,10 @@ ORDER BY Symbol, BarTimeUtc";
                         WakettFillId: 0,
                         Symbol: normalizedSymbol,
                         Side: unwindSide,
+                        OrderPrice: null,
                         ExecuteSize: Math.Abs(targetPosition),
                         ExecutePrice: unwindBar.Close,
+                        Rate: null,
                         ExecuteTimestamp: new DateTimeOffset(unwindBar.BarTimeUtc, TimeSpan.Zero)));
                 }
             }
@@ -540,8 +544,10 @@ ORDER BY Symbol, BarTimeUtc";
                 WakettFillId: 0,
                 Symbol: symbol,
                 Side: side,
+                OrderPrice: null,
                 ExecuteSize: Math.Abs(position),
                 ExecutePrice: previousClose,
+                Rate: null,
                 ExecuteTimestamp: startTimestamp));
         }
 
@@ -1166,12 +1172,45 @@ ORDER BY Symbol, BarTimeUtc";
         decimal? Aum,
         DateTimeOffset ScheduledTimestamp);
 
+    private static decimal? CalculateExecutionSlippageUsd(IReadOnlyCollection<FillRow> fills)
+    {
+        decimal total = 0m;
+        var hasValue = false;
+
+        foreach (var fill in fills)
+        {
+            var executePrice = fill.ExecutePrice;
+            var orderPrice = fill.OrderPrice;
+            var executeSize = fill.ExecuteSize;
+            var rate = fill.Rate;
+
+            if (!executePrice.HasValue || !orderPrice.HasValue || !executeSize.HasValue || !rate.HasValue)
+            {
+                continue;
+            }
+
+            var sideMultiplier = GetCashFlowSideMultiplier(fill.Side);
+
+            if (sideMultiplier == 0m)
+            {
+                continue;
+            }
+
+            total += (executePrice.Value - orderPrice.Value) * executeSize.Value * rate.Value * sideMultiplier;
+            hasValue = true;
+        }
+
+        return hasValue ? total : null;
+    }
+
     private sealed record FillRow(
         long WakettFillId,
         string Symbol,
         string? Side,
+        decimal? OrderPrice,
         decimal? ExecuteSize,
         decimal? ExecutePrice,
+        decimal? Rate,
         DateTimeOffset ExecuteTimestamp);
 
     private sealed record PriceBarRow(string Symbol, DateTime BarTimeUtc, decimal Close);
