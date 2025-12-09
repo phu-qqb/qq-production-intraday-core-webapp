@@ -606,13 +606,14 @@ ORDER BY Symbol, BarTimeUtc";
                 var scheduledUtc = order.ScheduledTimestamp.UtcDateTime;
                 var barIndex = bars.FindIndex(b => b.BarTimeUtc == scheduledUtc);
 
-                if (barIndex <= 0 || barIndex >= bars.Count)
+                if (barIndex <= 0 || barIndex >= bars.Count - 1)
                 {
                     continue;
                 }
 
                 var currentBar = bars[barIndex];
                 var previousBar = bars[barIndex - 1];
+                var nextBar = bars[barIndex + 1];
 
                 if (currentBar.Close == 0m || previousBar.Close == 0m)
                 {
@@ -638,7 +639,7 @@ ORDER BY Symbol, BarTimeUtc";
                     continue;
                 }
 
-                var priceDelta = currentBar.Close - previousBar.Close;
+                var priceDelta = nextBar.Close - currentBar.Close;
                 var missedPnl = sizeDifference * priceDelta;
 
                 if (!CurrencyPairParser.TryParse(order.Symbol, out var pair))
