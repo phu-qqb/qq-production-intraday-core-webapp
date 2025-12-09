@@ -344,12 +344,19 @@ ORDER BY Symbol, BarTimeUtc";
             }
 
             decimal targetPosition = 0m;
+            var lastMatchingBarIndex = -1;
 
             foreach (var order in symbolOrders)
             {
                 var scheduledUtc = order.ScheduledTimestamp.UtcDateTime;
-                var matchingBar = bars.FirstOrDefault(b => b.BarTimeUtc == scheduledUtc && b.Close != 0m)
-                    ?? bars.LastOrDefault(b => b.BarTimeUtc < scheduledUtc && b.Close != 0m);
+                var matchingBarIndex = bars.FindIndex(b => b.BarTimeUtc == scheduledUtc && b.Close != 0m);
+
+                if (matchingBarIndex < 0)
+                {
+                    matchingBarIndex = bars.FindLastIndex(b => b.BarTimeUtc < scheduledUtc && b.Close != 0m);
+                }
+
+                var matchingBar = matchingBarIndex >= 0 ? bars[matchingBarIndex] : null;
 
                 if (matchingBar is null)
                 {
@@ -379,6 +386,26 @@ ORDER BY Symbol, BarTimeUtc";
                 }
 
                 targetPosition = signedTarget;
+                lastMatchingBarIndex = matchingBarIndex;
+            }
+
+            if (targetPosition != 0m && lastMatchingBarIndex >= 0)
+            {
+                var unwindBarIndex = lastMatchingBarIndex + 1;
+
+                if (unwindBarIndex < bars.Count && bars[unwindBarIndex].Close != 0m)
+                {
+                    var unwindBar = bars[unwindBarIndex];
+                    var unwindSide = targetPosition > 0m ? "SELL" : "BUY";
+
+                    theoreticalFills.Add(new FillRow(
+                        WakettFillId: 0,
+                        Symbol: normalizedSymbol,
+                        Side: unwindSide,
+                        ExecuteSize: Math.Abs(targetPosition),
+                        ExecutePrice: unwindBar.Close,
+                        ExecuteTimestamp: new DateTimeOffset(unwindBar.BarTimeUtc, TimeSpan.Zero)));
+                }
             }
         }
 
