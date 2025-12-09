@@ -127,7 +127,12 @@ ORDER BY Symbol, BarTimeUtc";
                 null,
                 null,
                 null,
-                false);
+                false,
+                null,
+                null,
+                null,
+                null,
+                null);
         }
 
         var priceBarsDefinition = new CommandDefinition(
@@ -702,8 +707,24 @@ ORDER BY Symbol, BarTimeUtc";
                     fillIndex++;
                 }
 
+                if (!CurrencyPairParser.TryParse(order.Symbol, out var pair))
+                {
+                    continue;
+                }
+
                 var targetSize = (order.SizeValue ?? 0m) * (order.Aum ?? 0m) * GetSideMultiplier(order.Side);
                 var filledSize = cumulativeFilled;
+
+                var priceDelta = nextBar.Close - currentBar.Close;
+
+                if (!string.Equals(pair.BaseCurrency, "USD", StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(pair.QuoteCurrency, "USD", StringComparison.OrdinalIgnoreCase)
+                    && currentBar.Close != 0m)
+                {
+                    targetSize *= currentBar.Close;
+                    filledSize *= currentBar.Close;
+                    priceDelta /= currentBar.Close;
+                }
 
                 var sizeDifference = targetSize - filledSize;
 
@@ -712,13 +733,7 @@ ORDER BY Symbol, BarTimeUtc";
                     continue;
                 }
 
-                var priceDelta = nextBar.Close - currentBar.Close;
                 var missedPnl = sizeDifference * priceDelta;
-
-                if (!CurrencyPairParser.TryParse(order.Symbol, out var pair))
-                {
-                    continue;
-                }
 
                 missedTrades.Add(new MissedTrade(
                     order.Symbol,
