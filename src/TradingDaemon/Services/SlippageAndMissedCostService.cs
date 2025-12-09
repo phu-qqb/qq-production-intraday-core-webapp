@@ -264,7 +264,7 @@ ORDER BY Symbol, BarTimeUtc";
             : "Total missed PnL could not be fully converted to USD.");
 
         var executionSlippageUsd = realUsd.HasValue && theoreticalNetUsd.HasValue && missedTradesCostUsd.HasValue && commissionsUsd.HasValue
-            ? realUsd.Value - missedTradesCostUsd.Value + commissionsUsd.Value - theoreticalNetUsd.Value
+            ? realUsd.Value - missedTradesCostUsd.Value + commissionsUsd.Value - theoreticalUsd.Value
             : (decimal?)null;
 
         if (hasConversionPrices)
@@ -280,13 +280,13 @@ ORDER BY Symbol, BarTimeUtc";
                 ? $" - Theoretical PnL (gross): {theoreticalUsd.Value}"
                 : " - Theoretical PnL could not be fully converted to USD.");
             Console.WriteLine(theoreticalTradingCostUsd.HasValue
-                ? $" - Theoretical costs ($10/M): {theoreticalTradingCostUsd.Value}"
+                ? $" - Theoretical costs ($10/M): {-theoreticalTradingCostUsd.Value}"
                 : " - Theoretical costs could not be computed.");
             Console.WriteLine(commissionsUsd.HasValue
-                ? $" - Commissions ($5/M): {commissionsUsd.Value}"
+                ? $" - Commissions ($5/M): {-commissionsUsd.Value}"
                 : " - Commissions could not be computed.");
             Console.WriteLine(missedTradesCostUsd.HasValue
-                ? $" - Missed trades PnL (as cost): {missedTradesCostUsd.Value}"
+                ? $" - Missed trades PnL: {missedTradesCostUsd.Value}"
                 : " - Missed trades PnL could not be fully converted to USD.");
             Console.WriteLine(executionSlippageUsd.HasValue
                 ? $" - Execution slippage: {executionSlippageUsd.Value}"
