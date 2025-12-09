@@ -7,4 +7,9 @@ public sealed record SlippageResult(
     decimal? TheoreticalPnlUsd,
     decimal? RealPnlUsd,
     decimal? SlippageAndMissedCostUsd,
-    bool HasFivePmBar);
+    bool HasFivePmBar,
+    decimal? TheoreticalTradingCostUsd,
+    decimal? TheoreticalNetPnlUsd,
+    decimal? MissedTradesPnlUsd,
+    decimal? CommissionsUsd,
+    decimal? ExecutionSlippageUsd);

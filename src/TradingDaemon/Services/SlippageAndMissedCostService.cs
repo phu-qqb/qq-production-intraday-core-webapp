@@ -20,6 +20,7 @@ public sealed class SlippageAndMissedCostService
     private readonly string _timeframeLiteral;
     private readonly int _timeframeMinutes;
 
+    private const decimal TheoreticalTradingCostUsdPerUsdNotional = 10m / 1_000_000m;
     private const decimal TradingCostUsdPerUsdNotional = 5m / 1_000_000m;
 
     private const string OrdersSqlTemplate = @"SELECT
@@ -196,6 +197,23 @@ ORDER BY Symbol, BarTimeUtc";
         var realUsd = realPnlByCurrencyUsd.Count > 0
             ? realPnlByCurrencyUsd.Values.Sum()
             : (decimal?)null;
+        var theoreticalNotionalUsd = CalculateTotalNotionalUsd(theoreticalFills, conversionGraph);
+        var theoreticalTradingCostUsd = theoreticalNotionalUsd.HasValue
+            ? theoreticalNotionalUsd.Value * TheoreticalTradingCostUsdPerUsdNotional
+            : (decimal?)null;
+        var theoreticalNetUsd = theoreticalUsd.HasValue && theoreticalTradingCostUsd.HasValue
+            ? theoreticalUsd.Value - theoreticalTradingCostUsd.Value
+            : (decimal?)null;
+
+        var realNotionalUsd = CalculateTotalNotionalUsd(fills, conversionGraph);
+        var commissionsUsd = realNotionalUsd.HasValue
+            ? realNotionalUsd.Value * TradingCostUsdPerUsdNotional
+            : (decimal?)null;
+        if (!commissionsUsd.HasValue && realPnlResult.TotalTradingCostUsd != 0m)
+        {
+            commissionsUsd = realPnlResult.TotalTradingCostUsd;
+        }
+
         var realUsdAfterTradingCost = realUsd.HasValue
             ? realUsd.Value - realPnlResult.TotalTradingCostUsd
             : (decimal?)null;
@@ -217,32 +235,6 @@ ORDER BY Symbol, BarTimeUtc";
             Console.WriteLine($" - {entry.Key}: {entry.Value}");
         }
 
-        if (slippageCost.HasValue || theoreticalUsd.HasValue || realUsd.HasValue || realPnlResult.TotalTradingCostUsd != 0m)
-        {
-            Console.WriteLine("Aggregated USD values using last available close prices:");
-            Console.WriteLine(theoreticalUsd.HasValue
-                ? $" - Theoretical PnL (USD): {theoreticalUsd.Value}"
-                : " - Theoretical PnL could not be fully converted to USD.");
-            Console.WriteLine(realUsd.HasValue
-                ? $" - Real PnL (USD aggregate): {realUsd.Value}"
-                : " - Real PnL could not be fully converted to USD.");
-            Console.WriteLine($" - Total trading cost (USD): {realPnlResult.TotalTradingCostUsd}");
-            Console.WriteLine(realUsdAfterTradingCost.HasValue
-                ? $" - Real PnL after trading costs (USD): {realUsdAfterTradingCost.Value}"
-                : " - Real PnL after trading costs could not be fully converted to USD.");
-            Console.WriteLine(slippageCost.HasValue
-                ? $" - Slippage and missed trade cost (USD): {slippageCost.Value}"
-                : " - Slippage and missed trade cost could not be aggregated to USD.");
-        }
-        else if (hasConversionPrices)
-        {
-            Console.WriteLine("Conversion rates were partially unavailable; USD aggregation skipped.");
-        }
-        else
-        {
-            Console.WriteLine("Price bars were not available; USD aggregation skipped.");
-        }
-
         var missedTrades = IdentifyMissedTrades(orders, fills, barsBySymbol, _timeframeMinutes);
         Console.WriteLine($"Missed trades for {tradingDate:yyyy-MM-dd}:");
         if (missedTrades.Count == 0)
@@ -261,9 +253,49 @@ ORDER BY Symbol, BarTimeUtc";
         }
 
         var totalMissedUsd = AggregateMissedPnlUsd(missedTrades, conversionGraph);
-        Console.WriteLine(totalMissedUsd.HasValue
-            ? $"Total missed PnL (USD): {totalMissedUsd.Value}"
+        var missedTradesCostUsd = totalMissedUsd.HasValue ? -totalMissedUsd.Value : (decimal?)null;
+        Console.WriteLine(missedTradesCostUsd.HasValue
+            ? $"Total missed PnL (USD as cost): {missedTradesCostUsd.Value}"
             : "Total missed PnL could not be fully converted to USD.");
+
+        var executionSlippageUsd = realUsd.HasValue && theoreticalNetUsd.HasValue && missedTradesCostUsd.HasValue && commissionsUsd.HasValue
+            ? realUsd.Value + missedTradesCostUsd.Value + commissionsUsd.Value - theoreticalNetUsd.Value
+            : (decimal?)null;
+
+        if (hasConversionPrices)
+        {
+            Console.WriteLine("Aggregated USD values using last available close prices:");
+            Console.WriteLine(theoreticalUsd.HasValue
+                ? $" - Theoretical PnL (gross): {theoreticalUsd.Value}"
+                : " - Theoretical PnL could not be fully converted to USD.");
+            Console.WriteLine(theoreticalTradingCostUsd.HasValue
+                ? $" - Theoretical costs ($10/M): {theoreticalTradingCostUsd.Value}"
+                : " - Theoretical costs could not be computed.");
+            Console.WriteLine(theoreticalNetUsd.HasValue
+                ? $" - Theoretical PnL (net): {theoreticalNetUsd.Value}"
+                : " - Theoretical net PnL could not be computed.");
+            Console.WriteLine(realUsd.HasValue
+                ? $" - Real PnL (gross): {realUsd.Value}"
+                : " - Real PnL could not be fully converted to USD.");
+            Console.WriteLine(commissionsUsd.HasValue
+                ? $" - Commissions ($5/M): {commissionsUsd.Value}"
+                : " - Commissions could not be computed.");
+            Console.WriteLine(missedTradesCostUsd.HasValue
+                ? $" - Missed trades PnL (as cost): {missedTradesCostUsd.Value}"
+                : " - Missed trades PnL could not be fully converted to USD.");
+            Console.WriteLine(executionSlippageUsd.HasValue
+                ? $" - Execution slippage: {executionSlippageUsd.Value}"
+                : " - Execution slippage could not be computed.");
+            Console.WriteLine(slippageCost.HasValue
+                ? $" - Legacy slippage and missed trade cost (USD): {slippageCost.Value}"
+                : " - Legacy slippage and missed trade cost could not be aggregated to USD.");
+        }
+        else
+        {
+            Console.WriteLine(hasConversionPrices
+                ? "Conversion rates were partially unavailable; USD aggregation skipped."
+                : "Price bars were not available; USD aggregation skipped.");
+        }
 
         return new SlippageResult(
             tradingDate,
@@ -272,7 +304,12 @@ ORDER BY Symbol, BarTimeUtc";
             theoreticalUsd,
             realUsd,
             slippageCost,
-            hasConversionPrices);
+            hasConversionPrices,
+            theoreticalTradingCostUsd,
+            theoreticalNetUsd,
+            missedTradesCostUsd,
+            commissionsUsd,
+            executionSlippageUsd);
     }
 
     private IReadOnlyCollection<FillRow> ConvertOrdersToTheoreticalFills(
@@ -480,6 +517,42 @@ ORDER BY Symbol, BarTimeUtc";
         }
 
         return augmented;
+    }
+
+    private decimal? CalculateTotalNotionalUsd(
+        IReadOnlyCollection<FillRow> fills,
+        IReadOnlyDictionary<string, List<(string Target, decimal Rate)>> conversionGraph)
+    {
+        if (fills.Count == 0)
+        {
+            return 0m;
+        }
+
+        var totalUsd = 0m;
+        var convertedAny = false;
+
+        foreach (var fill in fills)
+        {
+            if (!fill.ExecutePrice.HasValue || !fill.ExecuteSize.HasValue)
+            {
+                continue;
+            }
+
+            if (!CurrencyPairParser.TryParse(fill.Symbol, out var pair) || string.IsNullOrWhiteSpace(pair.QuoteCurrency))
+            {
+                continue;
+            }
+
+            var notionalQuote = Math.Abs(fill.ExecutePrice.Value * fill.ExecuteSize.Value);
+
+            if (TryConvertToUsd(notionalQuote, pair.QuoteCurrency, conversionGraph, out var notionalUsd))
+            {
+                totalUsd += notionalUsd;
+                convertedAny = true;
+            }
+        }
+
+        return convertedAny ? totalUsd : (decimal?)null;
     }
 
     private static decimal GetCashFlowSideMultiplier(string? side)
