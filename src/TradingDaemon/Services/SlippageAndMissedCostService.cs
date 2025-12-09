@@ -127,7 +127,12 @@ ORDER BY Symbol, BarTimeUtc";
                 null,
                 null,
                 null,
-                false);
+                false,
+                null,
+                null,
+                null,
+                null,
+                null);
         }
 
         var priceBarsDefinition = new CommandDefinition(
