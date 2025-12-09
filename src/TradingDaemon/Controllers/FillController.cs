@@ -1,6 +1,8 @@
 using System.Collections.Generic;
 using System.Linq;
 using Dapper;
+using Microsoft.AspNetCore.OpenApi;
+using Microsoft.OpenApi.Models;
 using Microsoft.Extensions.Logging;
 using TradingDaemon.Data;
 using TradingDaemon.Models;
@@ -92,6 +94,32 @@ public static class FillController
                 TotalNetExposure = totalNetExposure,
                 Positions = positions
             });
+        })
+        .WithName("GetPnlAndSendEmail")
+        .Produces(StatusCodes.Status200OK)
+        .ProducesProblem(StatusCodes.Status500InternalServerError)
+        .WithOpenApi(op =>
+        {
+            op.Summary = "Compute PnL and send notification email.";
+            op.Description = "Calculates PnL for the specified trading date using fills and weights, sends an email report, and returns the computed details.";
+
+            var dateParameter = op.Parameters.SingleOrDefault(p => string.Equals(p.Name, "date", StringComparison.OrdinalIgnoreCase));
+            if (dateParameter is not null)
+            {
+                dateParameter.Description = "Trading date used to retrieve fills and weights (UTC).";
+            }
+
+            op.Responses[StatusCodes.Status200OK.ToString()] = new OpenApiResponse
+            {
+                Description = "PnL calculated and email notification sent successfully."
+            };
+
+            op.Responses[StatusCodes.Status500InternalServerError.ToString()] = new OpenApiResponse
+            {
+                Description = "The PnL email notification failed to send."
+            };
+
+            return op;
         });
     }
 }
