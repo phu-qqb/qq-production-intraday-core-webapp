@@ -241,34 +241,40 @@ ORDER BY Symbol, BarTimeUtc";
         }
 
         var missedTrades = IdentifyMissedTrades(orders, fills, barsBySymbol, _timeframeMinutes);
-        Console.WriteLine($"Missed trades for {tradingDate:yyyy-MM-dd}:");
-        if (missedTrades.Count == 0)
-        {
-            Console.WriteLine(" - None");
-        }
-        else
-        {
-            foreach (var trade in missedTrades.OrderBy(m => m.Symbol, StringComparer.OrdinalIgnoreCase)
-                         .ThenBy(m => m.BarTimeUtc))
-            {
-                Console.WriteLine(
-                    $" - {trade.Symbol} at {trade.BarTimeUtc:HH:mm} UTC | Target: {trade.TargetSize}, Filled: {trade.FilledSize}, " +
-                    $"Diff: {trade.SizeDifference}, Price Δ: {trade.PriceDelta}, Missed PnL: {trade.MissedPnl}");
-            }
-        }
+        //Console.WriteLine($"Missed trades for {tradingDate:yyyy-MM-dd}:");
+        //if (missedTrades.Count == 0)
+        //{
+        //    Console.WriteLine(" - None");
+        //}
+        //else
+        //{
+        //    foreach (var trade in missedTrades.OrderBy(m => m.Symbol, StringComparer.OrdinalIgnoreCase)
+        //                 .ThenBy(m => m.BarTimeUtc))
+        //    {
+        //        Console.WriteLine(
+        //            $" - {trade.Symbol} at {trade.BarTimeUtc:HH:mm} UTC | Target: {trade.TargetSize}, Filled: {trade.FilledSize}, " +
+        //            $"Diff: {trade.SizeDifference}, Price Δ: {trade.PriceDelta}, Missed PnL: {trade.MissedPnl}");
+        //    }
+        //}
 
         var totalMissedUsd = AggregateMissedPnlUsd(missedTrades, conversionGraph);
         var missedTradesCostUsd = totalMissedUsd.HasValue ? -totalMissedUsd.Value : (decimal?)null;
         Console.WriteLine(missedTradesCostUsd.HasValue
-            ? $"Total missed PnL (USD as cost): {missedTradesCostUsd.Value}"
+            ? $"Total missed PnL: {missedTradesCostUsd.Value}"
             : "Total missed PnL could not be fully converted to USD.");
 
         var executionSlippageUsd = realUsd.HasValue && theoreticalNetUsd.HasValue && missedTradesCostUsd.HasValue && commissionsUsd.HasValue
-            ? realUsd.Value + missedTradesCostUsd.Value + commissionsUsd.Value - theoreticalNetUsd.Value
+            ? realUsd.Value - missedTradesCostUsd.Value + commissionsUsd.Value - theoreticalNetUsd.Value
             : (decimal?)null;
 
         if (hasConversionPrices)
         {
+            Console.WriteLine(realUsd.HasValue
+                ? $" - Real PnL (net): {realUsd.Value}"
+                : " - Real PnL could not be fully converted to USD.");
+            Console.WriteLine(theoreticalNetUsd.HasValue
+                ? $" - Theoretical PnL (net): {theoreticalNetUsd.Value}"
+                : " - Theoretical net PnL could not be computed.");
             Console.WriteLine("Aggregated USD values using last available close prices:");
             Console.WriteLine(theoreticalUsd.HasValue
                 ? $" - Theoretical PnL (gross): {theoreticalUsd.Value}"
@@ -276,12 +282,6 @@ ORDER BY Symbol, BarTimeUtc";
             Console.WriteLine(theoreticalTradingCostUsd.HasValue
                 ? $" - Theoretical costs ($10/M): {theoreticalTradingCostUsd.Value}"
                 : " - Theoretical costs could not be computed.");
-            Console.WriteLine(theoreticalNetUsd.HasValue
-                ? $" - Theoretical PnL (net): {theoreticalNetUsd.Value}"
-                : " - Theoretical net PnL could not be computed.");
-            Console.WriteLine(realUsd.HasValue
-                ? $" - Real PnL (gross): {realUsd.Value}"
-                : " - Real PnL could not be fully converted to USD.");
             Console.WriteLine(commissionsUsd.HasValue
                 ? $" - Commissions ($5/M): {commissionsUsd.Value}"
                 : " - Commissions could not be computed.");
@@ -291,9 +291,6 @@ ORDER BY Symbol, BarTimeUtc";
             Console.WriteLine(executionSlippageUsd.HasValue
                 ? $" - Execution slippage: {executionSlippageUsd.Value}"
                 : " - Execution slippage could not be computed.");
-            Console.WriteLine(slippageCost.HasValue
-                ? $" - Legacy slippage and missed trade cost (USD): {slippageCost.Value}"
-                : " - Legacy slippage and missed trade cost could not be aggregated to USD.");
         }
         else
         {
