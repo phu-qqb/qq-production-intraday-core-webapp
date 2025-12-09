@@ -644,6 +644,16 @@ ORDER BY Symbol, BarTimeUtc";
         IReadOnlyDictionary<string, List<PriceBarRow>> barsBySymbol,
         int timeframeMinutes)
     {
+        static decimal AdjustClose(decimal close, bool invert)
+        {
+            if (!invert)
+            {
+                return close;
+            }
+
+            return close != 0m ? 1m / close : 0m;
+        }
+
         var missedTrades = new List<MissedTrade>();
 
         var fillsBySymbol = fills
@@ -663,10 +673,21 @@ ORDER BY Symbol, BarTimeUtc";
         foreach (var orderGroup in ordersBySymbol)
         {
             var normalizedSymbol = orderGroup.Key;
+            var invertPrices = false;
+            List<PriceBarRow>? bars;
 
-            if (!barsBySymbol.TryGetValue(normalizedSymbol, out var bars) || bars.Count == 0)
+            if (!barsBySymbol.TryGetValue(normalizedSymbol, out bars) || bars.Count == 0)
             {
-                continue;
+                var reversedSymbol = TryGetReversedSymbol(normalizedSymbol);
+
+                if (reversedSymbol is null
+                    || !barsBySymbol.TryGetValue(reversedSymbol, out bars)
+                    || bars.Count == 0)
+                {
+                    continue;
+                }
+
+                invertPrices = true;
             }
 
             var symbolFills = fillsBySymbol.TryGetValue(normalizedSymbol, out var fillsList)
@@ -690,7 +711,11 @@ ORDER BY Symbol, BarTimeUtc";
                 var previousBar = bars[barIndex - 1];
                 var nextBar = bars[barIndex + 1];
 
-                if (currentBar.Close == 0m || previousBar.Close == 0m)
+                var currentClose = AdjustClose(currentBar.Close, invertPrices);
+                var previousClose = AdjustClose(previousBar.Close, invertPrices);
+                var nextClose = AdjustClose(nextBar.Close, invertPrices);
+
+                if (currentClose == 0m || previousClose == 0m)
                 {
                     continue;
                 }
@@ -717,11 +742,11 @@ ORDER BY Symbol, BarTimeUtc";
 
                 if (!string.Equals(pair.BaseCurrency, "USD", StringComparison.OrdinalIgnoreCase)
                     && string.Equals(pair.QuoteCurrency, "USD", StringComparison.OrdinalIgnoreCase)
-                    && currentBar.Close != 0m)
+                    && currentClose != 0m)
                 {
-                    targetSize *= currentBar.Close;
-                    filledSize *= currentBar.Close;
-                    priceDelta /= currentBar.Close;
+                    targetSize *= currentClose;
+                    filledSize *= currentClose;
+                    priceDelta /= currentClose;
                 }
 
                 var sizeDifference = targetSize - filledSize;
@@ -1052,6 +1077,17 @@ ORDER BY Symbol, BarTimeUtc";
             .Replace(" ", string.Empty);
 
         return normalized;
+    }
+
+    private static string? TryGetReversedSymbol(string normalizedSymbol)
+    {
+        if (!CurrencyPairParser.TryParse(normalizedSymbol, out var pair))
+        {
+            return null;
+        }
+
+        var reversed = NormalizeSymbol(pair.ReversedFormattedSymbol);
+        return reversed.Length > 0 ? reversed : null;
     }
 
     private static IReadOnlyCollection<SymbolQuery> BuildSymbolQueries(IEnumerable<string> symbols)
