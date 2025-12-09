@@ -77,13 +77,13 @@ public class EmailNotificationService : IEmailNotificationService, IDisposable
         {
             sb.AppendLine($"Date: {report.TradingDate:yyyy-MM-dd}");
             sb.AppendLine("Execution summary:");
-            sb.AppendLine($"- Theoretical pnl (gross) = {FormatOptionalPnl(slippageResult.TheoreticalPnlUsd)}");
-            sb.AppendLine($"- Theoretical costs ($10/M) = {FormatOptionalPnl(slippageResult.TheoreticalTradingCostUsd)}");
-            sb.AppendLine($"- Theoretical pnl (net) = {FormatOptionalPnl(slippageResult.TheoreticalNetPnlUsd)}");
-            sb.AppendLine($"- Missed trades pnl = {FormatOptionalPnl(slippageResult.MissedTradesPnlUsd)}");
-            sb.AppendLine($"- Commissions = {FormatOptionalPnl(slippageResult.CommissionsUsd)}");
-            sb.AppendLine($"- Execution slippage = {FormatOptionalPnl(slippageResult.ExecutionSlippageUsd)}");
-            sb.AppendLine($"- Real pnl = {FormatOptionalPnl(slippageResult.RealPnlUsd)}");
+            sb.AppendLine($"- Real PnL (net): {FormatOptionalPnl(slippageResult.RealPnlUsd)}");
+            sb.AppendLine($"- Theoretical PnL (net): {FormatOptionalPnl(slippageResult.TheoreticalNetPnlUsd)}");
+            sb.AppendLine($"- Theoretical PnL (gross): {FormatOptionalPnl(slippageResult.TheoreticalPnlUsd)}");
+            sb.AppendLine($"- Theoretical costs ($10/M): {FormatOptionalPnl(slippageResult.TheoreticalTradingCostUsd)}");
+            sb.AppendLine($"- Commissions ($5/M): {FormatOptionalPnl(slippageResult.CommissionsUsd)}");
+            sb.AppendLine($"- Missed trades PnL: {FormatOptionalPnl(slippageResult.MissedTradesPnlUsd)}");
+            sb.AppendLine($"- Execution slippage: {FormatOptionalPnl(slippageResult.ExecutionSlippageUsd)}");
             sb.AppendLine();
             sb.AppendLine($"Gross Market Value: {FormatPnl(report.GrossMarketValue)}");
             sb.AppendLine($"Total Net Exposure: {FormatPnl(report.TotalNetExposure)}");
@@ -135,32 +135,32 @@ public class EmailNotificationService : IEmailNotificationService, IDisposable
             sb.Append("<h2>Execution summary</h2><ul>");
             sb.AppendFormat(
                 CultureInfo.InvariantCulture,
-                "<li>Theoretical pnl (gross) = {0}</li>",
-                WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.TheoreticalPnlUsd)));
+                "<li>Real PnL (net): {0}</li>",
+                WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.RealPnlUsd)));
             sb.AppendFormat(
                 CultureInfo.InvariantCulture,
-                "<li>Theoretical costs ($10/M) = {0}</li>",
-                WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.TheoreticalTradingCostUsd)));
-            sb.AppendFormat(
-                CultureInfo.InvariantCulture,
-                "<li>Theoretical pnl (net) = {0}</li>",
+                "<li>Theoretical PnL (net): {0}</li>",
                 WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.TheoreticalNetPnlUsd)));
             sb.AppendFormat(
                 CultureInfo.InvariantCulture,
-                "<li>Missed trades pnl = {0}</li>",
-                WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.MissedTradesPnlUsd)));
+                "<li>Theoretical PnL (gross): {0}</li>",
+                WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.TheoreticalPnlUsd)));
             sb.AppendFormat(
                 CultureInfo.InvariantCulture,
-                "<li>Commissions = {0}</li>",
+                "<li>Theoretical costs ($10/M): {0}</li>",
+                WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.TheoreticalTradingCostUsd)));
+            sb.AppendFormat(
+                CultureInfo.InvariantCulture,
+                "<li>Commissions ($5/M): {0}</li>",
                 WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.CommissionsUsd)));
             sb.AppendFormat(
                 CultureInfo.InvariantCulture,
-                "<li>Execution slippage = {0}</li>",
-                WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.ExecutionSlippageUsd)));
+                "<li>Missed trades PnL: {0}</li>",
+                WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.MissedTradesPnlUsd)));
             sb.AppendFormat(
                 CultureInfo.InvariantCulture,
-                "<li>Real pnl = {0}</li>",
-                WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.RealPnlUsd)));
+                "<li>Execution slippage: {0}</li>",
+                WebUtility.HtmlEncode(FormatOptionalPnl(slippageResult.ExecutionSlippageUsd)));
             sb.Append("</ul>");
         }
 
@@ -189,11 +189,10 @@ public class EmailNotificationService : IEmailNotificationService, IDisposable
         if (slippageResult is not null)
         {
             sb.Append("<h2>PnL by currency</h2>");
-            sb.Append("<h3>Theoretical PnL by currency (USD basis)</h3>");
-            AppendPnlTable(sb, slippageResult.TheoreticalPnlByCurrency);
-
-            sb.Append("<h3>Real PnL by currency (USD using last available close)</h3>");
-            AppendPnlTable(sb, slippageResult.RealPnlByCurrency);
+            AppendCombinedPnlTable(
+                sb,
+                slippageResult.TheoreticalPnlByCurrency,
+                slippageResult.RealPnlByCurrency);
 
             sb.Append(
                 "<p><em>Note: Theoretical and real PnL values are presented in USD using the last available close prices (currency list retained for clarity).</em></p>");
@@ -220,24 +219,44 @@ public class EmailNotificationService : IEmailNotificationService, IDisposable
         }
     }
 
-    private static void AppendPnlTable(StringBuilder sb, IReadOnlyDictionary<string, decimal> pnlByCurrency)
+    private static void AppendCombinedPnlTable(
+        StringBuilder sb,
+        IReadOnlyDictionary<string, decimal> theoreticalPnlByCurrency,
+        IReadOnlyDictionary<string, decimal> realPnlByCurrency)
     {
-        if (pnlByCurrency.Count == 0)
+        if (theoreticalPnlByCurrency.Count == 0 && realPnlByCurrency.Count == 0)
         {
             sb.Append("<p>(no data)</p>");
             return;
         }
 
-        sb.Append("<table border=\"1\" cellpadding=\"6\" cellspacing=\"0\"><thead><tr><th>Currency</th><th>PnL</th></tr></thead><tbody>");
-        foreach (var entry in pnlByCurrency.OrderBy(e => e.Key, StringComparer.OrdinalIgnoreCase))
+        var currencies = theoreticalPnlByCurrency.Keys
+            .Union(realPnlByCurrency.Keys, StringComparer.OrdinalIgnoreCase)
+            .OrderBy(c => c, StringComparer.OrdinalIgnoreCase);
+
+        sb.Append(
+            "<table border=\"1\" cellpadding=\"6\" cellspacing=\"0\"><thead><tr><th>Currency</th>" +
+            "<th>Theoretical PnL (USD basis)</th><th>Real PnL (USD using last available close)</th></tr></thead><tbody>");
+
+        foreach (var currency in currencies)
         {
             sb.Append("<tr>");
-            sb.AppendFormat(CultureInfo.InvariantCulture, "<td>{0}</td>", WebUtility.HtmlEncode(entry.Key));
-            sb.AppendFormat(CultureInfo.InvariantCulture, "<td>{0}</td>", WebUtility.HtmlEncode(FormatPnl(entry.Value)));
+            sb.AppendFormat(CultureInfo.InvariantCulture, "<td>{0}</td>", WebUtility.HtmlEncode(currency));
+            sb.AppendFormat(
+                CultureInfo.InvariantCulture,
+                "<td>{0}</td>",
+                WebUtility.HtmlEncode(FormatOptionalPnl(GetValueOrNull(theoreticalPnlByCurrency, currency))));
+            sb.AppendFormat(
+                CultureInfo.InvariantCulture,
+                "<td>{0}</td>",
+                WebUtility.HtmlEncode(FormatOptionalPnl(GetValueOrNull(realPnlByCurrency, currency))));
             sb.Append("</tr>");
         }
 
         sb.Append("</tbody></table>");
+
+        static decimal? GetValueOrNull(IReadOnlyDictionary<string, decimal> source, string key)
+            => source.TryGetValue(key, out var value) ? value : (decimal?)null;
     }
 
     private static string FormatPnl(decimal value)
