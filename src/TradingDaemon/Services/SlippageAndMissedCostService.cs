@@ -737,7 +737,8 @@ ORDER BY Symbol, BarTimeUtc";
                 var targetSize = (order.SizeValue ?? 0m) * (order.Aum ?? 0m) * GetSideMultiplier(order.Side);
                 var filledSize = cumulativeFilled;
 
-                var priceDelta = nextClose - currentClose;
+                var priceDelta = nextBar.Close - currentBar.Close;
+                var pnlCurrency = pair.QuoteCurrency;
 
                 if (!string.Equals(pair.BaseCurrency, "USD", StringComparison.OrdinalIgnoreCase)
                     && string.Equals(pair.QuoteCurrency, "USD", StringComparison.OrdinalIgnoreCase)
@@ -757,6 +758,14 @@ ORDER BY Symbol, BarTimeUtc";
 
                 var missedPnl = sizeDifference * priceDelta;
 
+                if (!string.Equals(pair.QuoteCurrency, "USD", StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(pair.BaseCurrency, "USD", StringComparison.OrdinalIgnoreCase)
+                    && currentBar.Close != 0m)
+                {
+                    missedPnl /= currentBar.Close;
+                    pnlCurrency = "USD";
+                }
+
                 missedTrades.Add(new MissedTrade(
                     order.Symbol,
                     currentBar.BarTimeUtc,
@@ -765,7 +774,7 @@ ORDER BY Symbol, BarTimeUtc";
                     sizeDifference,
                     priceDelta,
                     missedPnl,
-                    pair.QuoteCurrency));
+                    pnlCurrency));
             }
         }
 
