@@ -243,21 +243,21 @@ ORDER BY Symbol, BarTimeUtc";
         }
 
         var missedTrades = IdentifyMissedTrades(orders, fills, barsBySymbol, _timeframeMinutes);
-        Console.WriteLine($"Missed trades for {tradingDate:yyyy-MM-dd}:");
-        if (missedTrades.Count == 0)
-        {
-            Console.WriteLine(" - None");
-        }
-        else
-        {
-            foreach (var trade in missedTrades.OrderBy(m => m.Symbol, StringComparer.OrdinalIgnoreCase)
-                         .ThenBy(m => m.BarTimeUtc))
-            {
-                Console.WriteLine(
-                    $" - {trade.Symbol} at {trade.BarTimeUtc:HH:mm} UTC | Target: {trade.TargetSize}, Filled: {trade.FilledSize}, " +
-                    $"Diff: {trade.SizeDifference}, Price Δ: {trade.PriceDelta}, Missed PnL: {trade.MissedPnl}");
-            }
-        }
+        //Console.WriteLine($"Missed trades for {tradingDate:yyyy-MM-dd}:");
+        //if (missedTrades.Count == 0)
+        //{
+        //    Console.WriteLine(" - None");
+        //}
+        //else
+        //{
+        //    foreach (var trade in missedTrades.OrderBy(m => m.Symbol, StringComparer.OrdinalIgnoreCase)
+        //                 .ThenBy(m => m.BarTimeUtc))
+        //    {
+        //        Console.WriteLine(
+        //            $" - {trade.Symbol} at {trade.BarTimeUtc:HH:mm} UTC | Target: {trade.TargetSize}, Filled: {trade.FilledSize}, " +
+        //            $"Diff: {trade.SizeDifference}, Price Δ: {trade.PriceDelta}, Missed PnL: {trade.MissedPnl}");
+        //    }
+        //}
 
         var totalMissedUsd = AggregateMissedPnlUsd(missedTrades, conversionGraph);
         var missedTradesCostUsd = totalMissedUsd.HasValue ? -totalMissedUsd.Value : (decimal?)null;
@@ -270,7 +270,7 @@ ORDER BY Symbol, BarTimeUtc";
         if (hasConversionPrices)
         {
             Console.WriteLine(realUsd.HasValue
-                ? $" - Real PnL (net): {realUsd.Value}"
+                ? $" - Real PnL (net): {realUsd.Value - commissionsUsd.Value}"
                 : " - Real PnL could not be fully converted to USD.");
             Console.WriteLine(theoreticalNetUsd.HasValue
                 ? $" - Theoretical PnL (net): {theoreticalNetUsd.Value}"
@@ -784,7 +784,7 @@ ORDER BY Symbol, BarTimeUtc";
 
                 var sizeDifference = targetSize - filledSize;
 
-                if (Math.Abs(sizeDifference) < 1_000m)
+                if (Math.Abs(sizeDifference) < 50_000m)
                 {
                     continue;
                 }
