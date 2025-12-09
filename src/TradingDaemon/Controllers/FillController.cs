@@ -1,7 +1,9 @@
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using Dapper;
 using Microsoft.AspNetCore.OpenApi;
+using Microsoft.OpenApi.Any;
 using Microsoft.OpenApi.Models;
 using Microsoft.Extensions.Logging;
 using TradingDaemon.Data;
@@ -26,16 +28,23 @@ public static class FillController
         });
 
 
-        app.MapGet("/api/pnl", async (DateTime date, DapperContext context, IEmailNotificationService emailNotificationService, ILogger<FillEndpointsLogger> logger) =>
+        app.MapGet("/api/pnl", async (string date, DapperContext context, IEmailNotificationService emailNotificationService, ILogger<FillEndpointsLogger> logger) =>
 
         {
+            if (string.IsNullOrWhiteSpace(date) ||
+                !DateTime.TryParseExact(date, "yyyyMMdd", CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var parsedDate))
+            {
+                return Results.BadRequest("The date query parameter must be formatted as yyyyMMdd (UTC).");
+            }
+
             using var connection = context.CreateConnection();
             var fillsSql = "SELECT * FROM fills WHERE DATE(timestamp) = @Date";
             logger.LogInformation("Executing SQL: {Sql}", fillsSql);
-            var fills = await connection.QueryAsync<Fill>(fillsSql, new { Date = date.Date });
+            var fills = await connection.QueryAsync<Fill>(fillsSql, new { Date = parsedDate.Date });
             var weightsSql = "SELECT * FROM weights WHERE DATE(asof) = @Date";
             logger.LogInformation("Executing SQL: {Sql}", weightsSql);
-            var weights = await connection.QueryAsync<Weight>(weightsSql, new { Date = date.Date });
+            var weights = await connection.QueryAsync<Weight>(weightsSql, new { Date = parsedDate.Date });
 
             var pnl = (from f in fills
                        join w in weights on f.Symbol equals w.Symbol
@@ -74,7 +83,7 @@ public static class FillController
 
             var grossMarketValue = positions.Sum(p => Math.Abs(p.MarketValueUsd ?? 0m));
             var totalNetExposure = positions.Sum(p => p.MarketValueUsd ?? 0m);
-            var report = new PnlReport(DateOnly.FromDateTime(date.Date), pnl, grossMarketValue, totalNetExposure, positions);
+            var report = new PnlReport(DateOnly.FromDateTime(parsedDate.Date), pnl, grossMarketValue, totalNetExposure, positions);
 
             try
             {
@@ -88,7 +97,7 @@ public static class FillController
 
             return Results.Ok(new
             {
-                Date = date.Date,
+                Date = parsedDate.Date,
                 PnL = pnl,
                 GrossMarketValue = grossMarketValue,
                 TotalNetExposure = totalNetExposure,
@@ -97,6 +106,7 @@ public static class FillController
         })
         .WithName("GetPnlAndSendEmail")
         .Produces(StatusCodes.Status200OK)
+        .Produces(StatusCodes.Status400BadRequest)
         .ProducesProblem(StatusCodes.Status500InternalServerError)
         .WithOpenApi(op =>
         {
@@ -106,12 +116,18 @@ public static class FillController
             var dateParameter = op.Parameters.SingleOrDefault(p => string.Equals(p.Name, "date", StringComparison.OrdinalIgnoreCase));
             if (dateParameter is not null)
             {
-                dateParameter.Description = "Trading date used to retrieve fills and weights (UTC).";
+                dateParameter.Description = "Trading date used to retrieve fills and weights (UTC) in yyyyMMdd format.";
+                dateParameter.Example = new OpenApiString("20240115");
             }
 
             op.Responses[StatusCodes.Status200OK.ToString()] = new OpenApiResponse
             {
                 Description = "PnL calculated and email notification sent successfully."
+            };
+
+            op.Responses[StatusCodes.Status400BadRequest.ToString()] = new OpenApiResponse
+            {
+                Description = "The provided date parameter is missing or not in yyyyMMdd format."
             };
 
             op.Responses[StatusCodes.Status500InternalServerError.ToString()] = new OpenApiResponse
