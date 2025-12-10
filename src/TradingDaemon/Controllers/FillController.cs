@@ -39,10 +39,10 @@ public static class FillController
             }
 
             using var connection = context.CreateConnection();
-            var fillsSql = "SELECT * FROM fills WHERE DATE(timestamp) = @Date";
+            var fillsSql = "SELECT * FROM fills WHERE CAST([timestamp] AS date) = @Date";
             logger.LogInformation("Executing SQL: {Sql}", fillsSql);
             var fills = await connection.QueryAsync<Fill>(fillsSql, new { Date = parsedDate.Date });
-            var weightsSql = "SELECT * FROM weights WHERE DATE(asof) = @Date";
+            var weightsSql = "SELECT * FROM weights WHERE CAST(asof AS date) = @Date";
             logger.LogInformation("Executing SQL: {Sql}", weightsSql);
             var weights = await connection.QueryAsync<Weight>(weightsSql, new { Date = parsedDate.Date });
 
