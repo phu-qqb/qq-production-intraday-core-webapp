@@ -38,11 +38,11 @@ public static class PnlWorkflowController
 
             logger.LogInformation(
                 "PnL automation workflow completed for {TradingDate} with PnL {Pnl}.",
-                result.Report.Date,
+                result.Report.TradingDate,
                 result.Report.Pnl);
 
             return TypedResults.Ok(new PnlWorkflowResponse(
-                result.Report.Date,
+                result.Report.TradingDate,
                 result.Report.Pnl,
                 result.Report.GrossMarketValue,
                 result.Report.TotalNetExposure,
