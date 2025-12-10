@@ -17,18 +17,18 @@ public static class FillController
 {
     public static void MapFillEndpoints(this IEndpointRouteBuilder app)
     {
-        app.MapPost("/api/fills", async (Fill fill, DapperContext context) =>
+        app.MapPost("/api/fills", async (Fill fill, DapperContext context, IDatabaseObjectNameProvider databaseObjectNameProvider) =>
         {
             using var connection = context.CreateConnection();
-            var sql = @"INSERT INTO fills (symbol, quantity, price, timestamp)
-                        VALUES (@Symbol, @Quantity, @Price, @Timestamp)";
+            var fillTable = databaseObjectNameProvider.GetObjectName(DatabaseObjects.WakettFill);
+            var sql = $"INSERT INTO {fillTable} (symbol, quantity, price, timestamp)\n                        VALUES (@Symbol, @Quantity, @Price, @Timestamp)";
             Console.WriteLine($"Executing SQL: {sql}");
             await connection.ExecuteAsync(sql, fill);
             return Results.Created($"/api/fills/{fill.Id}", fill);
         });
 
 
-        app.MapGet("/api/pnl", async (string date, DapperContext context, IEmailNotificationService emailNotificationService, ILogger<FillEndpointsLogger> logger) =>
+        app.MapGet("/api/pnl", async (string date, DapperContext context, IDatabaseObjectNameProvider databaseObjectNameProvider, IEmailNotificationService emailNotificationService, ILogger<FillEndpointsLogger> logger) =>
 
         {
             if (string.IsNullOrWhiteSpace(date) ||
@@ -39,7 +39,8 @@ public static class FillController
             }
 
             using var connection = context.CreateConnection();
-            var fillsSql = "SELECT * FROM fills WHERE CAST([timestamp] AS date) = @Date";
+            var fillTable = databaseObjectNameProvider.GetObjectName(DatabaseObjects.WakettFill);
+            var fillsSql = $"SELECT * FROM {fillTable} WHERE CAST([timestamp] AS date) = @Date";
             logger.LogInformation("Executing SQL: {Sql}", fillsSql);
             var fills = await connection.QueryAsync<Fill>(fillsSql, new { Date = parsedDate.Date });
             var weightsSql = "SELECT * FROM weights WHERE CAST(asof AS date) = @Date";
