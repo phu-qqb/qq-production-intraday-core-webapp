@@ -201,7 +201,7 @@ public class EmailNotificationService : IEmailNotificationService, IDisposable
 
         sb.Append(
             "<table border=\"1\" cellpadding=\"6\" cellspacing=\"0\"><thead><tr><th>Currency</th>" +
-            "<th>Theoretical PnL (USD basis)</th><th>Real PnL (USD using last available close)</th></tr></thead><tbody>");
+            "<th>Theoretical PnL</th><th>Real PnL</th></tr></thead><tbody>");
 
         foreach (var currency in currencies)
         {
