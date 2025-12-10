@@ -204,7 +204,7 @@ public sealed class WakettAutomationService : BackgroundService
                 while (nowUtc >= nextPnlReportUtc)
                 {
                     var scheduledRunUtc = nextPnlReportUtc;
-                    await _pnlWorkflowRunner.RunAsync(stoppingToken);
+                    await _pnlWorkflowRunner.RunAsync(null, stoppingToken);
                     nextPnlReportUtc = GetNextSessionEventUtc(
                         scheduledRunUtc.AddSeconds(1),
                         PnlReportOffsets,

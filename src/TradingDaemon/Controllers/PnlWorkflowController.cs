@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using System.Globalization;
 using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.AspNetCore.OpenApi;
 using Microsoft.OpenApi.Any;
@@ -12,16 +13,35 @@ public static class PnlWorkflowController
 {
     public static void MapPnlWorkflowEndpoints(this IEndpointRouteBuilder app)
     {
-        app.MapPost("/api/pnl/workflow/run", async Task<Results<Ok<PnlWorkflowResponse>, ProblemHttpResult>> (
+        app.MapPost("/api/pnl/workflow/run", async Task<Results<Ok<PnlWorkflowResponse>, ProblemHttpResult, BadRequest<string>>> (
+            PnlWorkflowRequest? request,
             PnlWorkflowRunner workflowRunner,
             ILogger<PnlWorkflowEndpointsLogger> logger,
             CancellationToken cancellationToken) =>
         {
+            DateOnly? tradingDate = null;
+
+            if (!string.IsNullOrWhiteSpace(request?.TradingDate))
+            {
+                if (!DateTime.TryParseExact(
+                        request!.TradingDate,
+                        "yyyyMMdd",
+                        CultureInfo.InvariantCulture,
+                        DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                        out var parsedDate))
+                {
+                    return TypedResults.BadRequest(
+                        "The tradingDate field must be formatted as yyyyMMdd (UTC). Use an empty body to run for today.");
+                }
+
+                tradingDate = DateOnly.FromDateTime(parsedDate.Date);
+            }
+
             PnlWorkflowResult? result;
 
             try
             {
-                result = await workflowRunner.RunAsync(cancellationToken);
+                result = await workflowRunner.RunAsync(tradingDate, cancellationToken);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
@@ -49,14 +69,39 @@ public static class PnlWorkflowController
                 result.SlippageResult));
         })
         .WithName("RunAutomatedPnlWorkflow")
+        .Produces(StatusCodes.Status400BadRequest)
         .Produces<PnlWorkflowResponse>()
         .ProducesProblem(StatusCodes.Status500InternalServerError)
         .WithOpenApi(op =>
         {
             op.Summary = "Run the Wakett PnL email automation.";
             op.Description =
-                "Computes slippage and missed trade costs for the current trading day, recomputes and stores the PnL report, " +
+                "Computes slippage and missed trade costs for the requested trading day (defaulting to today), recomputes and stores the PnL report, " +
                 "and sends the automated PnL email notification.";
+
+            op.RequestBody = new OpenApiRequestBody
+            {
+                Description = "Optional trading date to run in yyyyMMdd (UTC). If omitted, the workflow runs for today.",
+                Required = false,
+                Content = new Dictionary<string, OpenApiMediaType>
+                {
+                    ["application/json"] = new OpenApiMediaType
+                    {
+                        Schema = new OpenApiSchema
+                        {
+                            Reference = new OpenApiReference
+                            {
+                                Type = ReferenceType.Schema,
+                                Id = nameof(PnlWorkflowRequest)
+                            }
+                        },
+                        Example = new OpenApiObject
+                        {
+                            ["tradingDate"] = new OpenApiString("20240115")
+                        }
+                    }
+                }
+            };
 
             op.Responses[StatusCodes.Status200OK.ToString()] = new OpenApiResponse
             {
@@ -97,9 +142,19 @@ public static class PnlWorkflowController
                 Description = "The PnL workflow failed to complete."
             };
 
+            op.Responses[StatusCodes.Status400BadRequest.ToString()] = new OpenApiResponse
+            {
+                Description = "The provided trading date format is invalid."
+            };
+
             return op;
         });
     }
+}
+
+public sealed class PnlWorkflowRequest
+{
+    public string? TradingDate { get; set; }
 }
 
 public sealed record PnlWorkflowResponse(

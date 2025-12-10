@@ -31,12 +31,17 @@ public sealed class PnlWorkflowRunner
         _timeProvider = timeProvider ?? TimeProvider.System;
     }
 
-    public async Task<PnlWorkflowResult?> RunAsync(CancellationToken cancellationToken)
+    public async Task<PnlWorkflowResult?> RunAsync(DateOnly? tradingDate, CancellationToken cancellationToken)
     {
+        var workflowDate = tradingDate ?? GetCurrentTradingDate();
+
         try
         {
-            var slippageResult = await RunSlippageComputationAsync(cancellationToken);
-            var report = await _pnlReportService.ComputeAndStoreCurrentDayPnlAsync(cancellationToken: cancellationToken);
+            var slippageResult = await RunSlippageComputationAsync(workflowDate, cancellationToken);
+            var workflowClock = GetWorkflowClockUtc(workflowDate);
+            var report = await _pnlReportService.ComputeAndStoreCurrentDayPnlAsync(
+                clock: workflowClock,
+                cancellationToken: cancellationToken);
             await _emailNotificationService.SendPnLReportAsync(report, slippageResult, cancellationToken);
             return new PnlWorkflowResult(report, slippageResult);
         }
@@ -51,11 +56,20 @@ public sealed class PnlWorkflowRunner
         }
     }
 
-    private async Task<SlippageResult?> RunSlippageComputationAsync(CancellationToken cancellationToken)
+    private DateOnly GetCurrentTradingDate()
     {
         var localNow = TimeZoneInfo.ConvertTimeFromUtc(_timeProvider.GetUtcNow().UtcDateTime, NewYorkTimeZone);
-        var tradingDate = DateOnly.FromDateTime(localNow);
+        return DateOnly.FromDateTime(localNow);
+    }
 
+    private static DateTime GetWorkflowClockUtc(DateOnly tradingDate)
+    {
+        var localDateTime = tradingDate.ToDateTime(TimeOnly.MinValue);
+        return TimeZoneInfo.ConvertTimeToUtc(localDateTime, NewYorkTimeZone);
+    }
+
+    private async Task<SlippageResult?> RunSlippageComputationAsync(DateOnly tradingDate, CancellationToken cancellationToken)
+    {
         _logger.LogInformation(
             "Computing slippage and missed trade costs via automation for {TradingDate}.",
             tradingDate);
