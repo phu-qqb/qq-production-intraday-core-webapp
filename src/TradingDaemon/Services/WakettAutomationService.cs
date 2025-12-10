@@ -37,9 +37,7 @@ public sealed class WakettAutomationService : BackgroundService
     private readonly WeightCalculator _weightCalculator;
     private readonly OrderSender _orderSender;
     private readonly WakettTradeFetcher _tradeFetcher;
-    private readonly PnlReportService _pnlReportService;
-    private readonly SlippageAndMissedCostService _slippageAndMissedCostService;
-    private readonly IEmailNotificationService _emailNotificationService;
+    private readonly PnlWorkflowRunner _pnlWorkflowRunner;
     private readonly IHostApplicationLifetime _applicationLifetime;
     private readonly ILogger<WakettAutomationService> _logger;
     private readonly WakettAutomationOptions _options;
@@ -51,9 +49,7 @@ public sealed class WakettAutomationService : BackgroundService
         WeightCalculator weightCalculator,
         OrderSender orderSender,
         WakettTradeFetcher tradeFetcher,
-        PnlReportService pnlReportService,
-        SlippageAndMissedCostService slippageAndMissedCostService,
-        IEmailNotificationService emailNotificationService,
+        PnlWorkflowRunner pnlWorkflowRunner,
         IHostApplicationLifetime applicationLifetime,
         IOptions<WakettAutomationOptions> options,
         ILogger<WakettAutomationService> logger,
@@ -64,9 +60,7 @@ public sealed class WakettAutomationService : BackgroundService
         _weightCalculator = weightCalculator;
         _orderSender = orderSender;
         _tradeFetcher = tradeFetcher;
-        _pnlReportService = pnlReportService;
-        _slippageAndMissedCostService = slippageAndMissedCostService;
-        _emailNotificationService = emailNotificationService;
+        _pnlWorkflowRunner = pnlWorkflowRunner;
         _applicationLifetime = applicationLifetime;
         _logger = logger;
         _options = options?.Value ?? new WakettAutomationOptions();
@@ -210,7 +204,7 @@ public sealed class WakettAutomationService : BackgroundService
                 while (nowUtc >= nextPnlReportUtc)
                 {
                     var scheduledRunUtc = nextPnlReportUtc;
-                    await RunPnlWorkflowAsync(stoppingToken);
+                    await _pnlWorkflowRunner.RunAsync(null, stoppingToken);
                     nextPnlReportUtc = GetNextSessionEventUtc(
                         scheduledRunUtc.AddSeconds(1),
                         PnlReportOffsets,
@@ -344,46 +338,6 @@ public sealed class WakettAutomationService : BackgroundService
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogError(ex, "Wakett order submission failed.");
-        }
-    }
-
-    private async Task RunPnlWorkflowAsync(CancellationToken stoppingToken)
-    {
-        try
-        {
-            var slippageResult = await RunSlippageComputationAsync(stoppingToken);
-            var report = await _pnlReportService.ComputeAndStoreCurrentDayPnlAsync(cancellationToken: stoppingToken);
-            await _emailNotificationService.SendPnLReportAsync(report, slippageResult, stoppingToken);
-        }
-        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to compute or send automated Wakett PnL report.");
-        }
-    }
-
-    private async Task<SlippageResult?> RunSlippageComputationAsync(CancellationToken stoppingToken)
-    {
-        var localNow = TimeZoneInfo.ConvertTimeFromUtc(_timeProvider.GetUtcNow().UtcDateTime, NewYorkTimeZone);
-        var tradingDate = DateOnly.FromDateTime(localNow);
-
-        _logger.LogInformation(
-            "Computing slippage and missed trade costs via automation for {TradingDate}.",
-            tradingDate);
-
-        try
-        {
-            return await _slippageAndMissedCostService.ComputeAsync(
-                new SlippageRequest { Date = tradingDate.ToDateTime(TimeOnly.MinValue) },
-                stoppingToken);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            _logger.LogError(ex, "Failed to compute slippage and missed trade costs via automation.");
-            return null;
         }
     }
 
