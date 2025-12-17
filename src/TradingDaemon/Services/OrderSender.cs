@@ -1028,18 +1028,23 @@ VALUES
             duration += TimeSpan.FromDays(1);
         }
 
-        var start = local.Date + bounds.Start;
-
-        while (true)
+        var todayStart = local.Date + bounds.Start;
+        var todayEnd = todayStart + duration;
+        if (local >= todayStart && local <= todayEnd)
         {
-            var end = start + duration;
-            if (local >= start && local <= end)
-            {
-                return (start, end);
-            }
-
-            start = local < start ? start.AddDays(-1) : start.AddDays(1);
+            return (todayStart, todayEnd);
         }
+
+        var yesterdayStart = todayStart.AddDays(-1);
+        var yesterdayEnd = yesterdayStart + duration;
+        if (local >= yesterdayStart && local <= yesterdayEnd)
+        {
+            return (yesterdayStart, yesterdayEnd);
+        }
+
+        var tomorrowStart = todayStart.AddDays(1);
+        var tomorrowEnd = tomorrowStart + duration;
+        return (tomorrowStart, tomorrowEnd);
     }
 
     private static bool IsWithinSession(DateTime local, (TimeSpan Start, TimeSpan End) bounds)
