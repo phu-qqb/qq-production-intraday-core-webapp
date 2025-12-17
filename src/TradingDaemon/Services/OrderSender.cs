@@ -230,7 +230,7 @@ public class OrderSender
         {
             ts = FormatTimestamp(orderTimestampUtc),
             aum = aum,
-            execution = isFlatOrderRequest ? "EOF" : "EOC",
+            execution = "EAM",
             orders = orders
         };
 

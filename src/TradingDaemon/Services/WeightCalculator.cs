@@ -108,7 +108,13 @@ public class WeightCalculator
             }
             if (!string.IsNullOrWhiteSpace(startDate))
             {
-                scriptArgs.AddRange(new[] { "--secret-name", "qq-intraday-credentials" });
+                var activeEnvironment = _config["Database:ActiveEnvironment"];
+                var secretName = DapperContext.ResolveSecretName(_config, activeEnvironment);
+
+                if (!string.IsNullOrWhiteSpace(secretName))
+                {
+                    scriptArgs.AddRange(new[] { "--secret-name", secretName });
+                }
             }
 
             var sbOut = new StringBuilder();
