@@ -242,49 +242,49 @@ public class OrderSender
                 StringComparer.OrdinalIgnoreCase);
 
         var submissionTimeUtc = _timeProvider.GetUtcNow().UtcDateTime;
-        //var response = await _wakettApiClient.SendOrdersAsync(request);
+        var response = await _wakettApiClient.SendOrdersAsync(request);
         var receivedAtUtc = _timeProvider.GetUtcNow().UtcDateTime;
 
-        //if (response?.Orders is { Count: > 0 })
-        //{
-        //    foreach (var item in response.Orders)
-        //    {
-        //        var resolvedOrderCode = ResolveOrderCode(item.Code, item.Symbol, orderCodeLookup) ?? string.Empty;
+        if (response?.Orders is { Count: > 0 })
+        {
+            foreach (var item in response.Orders)
+            {
+                var resolvedOrderCode = ResolveOrderCode(item.Code, item.Symbol, orderCodeLookup) ?? string.Empty;
 
-        //        if (item.Error is not null)
-        //        {
-        //            _logger.LogError(
-        //                "Wakett rejected order {OrderCode} for {Symbol}: {Code} {Message}.",
-        //                resolvedOrderCode,
-        //                item.Symbol,
-        //                item.Error.Code,
-        //                item.Error.Message);
-        //        }
-        //        else
-        //        {
-        //            _logger.LogInformation(
-        //                "Wakett accepted order {OrderCode} for {Symbol} with side {Side} and {TradeCount} trade(s).",
-        //                resolvedOrderCode,
-        //                item.Symbol,
-        //                item.Side,
-        //                item.Trades?.Count ?? 0);
-        //        }
-        //    }
-        //}
-        //else if (response is null)
-        //{
-        //    _logger.LogWarning("Wakett order submission returned no response body.");
-        //}
+                if (item.Error is not null)
+                {
+                    _logger.LogError(
+                        "Wakett rejected order {OrderCode} for {Symbol}: {Code} {Message}.",
+                        resolvedOrderCode,
+                        item.Symbol,
+                        item.Error.Code,
+                        item.Error.Message);
+                }
+                else
+                {
+                    _logger.LogInformation(
+                        "Wakett accepted order {OrderCode} for {Symbol} with side {Side} and {TradeCount} trade(s).",
+                        resolvedOrderCode,
+                        item.Symbol,
+                        item.Side,
+                        item.Trades?.Count ?? 0);
+                }
+            }
+        }
+        else if (response is null)
+        {
+            _logger.LogWarning("Wakett order submission returned no response body.");
+        }
 
-        //await PersistOrderResponseAsync(
-        //    connection,
-        //    request,
-        //    response,
-        //    orderCodeLookup,
-        //    orderTimestampUtc,
-        //    submissionTimeUtc,
-        //    receivedAtUtc,
-        //    cancellationToken);
+        await PersistOrderResponseAsync(
+            connection,
+            request,
+            response,
+            orderCodeLookup,
+            orderTimestampUtc,
+            submissionTimeUtc,
+            receivedAtUtc,
+            cancellationToken);
 
         await PersistOrderResponseAsync(
             connection,

@@ -11,7 +11,7 @@
             "program": "${file}",
             "console": "integratedTerminal",
             "args": [
-                "--universe", "INFX1",
+                "--universe", "INFX7",
                 "--timeframe", "15",
                 "--secret-name", "qq-intraday-credentials",
                 "--session","US",
