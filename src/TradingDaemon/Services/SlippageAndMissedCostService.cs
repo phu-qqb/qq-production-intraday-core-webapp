@@ -38,6 +38,7 @@ WHERE ScheduledTimestamp >= @StartUtc AND ScheduledTimestamp < @EndUtc";
     Symbol,
     Side,
     OrderPrice,
+    OrderTimestamp,
     ExecuteSize,
     ExecutePrice,
     Rate,
@@ -265,7 +266,7 @@ ORDER BY Symbol, BarTimeUtc";
             ? $"Total missed PnL: {missedTradesCostUsd.Value}"
             : "Total missed PnL could not be fully converted to USD.");
 
-        var executionSlippageUsd = CalculateExecutionSlippageUsd(fills);
+        var executionSlippageUsd = CalculateExecutionSlippageUsd(fills, barsBySymbol);
 
         if (hasConversionPrices)
         {
@@ -381,6 +382,7 @@ ORDER BY Symbol, BarTimeUtc";
                         Symbol: normalizedSymbol,
                         Side: side,
                         OrderPrice: null,
+                        OrderTimestamp: order.ScheduledTimestamp,
                         ExecuteSize: Math.Abs(delta),
                         ExecutePrice: matchingBar.Close,
                         Rate: null,
@@ -405,6 +407,7 @@ ORDER BY Symbol, BarTimeUtc";
                         Symbol: normalizedSymbol,
                         Side: unwindSide,
                         OrderPrice: null,
+                        OrderTimestamp: new DateTimeOffset(unwindBar.BarTimeUtc, TimeSpan.Zero),
                         ExecuteSize: Math.Abs(targetPosition),
                         ExecutePrice: unwindBar.Close,
                         Rate: null,
@@ -545,6 +548,7 @@ ORDER BY Symbol, BarTimeUtc";
                 Symbol: symbol,
                 Side: side,
                 OrderPrice: null,
+                OrderTimestamp: startTimestamp,
                 ExecuteSize: Math.Abs(position),
                 ExecutePrice: previousClose,
                 Rate: null,
@@ -1172,7 +1176,9 @@ ORDER BY Symbol, BarTimeUtc";
         decimal? Aum,
         DateTimeOffset ScheduledTimestamp);
 
-    private static decimal? CalculateExecutionSlippageUsd(IReadOnlyCollection<FillRow> fills)
+    private static decimal? CalculateExecutionSlippageUsd(
+        IReadOnlyCollection<FillRow> fills,
+        IReadOnlyDictionary<string, List<PriceBarRow>> barsBySymbol)
     {
         decimal total = 0m;
         var hasValue = false;
@@ -1180,11 +1186,18 @@ ORDER BY Symbol, BarTimeUtc";
         foreach (var fill in fills)
         {
             var executePrice = fill.ExecutePrice;
-            var orderPrice = fill.OrderPrice;
             var executeSize = fill.ExecuteSize;
             var rate = fill.Rate;
+            var orderTimestamp = fill.OrderTimestamp;
 
-            if (!executePrice.HasValue || !orderPrice.HasValue || !executeSize.HasValue || !rate.HasValue)
+            if (!executePrice.HasValue || !executeSize.HasValue || !rate.HasValue || !orderTimestamp.HasValue)
+            {
+                continue;
+            }
+
+            var referencePrice = FindClosestReferencePrice(barsBySymbol, fill.Symbol, orderTimestamp.Value);
+
+            if (!referencePrice.HasValue)
             {
                 continue;
             }
@@ -1196,11 +1209,59 @@ ORDER BY Symbol, BarTimeUtc";
                 continue;
             }
 
-            total += (executePrice.Value - orderPrice.Value) * executeSize.Value * rate.Value * sideMultiplier;
+            total += (executePrice.Value - referencePrice.Value) * executeSize.Value * rate.Value * sideMultiplier;
             hasValue = true;
         }
 
         return hasValue ? total : null;
+    }
+
+    private static decimal? FindClosestReferencePrice(
+        IReadOnlyDictionary<string, List<PriceBarRow>> barsBySymbol,
+        string symbol,
+        DateTimeOffset orderTimestamp)
+    {
+        var normalizedSymbol = NormalizeSymbol(symbol);
+
+        if (!barsBySymbol.TryGetValue(normalizedSymbol, out var bars) || bars.Count == 0)
+        {
+            return null;
+        }
+
+        var orderUtc = orderTimestamp.UtcDateTime;
+        var nextBarIndex = bars.FindIndex(b => b.BarTimeUtc >= orderUtc);
+
+        var previousBar = nextBarIndex > 0 ? bars[nextBarIndex - 1] : null;
+        var nextBar = nextBarIndex >= 0 ? bars[nextBarIndex] : null;
+
+        if (nextBarIndex < 0)
+        {
+            previousBar = bars[^1];
+        }
+
+        var closestBar = previousBar;
+
+        if (closestBar is null)
+        {
+            closestBar = nextBar;
+        }
+        else if (nextBar is not null)
+        {
+            var previousDelta = Math.Abs((orderUtc - closestBar.BarTimeUtc).Ticks);
+            var nextDelta = Math.Abs((nextBar.BarTimeUtc - orderUtc).Ticks);
+
+            if (nextDelta < previousDelta)
+            {
+                closestBar = nextBar;
+            }
+        }
+
+        if (closestBar is null || closestBar.Close == 0m)
+        {
+            return null;
+        }
+
+        return closestBar.Close;
     }
 
     private sealed record FillRow(
@@ -1208,6 +1269,7 @@ ORDER BY Symbol, BarTimeUtc";
         string Symbol,
         string? Side,
         decimal? OrderPrice,
+        DateTimeOffset? OrderTimestamp,
         decimal? ExecuteSize,
         decimal? ExecutePrice,
         decimal? Rate,
