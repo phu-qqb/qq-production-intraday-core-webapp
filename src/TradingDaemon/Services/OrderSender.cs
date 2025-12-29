@@ -276,15 +276,15 @@ public class OrderSender
             _logger.LogWarning("Wakett order submission returned no response body.");
         }
 
-        ////await PersistOrderResponseAsync(
-        ////    connection,
-        ////    request,
-        ////    response,
-        ////    orderCodeLookup,
-        ////    orderTimestampUtc,
-        ////    submissionTimeUtc,
-        ////    receivedAtUtc,
-        ////    cancellationToken);
+        await PersistOrderResponseAsync(
+            connection,
+            request,
+            response,
+            orderCodeLookup,
+            orderTimestampUtc,
+            submissionTimeUtc,
+            receivedAtUtc,
+            cancellationToken);
 
         ////await PersistOrderResponseAsync(
         ////    connection,
@@ -1392,7 +1392,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
         //DEBUG force positions to 0
 
-        exposures.Clear();
+        //exposures.Clear();
 
         if (exposures.Count == 0)
         {
