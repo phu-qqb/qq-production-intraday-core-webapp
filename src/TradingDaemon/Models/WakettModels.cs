@@ -39,12 +39,21 @@ public class WakettOrderItem
     public string side { get; set; } = string.Empty;
     public string code { get; set; } = string.Empty;
     public WakettOrderSize size { get; set; } = new();
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public WakettOrderSteps? steps { get; set; }
 }
 
 public class WakettOrderSize
 {
     public double value { get; set; }
     public string type { get; set; } = string.Empty;
+}
+
+public class WakettOrderSteps
+{
+    public double? start { get; set; }
+    public double? end { get; set; }
+    public double? speed { get; set; }
 }
 
 public class WakettOrderResponse

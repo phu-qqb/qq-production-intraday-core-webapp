@@ -225,6 +225,14 @@ public class OrderSender
         }
 
         var orders = builtOrders.Select(order => order.Order).ToList();
+        var orderSteps = ResolveOrderSteps();
+        if (orderSteps is not null)
+        {
+            foreach (var order in orders)
+            {
+                order.steps = orderSteps;
+            }
+        }
 
         var request = new WakettOrderRequest
         {
@@ -1947,6 +1955,48 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         }
 
         _logger.LogWarning("Unable to parse Wakett AUM value '{Value}'.", configured);
+        return null;
+    }
+
+    private WakettOrderSteps? ResolveOrderSteps()
+    {
+        var section = _configuration.GetSection("ExternalApis:WakettApi:OrderSteps");
+        if (!section.Exists())
+        {
+            return null;
+        }
+
+        var start = ParseOrderStep(section["Start"], "start");
+        var end = ParseOrderStep(section["End"], "end");
+        var speed = ParseOrderStep(section["Speed"], "speed");
+
+        if (!start.HasValue || !end.HasValue || !speed.HasValue)
+        {
+            return null;
+        }
+
+        return new WakettOrderSteps
+        {
+            start = start.Value,
+            end = end.Value,
+            speed = speed.Value
+        };
+    }
+
+    private double? ParseOrderStep(string? value, string stepName)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            _logger.LogWarning("Wakett order steps value for {StepName} is not configured.", stepName);
+            return null;
+        }
+
+        if (double.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out var parsed))
+        {
+            return parsed;
+        }
+
+        _logger.LogWarning("Unable to parse Wakett order steps value '{Value}' for {StepName}.", value, stepName);
         return null;
     }
 
