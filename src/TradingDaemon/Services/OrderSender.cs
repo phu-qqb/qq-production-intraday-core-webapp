@@ -1392,7 +1392,7 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
 
         //DEBUG force positions to 0
 
-        exposures.Clear();
+        //exposures.Clear();
 
         if (exposures.Count == 0)
         {
