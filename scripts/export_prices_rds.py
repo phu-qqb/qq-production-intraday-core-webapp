@@ -38,7 +38,7 @@ def log_timer(label: str, start: float) -> float:
 # the minute after ``End``; the same convention is used here when filtering
 # bar timestamps.
 SESSION_HOURS_NY = {
-    "US": (time(9, 30), time(16, 14)),
+    "US": (time(9, 0), time(15, 59)),
     "EU": (time(2, 0), time(8, 59)),
     "EUUS": (time(2, 0), time(11, 59)),
     # "ALL" is not used by the webapp but is kept here for completeness to

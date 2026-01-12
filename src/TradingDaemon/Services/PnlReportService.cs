@@ -113,6 +113,13 @@ FROM (
 ) src
 WHERE src.rn = 1;";
 
+    private const string PricesAtTimestampSqlTemplate = @"SELECT SecurityId, [Close]
+FROM {IntradayMarketPriceBar}
+WHERE
+    TimeframeMinute = {TimeframeMinute}
+    AND SecurityId IN @SecurityIds
+    AND BarTimeUtc = @TargetUtc;";
+
     private const string PositionsSqlTemplate = @"WITH Aggregated AS (
     SELECT
         f.SymbolId,
@@ -153,6 +160,7 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
     private readonly string _symbolSql;
     private readonly string _latestPricesSql;
     private readonly string _latestPricesForDaySql;
+    private readonly string _pricesAtTimestampSql;
     private readonly string _positionsSql;
     private readonly string _fillTable;
     private readonly string _securityTable;
@@ -177,6 +185,7 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
         _symbolSql = FormatSql(SymbolSqlTemplate);
         _latestPricesSql = FormatSql(LatestPricesSqlTemplate);
         _latestPricesForDaySql = FormatSql(LatestPricesForDaySqlTemplate);
+        _pricesAtTimestampSql = FormatSql(PricesAtTimestampSqlTemplate);
         _positionsSql = FormatSql(PositionsSqlTemplate);
     }
 
@@ -187,8 +196,10 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
         var tradingDate = DateOnly.FromDateTime(nowLocal);
         var startLocal = tradingDate.ToDateTime(TimeOnly.MinValue);
         var endLocal = startLocal.AddDays(1);
+        var fivePmLocal = startLocal.AddHours(17);
         var startUtc = TimeZoneInfo.ConvertTimeToUtc(startLocal, NewYorkTimeZone);
         var endUtc = TimeZoneInfo.ConvertTimeToUtc(endLocal, NewYorkTimeZone);
+        var fivePmUtc = TimeZoneInfo.ConvertTimeToUtc(fivePmLocal, NewYorkTimeZone);
 
         await using var connection = (SqlConnection)_context.CreateConnection();
         await connection.OpenAsync(cancellationToken);
@@ -197,7 +208,16 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
 
         var symbolInfos = await LoadSymbolInfosAsync(connection, cancellationToken);
         var fillRows = await LoadPnlFillRowsAsync(connection, startUtc, endUtc, cancellationToken);
-        var pnlValue = await CalculatePnlAsync(connection, fillRows, symbolInfos, endUtc, cancellationToken);
+        var pnlCalculation = await CalculatePnlAsync(
+            connection,
+            fillRows,
+            symbolInfos,
+            fivePmUtc,
+            cancellationToken);
+
+        var pnlValue = pnlCalculation.AggregatedUsd ?? (pnlCalculation.PnlByCurrency.TryGetValue("USD", out var usdOnly)
+            ? usdOnly
+            : 0m);
 
         await connection.ExecuteAsync(
             new CommandDefinition(
@@ -229,7 +249,24 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
         var totalNetExposure = reportPositions.Sum(p => p.MarketValueUsd ?? 0m);
 
         _logger.LogInformation("Computed current day PnL for {Date}: {PnL}", tradingDate, pnlValue);
-        Console.WriteLine($"Current day PnL: {pnlValue}");
+        Console.WriteLine("Current day PnL by currency:");
+        foreach (var entry in pnlCalculation.PnlByCurrency.OrderBy(e => e.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($" - {entry.Key}: {entry.Value}");
+        }
+
+        if (pnlCalculation.AggregatedUsd.HasValue)
+        {
+            Console.WriteLine($"Aggregated USD PnL at 5pm NY: {pnlCalculation.AggregatedUsd.Value}");
+        }
+        else if (pnlCalculation.HasFivePmBar)
+        {
+            Console.WriteLine("5pm NY conversion rates were partially unavailable; USD aggregation skipped.");
+        }
+        else
+        {
+            Console.WriteLine("5pm NY price bars were not available; USD aggregation skipped.");
+        }
 
         return new PnlReport(tradingDate, pnlValue, grossMarketValue, totalNetExposure, reportPositions);
     }
@@ -355,16 +392,37 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
         return rows.ToList();
     }
 
-    private async Task<decimal> CalculatePnlAsync(
+    private async Task<Dictionary<long, decimal?>> LoadPricesAtTimestampAsync(
+        IDbConnection connection,
+        IEnumerable<long> securityIds,
+        DateTime targetUtc,
+        CancellationToken cancellationToken)
+    {
+        var ids = securityIds.Distinct().ToArray();
+        if (ids.Length == 0)
+        {
+            return new Dictionary<long, decimal?>();
+        }
+
+        var definition = new CommandDefinition(
+            _pricesAtTimestampSql,
+            new { SecurityIds = ids, TargetUtc = targetUtc },
+            cancellationToken: cancellationToken);
+        var rows = await connection.QueryAsync<LatestPriceRow>(definition);
+
+        return rows.ToDictionary(row => row.SecurityId, row => row.Close);
+    }
+
+    private async Task<PnlCalculationResult> CalculatePnlAsync(
         SqlConnection connection,
         IReadOnlyCollection<PnlFillRow> fills,
         IReadOnlyDictionary<string, SymbolInfo> symbolInfos,
-        DateTime endUtc,
+        DateTime fivePmUtc,
         CancellationToken cancellationToken)
     {
         if (fills.Count == 0)
         {
-            return 0m;
+            return new PnlCalculationResult(new Dictionary<string, decimal>(), null, false);
         }
 
         var byCurrency = new Dictionary<string, CurrencyAggregation>(StringComparer.OrdinalIgnoreCase);
@@ -402,51 +460,65 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
 
         if (byCurrency.Count == 0)
         {
-            return 0m;
+            return new PnlCalculationResult(new Dictionary<string, decimal>(), null, false);
         }
 
         var securityIds = byCurrency.Values
             .SelectMany(a => a.SecurityIds)
             .Distinct()
-            .ToArray();
+            .ToHashSet();
 
-        var priceLookup = securityIds.Length > 0
-            ? await LoadLatestPricesForDayAsync(connection, securityIds, endUtc, cancellationToken)
+        var usdConversionIds = GetUsdConversionSecurityIds(byCurrency.Keys, symbolInfos.Values.Distinct());
+        securityIds.UnionWith(usdConversionIds);
+
+        var priceLookup = securityIds.Count > 0
+            ? await LoadPricesAtTimestampAsync(connection, securityIds, fivePmUtc, cancellationToken)
             : new Dictionary<long, decimal?>();
 
-        var conversionGraph = BuildConversionGraph(symbolInfos, priceLookup, Array.Empty<PositionRow>());
+        var hasFivePmBar = priceLookup.Count > 0;
+        var pnlByCurrency = byCurrency
+            .Select(pair => new KeyValuePair<string, decimal>(pair.Key, pair.Value.PnlBase - pair.Value.CommissionBase))
+            .Where(pair => pair.Value != 0m)
+            .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
 
-        decimal totalPnlUsd = 0m;
+        decimal? totalPnlUsd = null;
 
-        foreach (var (currency, aggregation) in byCurrency)
+        if (hasFivePmBar)
         {
-            var baseAmount = aggregation.PnlBase - aggregation.CommissionBase;
-            if (baseAmount == 0m)
+            var conversionGraph = BuildConversionGraph(symbolInfos, priceLookup, Array.Empty<PositionRow>());
+            decimal aggregated = 0m;
+            var convertedAny = false;
+
+            foreach (var (currency, amount) in pnlByCurrency)
             {
-                continue;
+                decimal conversionRate;
+                if (string.Equals(currency, "USD", StringComparison.OrdinalIgnoreCase))
+                {
+                    conversionRate = 1m;
+                }
+                else if (TryGetConversionRate(currency, "USD", conversionGraph, out var rate) && rate != 0m)
+                {
+                    conversionRate = rate;
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "Unable to convert {Currency} PnL to USD using 5pm rates due to missing data.",
+                        currency);
+                    continue;
+                }
+
+                aggregated += amount * conversionRate;
+                convertedAny = true;
             }
 
-            decimal conversionRate;
-            if (string.Equals(currency, "USD", StringComparison.OrdinalIgnoreCase))
+            if (convertedAny)
             {
-                conversionRate = 1m;
+                totalPnlUsd = aggregated;
             }
-            else if (TryGetConversionRate(currency, "USD", conversionGraph, out var rate) && rate != 0m)
-            {
-                conversionRate = rate;
-            }
-            else
-            {
-                _logger.LogWarning(
-                    "Unable to convert {Currency} PnL to USD due to missing rate.",
-                    currency);
-                continue;
-            }
-
-            totalPnlUsd += baseAmount * conversionRate;
         }
 
-        return totalPnlUsd;
+        return new PnlCalculationResult(pnlByCurrency, totalPnlUsd, hasFivePmBar);
     }
 
     private IReadOnlyList<PnlReportPosition> BuildReportPositions(
@@ -497,6 +569,54 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
             .OrderByDescending(p => Math.Abs(p.MarketValueUsd ?? 0m))
             .ThenBy(p => p.Symbol, StringComparer.OrdinalIgnoreCase)
             .ToList();
+    }
+
+    private static HashSet<long> GetUsdConversionSecurityIds(
+        IEnumerable<string> currencies,
+        IEnumerable<SymbolInfo> symbolInfos)
+    {
+        var ids = new HashSet<long>();
+
+        foreach (var currency in currencies)
+        {
+            if (string.Equals(currency, "USD", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (TryFindSecurityId(symbolInfos, currency, "USD", out var quoteUsdId))
+            {
+                ids.Add(quoteUsdId);
+                continue;
+            }
+
+            if (TryFindSecurityId(symbolInfos, "USD", currency, out var usdBaseId))
+            {
+                ids.Add(usdBaseId);
+            }
+        }
+
+        return ids;
+    }
+
+    private static bool TryFindSecurityId(
+        IEnumerable<SymbolInfo> symbolInfos,
+        string baseCurrency,
+        string quoteCurrency,
+        out long securityId)
+    {
+        foreach (var info in symbolInfos)
+        {
+            if (string.Equals(info.Pair.BaseCurrency, baseCurrency, StringComparison.OrdinalIgnoreCase)
+                && string.Equals(info.Pair.QuoteCurrency, quoteCurrency, StringComparison.OrdinalIgnoreCase))
+            {
+                securityId = info.SecurityId;
+                return true;
+            }
+        }
+
+        securityId = default;
+        return false;
     }
 
     private static Dictionary<string, List<(string Target, decimal Rate)>> BuildConversionGraph(
@@ -710,6 +830,11 @@ WHERE a.NetQuantity IS NOT NULL AND a.NetQuantity <> 0;";
         public decimal CommissionBase { get; set; }
         public HashSet<long> SecurityIds { get; } = new();
     }
+
+    private sealed record PnlCalculationResult(
+        IReadOnlyDictionary<string, decimal> PnlByCurrency,
+        decimal? AggregatedUsd,
+        bool HasFivePmBar);
 
     private sealed class SymbolInfo
     {

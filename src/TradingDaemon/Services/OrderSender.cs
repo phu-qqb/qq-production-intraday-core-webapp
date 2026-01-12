@@ -230,7 +230,7 @@ public class OrderSender
         {
             ts = FormatTimestamp(orderTimestampUtc),
             aum = aum,
-            execution = isFlatOrderRequest ? "EOF" : "EOC",
+            execution = "EAM",
             orders = orders
         };
 
@@ -276,15 +276,25 @@ public class OrderSender
             _logger.LogWarning("Wakett order submission returned no response body.");
         }
 
-        await PersistOrderResponseAsync(
-            connection,
-            request,
-            response,
-            orderCodeLookup,
-            orderTimestampUtc,
-            submissionTimeUtc,
-            receivedAtUtc,
-            cancellationToken);
+        ////await PersistOrderResponseAsync(
+        ////    connection,
+        ////    request,
+        ////    response,
+        ////    orderCodeLookup,
+        ////    orderTimestampUtc,
+        ////    submissionTimeUtc,
+        ////    receivedAtUtc,
+        ////    cancellationToken);
+
+        ////await PersistOrderResponseAsync(
+        ////    connection,
+        ////    request,
+        ////    null,
+        ////    orderCodeLookup,
+        ////    orderTimestampUtc,
+        ////    submissionTimeUtc,
+        ////    receivedAtUtc,
+        ////    cancellationToken);
     }
 
     internal static string BuildOrderCode(int securityId, DateTime orderTimestampUtc)
@@ -1379,6 +1389,10 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
             AddExposure(exposures, symbol.BaseCurrency, weight.Weight);
             AddExposure(exposures, symbol.QuoteCurrency, -weight.Weight);
         }
+
+        //DEBUG force positions to 0
+
+        //exposures.Clear();
 
         if (exposures.Count == 0)
         {

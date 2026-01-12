@@ -23,16 +23,21 @@ public sealed class WakettAutomationService : BackgroundService
 
     private static readonly IReadOnlyList<TimeSpan> PriceFetchOffsets = BuildQuarterOffsets(TimeSpan.FromMinutes(7));
     private static readonly IReadOnlyList<TimeSpan> WeightCalculationOffsets = BuildQuarterOffsets(TimeSpan.FromMinutes(7.5));
-    private static readonly IReadOnlyList<TimeSpan> FillCheckOffsets = BuildQuarterOffsets(TimeSpan.FromMinutes(0));
+    private static readonly IReadOnlyList<TimeSpan> FillCheckOffsets = new[]
+    {
+        TimeSpan.FromMinutes(9),
+        TimeSpan.FromMinutes(24),
+        TimeSpan.FromMinutes(39),
+        TimeSpan.FromMinutes(54)
+    };
     private static readonly IReadOnlyList<TimeSpan> OrderSubmissionOffsets = BuildQuarterOffsets(TimeSpan.FromMinutes(1));
-    private static readonly IReadOnlyList<TimeSpan> PnlReportOffsets = new[] { TimeSpan.FromMinutes(15) };
+    private static readonly IReadOnlyList<TimeSpan> PnlReportOffsets = new[] { TimeSpan.FromMinutes(9) };
 
     private readonly WakettPriceFetcher _priceFetcher;
     private readonly WeightCalculator _weightCalculator;
     private readonly OrderSender _orderSender;
     private readonly WakettTradeFetcher _tradeFetcher;
-    private readonly PnlReportService _pnlReportService;
-    private readonly IEmailNotificationService _emailNotificationService;
+    private readonly PnlWorkflowRunner _pnlWorkflowRunner;
     private readonly IHostApplicationLifetime _applicationLifetime;
     private readonly ILogger<WakettAutomationService> _logger;
     private readonly WakettAutomationOptions _options;
@@ -44,8 +49,7 @@ public sealed class WakettAutomationService : BackgroundService
         WeightCalculator weightCalculator,
         OrderSender orderSender,
         WakettTradeFetcher tradeFetcher,
-        PnlReportService pnlReportService,
-        IEmailNotificationService emailNotificationService,
+        PnlWorkflowRunner pnlWorkflowRunner,
         IHostApplicationLifetime applicationLifetime,
         IOptions<WakettAutomationOptions> options,
         ILogger<WakettAutomationService> logger,
@@ -56,8 +60,7 @@ public sealed class WakettAutomationService : BackgroundService
         _weightCalculator = weightCalculator;
         _orderSender = orderSender;
         _tradeFetcher = tradeFetcher;
-        _pnlReportService = pnlReportService;
-        _emailNotificationService = emailNotificationService;
+        _pnlWorkflowRunner = pnlWorkflowRunner;
         _applicationLifetime = applicationLifetime;
         _logger = logger;
         _options = options?.Value ?? new WakettAutomationOptions();
@@ -69,13 +72,24 @@ public sealed class WakettAutomationService : BackgroundService
     {
         _logger.LogInformation("Starting Wakett automation service.");
 
+        var initialNowUtc = _timeProvider.GetUtcNow().UtcDateTime;
+        var initialLocal = TimeZoneInfo.ConvertTimeFromUtc(initialNowUtc, NewYorkTimeZone);
+
+        await RunInitialTradeFetchAsync(initialLocal, stoppingToken);
+
+        if (IsWeekend(initialLocal))
+        {
+            _logger.LogInformation(
+                "Wakett automation will not start because today is {DayOfWeek} in New York time.",
+                initialLocal.DayOfWeek);
+            return;
+        }
+
         var sessionActive = false;
         var sessionShutdownDeadlineUtc = (DateTime?)null;
         var currentAutomationWindowStartUtc = DateTime.MinValue;
         var currentSessionStartUtc = DateTime.MinValue;
         var currentSessionEndUtc = DateTime.MinValue;
-
-        var initialNowUtc = _timeProvider.GetUtcNow().UtcDateTime;
         var nextAutomationWindowStartUtc = GetNextAutomationWindowStartUtc(initialNowUtc);
 
         var nextPriceFetchUtc = DateTime.MaxValue;
@@ -190,7 +204,7 @@ public sealed class WakettAutomationService : BackgroundService
                 while (nowUtc >= nextPnlReportUtc)
                 {
                     var scheduledRunUtc = nextPnlReportUtc;
-                    await RunPnlWorkflowAsync(stoppingToken);
+                    await _pnlWorkflowRunner.RunAsync(null, stoppingToken);
                     nextPnlReportUtc = GetNextSessionEventUtc(
                         scheduledRunUtc.AddSeconds(1),
                         PnlReportOffsets,
@@ -327,23 +341,6 @@ public sealed class WakettAutomationService : BackgroundService
         }
     }
 
-    private async Task RunPnlWorkflowAsync(CancellationToken stoppingToken)
-    {
-        try
-        {
-            var report = await _pnlReportService.ComputeAndStoreCurrentDayPnlAsync(cancellationToken: stoppingToken);
-            await _emailNotificationService.SendPnLReportAsync(report, stoppingToken);
-        }
-        catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Failed to compute or send automated Wakett PnL report.");
-        }
-    }
-
     private double? ResolveAutomationAum()
     {
         var configured = Environment.GetEnvironmentVariable("WAKETT_AUM")
@@ -361,6 +358,51 @@ public sealed class WakettAutomationService : BackgroundService
 
         _logger.LogWarning("Unable to parse Wakett AUM value '{Value}'.", configured);
         return null;
+    }
+
+    private async Task RunInitialTradeFetchAsync(DateTime initialLocal, CancellationToken stoppingToken)
+    {
+        if (string.IsNullOrWhiteSpace(_options.FillAccount))
+        {
+            _logger.LogWarning(
+                "Skipping initial Wakett fill fetch because Automation:Wakett:FillAccount is not configured.");
+            return;
+        }
+
+        var lastTradingDay = GetMostRecentNonWeekendDay(initialLocal);
+        var dateString = lastTradingDay.ToString("yyyyMMdd", CultureInfo.InvariantCulture);
+
+        var request = new FetchWakettFillsRequest
+        {
+            Account = _options.FillAccount,
+            From = dateString,
+            To = dateString,
+            Strategy = _options.FillStrategy
+        };
+
+        _logger.LogInformation(
+            "Requesting initial Wakett fills for account {Account} covering {From} to {To} (strategy: {Strategy}).",
+            request.Account,
+            request.From,
+            request.To,
+            request.Strategy ?? "<all>");
+
+        try
+        {
+            await _tradeFetcher.FetchAndStoreAsync(request, stoppingToken);
+        }
+        catch (TaskCanceledException ex) when (!stoppingToken.IsCancellationRequested)
+        {
+            _logger.LogError(ex, "Initial Wakett fill fetch timed out while calling the Wakett API.");
+        }
+        catch (WakettTradeFetcherException ex)
+        {
+            _logger.LogError(ex, "Initial Wakett fill fetch returned an error: {Message}", ex.Message);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex, "Unexpected failure while fetching initial Wakett fills.");
+        }
     }
 
     private async Task RunFillCheckAsync(CancellationToken stoppingToken)
@@ -494,6 +536,18 @@ public sealed class WakettAutomationService : BackgroundService
 
     private static bool IsWeekend(DateTime value)
         => value.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday;
+
+    private static DateOnly GetMostRecentNonWeekendDay(DateTime local)
+    {
+        var candidate = local.AddDays(-1);
+
+        while (IsWeekend(candidate))
+        {
+            candidate = candidate.AddDays(-1);
+        }
+
+        return DateOnly.FromDateTime(candidate);
+    }
 
     private static TimeZoneInfo NewYorkTimeZone
         => TimeZoneInfo.FindSystemTimeZoneById(

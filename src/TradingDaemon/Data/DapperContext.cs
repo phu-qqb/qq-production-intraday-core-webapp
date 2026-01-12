@@ -117,7 +117,7 @@ public class DapperContext
             }
         }
 
-        return string.IsNullOrWhiteSpace(secretName) ? "qq-intraday-credentials" : secretName;
+        return secretName;
     }
 
     private static string? InferSecretName(string environment)

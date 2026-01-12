@@ -1,0 +1,1227 @@
+using System.Globalization;
+using System.Linq;
+using Dapper;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using TradingDaemon.Data;
+using TradingDaemon.Models;
+using TradingDaemon.Options;
+using TradingDaemon.Utils;
+
+namespace TradingDaemon.Services;
+
+public sealed class SlippageAndMissedCostService
+{
+    private readonly DapperContext _context;
+    private readonly ILogger<SlippageAndMissedCostService> _logger;
+    private readonly string _orderTable;
+    private readonly string _fillTable;
+    private readonly string _priceBarView;
+    private readonly string _timeframeLiteral;
+    private readonly int _timeframeMinutes;
+
+    private const decimal TheoreticalTradingCostUsdPerUsdNotional = 10m / 1_000_000m;
+    private const decimal TradingCostUsdPerUsdNotional = 5m / 1_000_000m;
+
+    private const string OrdersSqlTemplate = @"SELECT
+    WakettOrderId,
+    Symbol,
+    Side,
+    SizeValue,
+    Aum,
+    ScheduledTimestamp
+FROM {WakettOrder}
+WHERE ScheduledTimestamp >= @StartUtc AND ScheduledTimestamp < @EndUtc";
+
+    private const string FillsSqlTemplate = @"SELECT
+    WakettFillId,
+    Symbol,
+    Side,
+    OrderPrice,
+    ExecuteSize,
+    ExecutePrice,
+    Rate,
+    ExecuteTimestamp
+FROM {WakettFill}
+WHERE ExecuteTimestamp >= @StartUtc AND ExecuteTimestamp < @EndUtc";
+
+    private const string PriceBarsSqlTemplate = @"SELECT
+    Symbol,
+    BarTimeUtc,
+    [Close]
+FROM {IntradayMarketPriceBarView}
+WHERE TimeframeMinute = {TimeframeMinute}
+    AND BarTimeUtc >= @StartUtc AND BarTimeUtc <= @EndUtc
+    AND Symbol IN @Symbols
+ORDER BY Symbol, BarTimeUtc";
+
+    private static readonly DateOnly HistoricalFillStartDate = new(2025, 12, 1);
+
+    public SlippageAndMissedCostService(
+        DapperContext context,
+        ILogger<SlippageAndMissedCostService> logger,
+        IDatabaseObjectNameProvider databaseObjectNameProvider,
+        IOptions<PriceBarOptions>? priceBarOptions = null)
+    {
+        _context = context;
+        _logger = logger;
+        var options = priceBarOptions?.Value ?? new PriceBarOptions();
+        _timeframeMinutes = Math.Max(1, options.TimeframeMinute);
+        _timeframeLiteral = _timeframeMinutes.ToString(CultureInfo.InvariantCulture);
+        _orderTable = databaseObjectNameProvider.GetObjectName(DatabaseObjects.WakettOrder);
+        _fillTable = databaseObjectNameProvider.GetObjectName(DatabaseObjects.WakettFill);
+        _priceBarView = databaseObjectNameProvider.GetObjectName(DatabaseObjects.IntradayMarketPriceBarView);
+    }
+
+    public async Task<SlippageResult> ComputeAsync(SlippageRequest request, CancellationToken cancellationToken)
+    {
+        var tradingDate = DateOnly.FromDateTime(request.Date.Date);
+        var startLocal = tradingDate.ToDateTime(TimeOnly.MinValue);
+        var endLocal = startLocal.AddDays(1);
+        var startUtc = TimeZoneInfo.ConvertTimeToUtc(startLocal, NewYorkTimeZone);
+        var endUtc = TimeZoneInfo.ConvertTimeToUtc(endLocal, NewYorkTimeZone);
+        var previousWeekdayLocal = GetPreviousWeekday(tradingDate).ToDateTime(TimeOnly.MinValue);
+        var priceBarStartUtc = TimeZoneInfo.ConvertTimeToUtc(previousWeekdayLocal, NewYorkTimeZone);
+        var historicalFillStartUtc = TimeZoneInfo.ConvertTimeToUtc(HistoricalFillStartDate.ToDateTime(TimeOnly.MinValue), NewYorkTimeZone);
+        var historicalFillEndUtc = startUtc;
+
+        using var connection = _context.CreateConnection();
+
+        var orders = (await connection.QueryAsync<OrderRow>(
+                new CommandDefinition(FormatSql(OrdersSqlTemplate), new { StartUtc = startUtc, EndUtc = endUtc }, cancellationToken: cancellationToken)))
+            .Where(o => !string.IsNullOrWhiteSpace(o.Symbol))
+            .ToList();
+
+        var fills = (await connection.QueryAsync<FillRow>(
+                new CommandDefinition(FormatSql(FillsSqlTemplate), new { StartUtc = startUtc, EndUtc = endUtc }, cancellationToken: cancellationToken)))
+            .Where(f => !string.IsNullOrWhiteSpace(f.Symbol))
+            .ToList();
+
+        var historicalFills = (await connection.QueryAsync<FillRow>(
+                new CommandDefinition(
+                    FormatSql(FillsSqlTemplate),
+                    new { StartUtc = historicalFillStartUtc, EndUtc = historicalFillEndUtc },
+                    cancellationToken: cancellationToken)))
+            .Where(f => !string.IsNullOrWhiteSpace(f.Symbol))
+            .ToList();
+
+        var startingPositions = CalculatePositionsAtStartOfDay(historicalFills);
+
+        var symbolQueries = BuildSymbolQueries(
+                orders.Select(o => o.Symbol)
+                    .Concat(fills.Select(f => f.Symbol))
+                    .Concat(startingPositions.Keys))
+            .ToList();
+
+        var symbolSet = symbolQueries
+            .Select(q => q.QuerySymbol)
+            .Where(s => s.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        if (symbolSet.Length == 0)
+        {
+            _logger.LogWarning("No symbols found for slippage computation on {Date}", tradingDate);
+            return new SlippageResult(
+                tradingDate,
+                new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase),
+                new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase),
+                null,
+                null,
+                null,
+                false,
+                null,
+                null,
+                null,
+                null,
+                null);
+        }
+
+        var priceBarsDefinition = new CommandDefinition(
+            FormatSql(PriceBarsSqlTemplate),
+            new { StartUtc = priceBarStartUtc, EndUtc = endUtc, Symbols = symbolSet },
+            cancellationToken: cancellationToken);
+
+        var priceBars = await connection.QueryAsync<PriceBarRow>(priceBarsDefinition);
+        var priceBarsByQuery = priceBars
+            .GroupBy(b => NormalizeSymbol(b.Symbol))
+            .ToDictionary(g => g.Key, g => g.ToList(), StringComparer.OrdinalIgnoreCase);
+
+        var symbolQueriesByQuery = symbolQueries
+            .GroupBy(q => q.QuerySymbol)
+            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
+
+        var adjustedPriceBars = new List<PriceBarRow>();
+
+        foreach (var (querySymbol, bars) in priceBarsByQuery)
+        {
+            var adjustedSymbol = querySymbol;
+            var invertPrices = false;
+
+            if (symbolQueriesByQuery.TryGetValue(querySymbol, out var query))
+            {
+                adjustedSymbol = query.TargetSymbol;
+                invertPrices = query.InvertPrice;
+            }
+
+            foreach (var bar in bars)
+            {
+                var close = bar.Close;
+
+                if (invertPrices && close != 0m)
+                {
+                    close = 1m / close;
+                }
+
+                adjustedPriceBars.Add(new PriceBarRow(adjustedSymbol, bar.BarTimeUtc, close));
+            }
+        }
+
+        var barsBySymbol = adjustedPriceBars
+            .GroupBy(b => NormalizeSymbol(b.Symbol))
+            .ToDictionary(g => g.Key, g => g.OrderBy(b => b.BarTimeUtc).ToList(), StringComparer.OrdinalIgnoreCase);
+
+        var lastClosePrices = ExtractLastClosePrices(barsBySymbol);
+        var previousClosePrices = ExtractLastClosePricesBeforeTimestamp(barsBySymbol, startUtc);
+        var conversionGraph = BuildConversionGraph(lastClosePrices);
+        var hasConversionPrices = conversionGraph.Count > 0;
+
+        var realPnlFills = AddVirtualStartingFills(fills, startingPositions, previousClosePrices, startUtc);
+        var realPnlResult = CalculateRealPnlByCurrency(realPnlFills, lastClosePrices, conversionGraph);
+        var theoreticalFills = ConvertOrdersToTheoreticalFills(orders, barsBySymbol);
+        var theoreticalPnlResult = CalculateRealPnlByCurrency(theoreticalFills, lastClosePrices, conversionGraph);
+        var theoreticalPnlByCurrency = theoreticalPnlResult.Totals;
+        var theoreticalPnlByCurrencyUsd = hasConversionPrices
+            ? ConvertPnlsToUsdByCurrency(theoreticalPnlByCurrency, conversionGraph)
+            : new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+        var realPnlByCurrencyUsd = hasConversionPrices
+            ? ConvertPnlsToUsdByCurrency(realPnlResult.Totals, conversionGraph)
+            : new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+
+        var theoreticalUsd = theoreticalPnlByCurrencyUsd.Count > 0
+            ? theoreticalPnlByCurrencyUsd.Values.Sum()
+            : (decimal?)null;
+        var realUsd = realPnlByCurrencyUsd.Count > 0
+            ? realPnlByCurrencyUsd.Values.Sum()
+            : (decimal?)null;
+        var theoreticalNotionalUsd = CalculateTotalNotionalUsd(theoreticalFills, conversionGraph);
+        var theoreticalTradingCostUsd = theoreticalNotionalUsd.HasValue
+            ? theoreticalNotionalUsd.Value * TheoreticalTradingCostUsdPerUsdNotional
+            : (decimal?)null;
+        var theoreticalNetUsd = theoreticalUsd.HasValue && theoreticalTradingCostUsd.HasValue
+            ? theoreticalUsd.Value - theoreticalTradingCostUsd.Value
+            : (decimal?)null;
+
+        var realNotionalUsd = CalculateTotalNotionalUsd(fills, conversionGraph);
+        var commissionsUsd = realNotionalUsd.HasValue
+            ? realNotionalUsd.Value * TradingCostUsdPerUsdNotional
+            : (decimal?)null;
+        if (!commissionsUsd.HasValue && realPnlResult.TotalTradingCostUsd != 0m)
+        {
+            commissionsUsd = realPnlResult.TotalTradingCostUsd;
+        }
+
+        var realUsdAfterTradingCost = realUsd.HasValue
+            ? realUsd.Value - realPnlResult.TotalTradingCostUsd
+            : (decimal?)null;
+
+        var slippageCost = theoreticalUsd.HasValue && realUsdAfterTradingCost.HasValue
+            ? realUsdAfterTradingCost.Value - theoreticalUsd.Value
+            : (decimal?)null;
+
+        Console.WriteLine($"Slippage computation for {tradingDate:yyyy-MM-dd}");
+        Console.WriteLine("Theoretical PnL by currency (USD using last available close):");
+        foreach (var entry in theoreticalPnlByCurrencyUsd.OrderBy(e => e.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($" - {entry.Key}: {entry.Value}");
+        }
+
+        Console.WriteLine("Real PnL by currency (USD using last available close):");
+        foreach (var entry in realPnlByCurrencyUsd.OrderBy(e => e.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            Console.WriteLine($" - {entry.Key}: {entry.Value}");
+        }
+
+        var missedTrades = IdentifyMissedTrades(orders, fills, barsBySymbol, _timeframeMinutes);
+        Console.WriteLine($"Missed trades for {tradingDate:yyyy-MM-dd}:");
+        if (missedTrades.Count == 0)
+        {
+            Console.WriteLine(" - None");
+        }
+        else
+        {
+            foreach (var trade in missedTrades.OrderBy(m => m.Symbol, StringComparer.OrdinalIgnoreCase)
+                         .ThenBy(m => m.BarTimeUtc))
+            {
+                Console.WriteLine(
+                    $" - {trade.Symbol} at {trade.BarTimeUtc:HH:mm} UTC | Target: {trade.TargetSize}, Filled: {trade.FilledSize}, " +
+                    $"Diff: {trade.SizeDifference}, Price Δ: {trade.PriceDelta}, Missed PnL: {trade.MissedPnl}");
+            }
+        }
+
+        var totalMissedUsd = AggregateMissedPnlUsd(missedTrades, conversionGraph);
+        var missedTradesCostUsd = totalMissedUsd.HasValue ? -totalMissedUsd.Value : (decimal?)null;
+        Console.WriteLine(missedTradesCostUsd.HasValue
+            ? $"Total missed PnL: {missedTradesCostUsd.Value}"
+            : "Total missed PnL could not be fully converted to USD.");
+
+        var executionSlippageUsd = CalculateExecutionSlippageUsd(fills);
+
+        if (hasConversionPrices)
+        {
+            Console.WriteLine(realUsd.HasValue
+                ? $" - Real PnL (net): {realUsd.Value - commissionsUsd.Value}"
+                : " - Real PnL could not be fully converted to USD.");
+            Console.WriteLine(theoreticalNetUsd.HasValue
+                ? $" - Theoretical PnL (net): {theoreticalNetUsd.Value}"
+                : " - Theoretical net PnL could not be computed.");
+            Console.WriteLine("Aggregated USD values using last available close prices:");
+            Console.WriteLine(theoreticalUsd.HasValue
+                ? $" - Theoretical PnL (gross): {theoreticalUsd.Value}"
+                : " - Theoretical PnL could not be fully converted to USD.");
+            Console.WriteLine(theoreticalTradingCostUsd.HasValue
+                ? $" - Theoretical costs ($10/M): {-theoreticalTradingCostUsd.Value}"
+                : " - Theoretical costs could not be computed.");
+            Console.WriteLine(commissionsUsd.HasValue
+                ? $" - Commissions ($5/M): {-commissionsUsd.Value}"
+                : " - Commissions could not be computed.");
+            Console.WriteLine(missedTradesCostUsd.HasValue
+                ? $" - Missed trades PnL: {missedTradesCostUsd.Value}"
+                : " - Missed trades PnL could not be fully converted to USD.");
+            Console.WriteLine(executionSlippageUsd.HasValue
+                ? $" - Execution slippage: {executionSlippageUsd.Value}"
+                : " - Execution slippage could not be computed.");
+        }
+        else
+        {
+            Console.WriteLine(hasConversionPrices
+                ? "Conversion rates were partially unavailable; USD aggregation skipped."
+                : "Price bars were not available; USD aggregation skipped.");
+        }
+
+        return new SlippageResult(
+            tradingDate,
+            theoreticalPnlByCurrencyUsd,
+            realPnlByCurrencyUsd,
+            theoreticalUsd,
+            realUsd,
+            slippageCost,
+            hasConversionPrices,
+            theoreticalTradingCostUsd,
+            theoreticalNetUsd,
+            missedTradesCostUsd,
+            commissionsUsd,
+            executionSlippageUsd);
+    }
+
+    private IReadOnlyCollection<FillRow> ConvertOrdersToTheoreticalFills(
+        IReadOnlyCollection<OrderRow> orders,
+        IReadOnlyDictionary<string, List<PriceBarRow>> barsBySymbol)
+    {
+        var theoreticalFills = new List<FillRow>();
+
+        var ordersBySymbol = orders
+            .GroupBy(o => NormalizeSymbol(o.Symbol))
+            .ToDictionary(g => g.Key, g => g.OrderBy(o => o.ScheduledTimestamp).ToList(), StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (normalizedSymbol, symbolOrders) in ordersBySymbol)
+        {
+            if (!CurrencyPairParser.TryParse(normalizedSymbol, out var pair))
+            {
+                _logger.LogDebug("Skipping theoretical PnL for unparsable symbol {Symbol}", normalizedSymbol);
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(pair.QuoteCurrency))
+            {
+                continue;
+            }
+
+            if (!barsBySymbol.TryGetValue(normalizedSymbol, out var bars) || bars.Count == 0)
+            {
+                _logger.LogDebug("No price bars for symbol {Symbol} to compute theoretical PnL", normalizedSymbol);
+                continue;
+            }
+
+            decimal targetPosition = 0m;
+            var lastMatchingBarIndex = -1;
+
+            foreach (var order in symbolOrders)
+            {
+                var scheduledUtc = order.ScheduledTimestamp.UtcDateTime;
+                var matchingBarIndex = bars.FindIndex(b => b.BarTimeUtc == scheduledUtc && b.Close != 0m);
+
+                if (matchingBarIndex < 0)
+                {
+                    matchingBarIndex = bars.FindLastIndex(b => b.BarTimeUtc < scheduledUtc && b.Close != 0m);
+                }
+
+                var matchingBar = matchingBarIndex >= 0 ? bars[matchingBarIndex] : null;
+
+                if (matchingBar is null)
+                {
+                    _logger.LogDebug("No matching price bar for order at {Timestamp} ({Symbol})", order.ScheduledTimestamp, pair.FormattedSymbol);
+                    continue;
+                }
+
+                var absoluteSize = (order.SizeValue ?? 0m) * (order.Aum ?? 0m);
+                if (absoluteSize == 0m)
+                {
+                    continue;
+                }
+
+                var signedTarget = absoluteSize * GetSideMultiplier(order.Side);
+                var delta = signedTarget - targetPosition;
+
+                if (delta != 0m)
+                {
+                    var side = delta > 0m ? "BUY" : "SELL";
+                    theoreticalFills.Add(new FillRow(
+                        WakettFillId: 0,
+                        Symbol: normalizedSymbol,
+                        Side: side,
+                        OrderPrice: null,
+                        ExecuteSize: Math.Abs(delta),
+                        ExecutePrice: matchingBar.Close,
+                        Rate: null,
+                        ExecuteTimestamp: order.ScheduledTimestamp));
+                }
+
+                targetPosition = signedTarget;
+                lastMatchingBarIndex = matchingBarIndex;
+            }
+
+            if (targetPosition != 0m && lastMatchingBarIndex >= 0)
+            {
+                var unwindBarIndex = lastMatchingBarIndex + 1;
+
+                if (unwindBarIndex < bars.Count && bars[unwindBarIndex].Close != 0m)
+                {
+                    var unwindBar = bars[unwindBarIndex];
+                    var unwindSide = targetPosition > 0m ? "SELL" : "BUY";
+
+                    theoreticalFills.Add(new FillRow(
+                        WakettFillId: 0,
+                        Symbol: normalizedSymbol,
+                        Side: unwindSide,
+                        OrderPrice: null,
+                        ExecuteSize: Math.Abs(targetPosition),
+                        ExecutePrice: unwindBar.Close,
+                        Rate: null,
+                        ExecuteTimestamp: new DateTimeOffset(unwindBar.BarTimeUtc, TimeSpan.Zero)));
+                }
+            }
+        }
+
+        return theoreticalFills;
+    }
+
+    private static IReadOnlyDictionary<string, decimal> CalculatePositionsAtStartOfDay(
+        IReadOnlyCollection<FillRow> historicalFills)
+    {
+        var positions = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+
+        var fillsBySymbol = historicalFills
+            .GroupBy(f => NormalizeSymbol(f.Symbol))
+            .ToDictionary(g => g.Key, g => g.OrderBy(f => f.ExecuteTimestamp).ToList(), StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (symbol, symbolFills) in fillsBySymbol)
+        {
+            var position = 0m;
+
+            foreach (var fill in symbolFills)
+            {
+                var multiplier = GetCashFlowSideMultiplier(fill.Side);
+                var executeSize = fill.ExecuteSize ?? 0m;
+
+                position += executeSize * multiplier;
+            }
+
+            if (position != 0m)
+            {
+                positions[symbol] = position;
+            }
+        }
+
+        return positions;
+    }
+
+    private RealPnlComputationResult CalculateRealPnlByCurrency(
+        IReadOnlyCollection<FillRow> fills,
+        IReadOnlyDictionary<string, decimal> lastClosePricesBySymbol,
+        IReadOnlyDictionary<string, List<(string Target, decimal Rate)>> conversionGraph)
+    {
+        var totals = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+        var totalTradingCostUsd = 0m;
+
+        var fillsBySymbol = fills
+            .GroupBy(f => NormalizeSymbol(f.Symbol))
+            .ToDictionary(g => g.Key, g => g.OrderBy(f => f.ExecuteTimestamp).ToList(), StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (symbol, symbolFills) in fillsBySymbol)
+        {
+            if (!CurrencyPairParser.TryParse(symbol, out var pair))
+            {
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(pair.QuoteCurrency))
+            {
+                continue;
+            }
+
+            if (!lastClosePricesBySymbol.TryGetValue(symbol, out var lastClose) || lastClose == 0m)
+            {
+                continue;
+            }
+
+            var position = 0m;
+            var pnlQuote = 0m;
+
+            foreach (var fill in symbolFills)
+            {
+                var multiplier = GetCashFlowSideMultiplier(fill.Side);
+                var executeSize = fill.ExecuteSize ?? 0m;
+                var executePrice = fill.ExecutePrice ?? 0m;
+
+                pnlQuote += executePrice * executeSize * multiplier;
+                position += executeSize * multiplier;
+
+                var notionalQuote = Math.Abs(executePrice * executeSize);
+                if (TryConvertToUsd(notionalQuote, pair.QuoteCurrency, conversionGraph, out var notionalUsd))
+                {
+                    totalTradingCostUsd += notionalUsd * TradingCostUsdPerUsdNotional;
+                }
+            }
+
+            if (position != 0m)
+            {
+                var flattenMultiplier = position > 0m ? -1m : 1m;
+                pnlQuote += lastClose * Math.Abs(position) * flattenMultiplier;
+            }
+
+            if (pnlQuote != 0m)
+            {
+                totals[pair.QuoteCurrency] = totals.TryGetValue(pair.QuoteCurrency, out var existing)
+                    ? existing + pnlQuote
+                    : pnlQuote;
+            }
+
+        }
+
+        return new RealPnlComputationResult(totals, totalTradingCostUsd);
+    }
+
+    private IReadOnlyCollection<FillRow> AddVirtualStartingFills(
+        IReadOnlyCollection<FillRow> fills,
+        IReadOnlyDictionary<string, decimal> startingPositions,
+        IReadOnlyDictionary<string, decimal> previousClosePrices,
+        DateTime startUtc)
+    {
+        if (startingPositions.Count == 0)
+        {
+            return fills;
+        }
+
+        var augmented = fills.ToList();
+        var startTimestamp = new DateTimeOffset(startUtc, TimeSpan.Zero);
+
+        foreach (var (symbol, position) in startingPositions)
+        {
+            if (position == 0m)
+            {
+                continue;
+            }
+
+            if (!previousClosePrices.TryGetValue(symbol, out var previousClose) || previousClose == 0m)
+            {
+                continue;
+            }
+
+            var side = position > 0m ? "BUY" : "SELL";
+
+            augmented.Add(new FillRow(
+                WakettFillId: 0,
+                Symbol: symbol,
+                Side: side,
+                OrderPrice: null,
+                ExecuteSize: Math.Abs(position),
+                ExecutePrice: previousClose,
+                Rate: null,
+                ExecuteTimestamp: startTimestamp));
+        }
+
+        return augmented;
+    }
+
+    private decimal? CalculateTotalNotionalUsd(
+        IReadOnlyCollection<FillRow> fills,
+        IReadOnlyDictionary<string, List<(string Target, decimal Rate)>> conversionGraph)
+    {
+        if (fills.Count == 0)
+        {
+            return 0m;
+        }
+
+        var totalUsd = 0m;
+        var convertedAny = false;
+
+        foreach (var fill in fills)
+        {
+            if (!fill.ExecutePrice.HasValue || !fill.ExecuteSize.HasValue)
+            {
+                continue;
+            }
+
+            if (!CurrencyPairParser.TryParse(fill.Symbol, out var pair) || string.IsNullOrWhiteSpace(pair.QuoteCurrency))
+            {
+                continue;
+            }
+
+            var notionalQuote = Math.Abs(fill.ExecutePrice.Value * fill.ExecuteSize.Value);
+
+            if (TryConvertToUsd(notionalQuote, pair.QuoteCurrency, conversionGraph, out var notionalUsd))
+            {
+                totalUsd += notionalUsd;
+                convertedAny = true;
+            }
+        }
+
+        return convertedAny ? totalUsd : (decimal?)null;
+    }
+
+    private static decimal GetCashFlowSideMultiplier(string? side)
+    {
+        if (string.IsNullOrWhiteSpace(side))
+        {
+            return 1m;
+        }
+
+        var normalized = side.Trim().ToUpperInvariant();
+        return normalized.StartsWith("B", StringComparison.Ordinal) ? -1m : 1m;
+    }
+
+    private static decimal GetSideMultiplier(string? side)
+    {
+        if (string.IsNullOrWhiteSpace(side))
+        {
+            return 1m;
+        }
+
+        var normalized = side.Trim().ToUpperInvariant();
+        return normalized.StartsWith("S", StringComparison.Ordinal) ? -1m : 1m;
+    }
+
+    private static IReadOnlyDictionary<string, decimal> ExtractPricesAtTimestamp(
+        IReadOnlyDictionary<string, List<PriceBarRow>> barsBySymbol,
+        DateTime targetUtc)
+    {
+        var result = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (symbol, bars) in barsBySymbol)
+        {
+            var matching = bars.FirstOrDefault(b => b.BarTimeUtc == targetUtc);
+
+            if (matching is not null && matching.Close != 0m)
+            {
+                result[symbol] = matching.Close;
+            }
+        }
+
+        return result;
+    }
+
+    private static IReadOnlyDictionary<string, decimal> ExtractLastClosePricesBeforeTimestamp(
+        IReadOnlyDictionary<string, List<PriceBarRow>> barsBySymbol,
+        DateTime targetUtc)
+    {
+        var result = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (symbol, bars) in barsBySymbol)
+        {
+            var lastBefore = bars
+                .Where(b => b.BarTimeUtc < targetUtc)
+                .OrderBy(b => b.BarTimeUtc)
+                .LastOrDefault();
+
+            if (lastBefore != null)
+            {
+                result[symbol] = lastBefore.Close;
+            }
+        }
+
+        return result;
+    }
+
+    private static IReadOnlyDictionary<string, decimal> ExtractLastClosePrices(
+        IReadOnlyDictionary<string, List<PriceBarRow>> barsBySymbol)
+    {
+        var result = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (symbol, bars) in barsBySymbol)
+        {
+            var lastBar = bars.LastOrDefault(b => b.Close != 0m) ?? bars.LastOrDefault();
+
+            if (lastBar is not null && lastBar.Close != 0m)
+            {
+                result[symbol] = lastBar.Close;
+            }
+        }
+
+        return result;
+    }
+
+    private static IReadOnlyCollection<MissedTrade> IdentifyMissedTrades(
+        IReadOnlyCollection<OrderRow> orders,
+        IReadOnlyCollection<FillRow> fills,
+        IReadOnlyDictionary<string, List<PriceBarRow>> barsBySymbol,
+        int timeframeMinutes)
+    {
+        static decimal AdjustClose(decimal close, bool invert)
+        {
+            if (!invert)
+            {
+                return close;
+            }
+
+            return close != 0m ? 1m / close : 0m;
+        }
+
+        var missedTrades = new List<MissedTrade>();
+
+        var fillsBySymbol = fills
+            .GroupBy(f => NormalizeSymbol(f.Symbol))
+            .ToDictionary(
+                g => g.Key,
+                g => g.OrderBy(f => f.ExecuteTimestamp.UtcDateTime).ToList(),
+                StringComparer.OrdinalIgnoreCase);
+
+        var ordersBySymbol = orders
+            .GroupBy(o => NormalizeSymbol(o.Symbol))
+            .ToDictionary(
+                g => g.Key,
+                g => g.OrderBy(o => o.ScheduledTimestamp.UtcDateTime).ToList(),
+                StringComparer.OrdinalIgnoreCase);
+
+        foreach (var orderGroup in ordersBySymbol)
+        {
+            var normalizedSymbol = orderGroup.Key;
+            var invertPrices = false;
+            List<PriceBarRow>? bars;
+
+            if (!barsBySymbol.TryGetValue(normalizedSymbol, out bars) || bars.Count == 0)
+            {
+                var reversedSymbol = TryGetReversedSymbol(normalizedSymbol);
+
+                if (reversedSymbol is null
+                    || !barsBySymbol.TryGetValue(reversedSymbol, out bars)
+                    || bars.Count == 0)
+                {
+                    continue;
+                }
+
+                invertPrices = true;
+            }
+
+            var symbolFills = fillsBySymbol.TryGetValue(normalizedSymbol, out var fillsList)
+                ? fillsList
+                : new List<FillRow>();
+
+            var cumulativeFilled = 0m;
+            var fillIndex = 0;
+
+            foreach (var order in orderGroup.Value)
+            {
+                var scheduledUtc = order.ScheduledTimestamp.UtcDateTime;
+                var barIndex = bars.FindIndex(b => b.BarTimeUtc == scheduledUtc);
+
+                if (barIndex <= 0 || barIndex >= bars.Count - 1)
+                {
+                    continue;
+                }
+
+                var currentBar = bars[barIndex];
+                var previousBar = bars[barIndex - 1];
+                var nextBar = bars[barIndex + 1];
+
+                var currentClose = AdjustClose(currentBar.Close, invertPrices);
+                var previousClose = AdjustClose(previousBar.Close, invertPrices);
+                var nextClose = AdjustClose(nextBar.Close, invertPrices);
+
+                if (currentClose == 0m || previousClose == 0m)
+                {
+                    continue;
+                }
+
+                var barEnd = currentBar.BarTimeUtc.AddMinutes(timeframeMinutes);
+
+                while (fillIndex < symbolFills.Count && symbolFills[fillIndex].ExecuteTimestamp.UtcDateTime < barEnd)
+                {
+                    var fill = symbolFills[fillIndex];
+                    cumulativeFilled += (fill.ExecuteSize ?? 0m) * GetSideMultiplier(fill.Side);
+                    fillIndex++;
+                }
+
+                if (!CurrencyPairParser.TryParse(order.Symbol, out var pair))
+                {
+                    continue;
+                }
+
+                var targetSize = (order.SizeValue ?? 0m) * (order.Aum ?? 0m) * GetSideMultiplier(order.Side);
+                var filledSize = cumulativeFilled;
+
+                var priceDelta = nextBar.Close - currentBar.Close;
+                var pnlCurrency = pair.QuoteCurrency;
+
+                if (!string.Equals(pair.BaseCurrency, "USD", StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(pair.QuoteCurrency, "USD", StringComparison.OrdinalIgnoreCase)
+                    && currentClose != 0m)
+                {
+                    targetSize *= currentClose;
+                    filledSize *= currentClose;
+                    priceDelta /= currentClose;
+                }
+
+                var sizeDifference = targetSize - filledSize;
+
+                if (Math.Abs(sizeDifference) < 50_000m)
+                {
+                    continue;
+                }
+
+                var missedPnl = sizeDifference * priceDelta;
+
+                if (!string.Equals(pair.QuoteCurrency, "USD", StringComparison.OrdinalIgnoreCase)
+                    && string.Equals(pair.BaseCurrency, "USD", StringComparison.OrdinalIgnoreCase)
+                    && currentBar.Close != 0m)
+                {
+                    missedPnl /= currentBar.Close;
+                    pnlCurrency = "USD";
+                }
+
+                missedTrades.Add(new MissedTrade(
+                    order.Symbol,
+                    currentBar.BarTimeUtc,
+                    targetSize,
+                    filledSize,
+                    sizeDifference,
+                    priceDelta,
+                    missedPnl,
+                    pnlCurrency));
+            }
+        }
+
+        return missedTrades;
+    }
+
+    private decimal? AggregateMissedPnlUsd(
+        IReadOnlyCollection<MissedTrade> missedTrades,
+        IReadOnlyDictionary<string, List<(string Target, decimal Rate)>> conversionGraph)
+    {
+        if (missedTrades.Count == 0)
+        {
+            return 0m;
+        }
+
+        decimal total = 0m;
+        var convertedAny = false;
+
+        foreach (var trade in missedTrades)
+        {
+            if (string.IsNullOrWhiteSpace(trade.PnlCurrency))
+            {
+                continue;
+            }
+
+            decimal conversionRate;
+
+            if (string.Equals(trade.PnlCurrency, "USD", StringComparison.OrdinalIgnoreCase))
+            {
+                conversionRate = 1m;
+            }
+            else if (TryGetConversionRate(trade.PnlCurrency, "USD", conversionGraph, out var rate) && rate != 0m)
+            {
+                conversionRate = rate;
+            }
+            else
+            {
+                _logger.LogWarning(
+                    "Unable to convert missed trade PnL from {Currency} to USD for {Symbol} at {Timestamp}.",
+                    trade.PnlCurrency,
+                    trade.Symbol,
+                    trade.BarTimeUtc);
+                continue;
+            }
+
+            total += trade.MissedPnl * conversionRate;
+            convertedAny = true;
+        }
+
+        return convertedAny ? total : (decimal?)null;
+    }
+
+    private Dictionary<string, List<(string Target, decimal Rate)>> BuildConversionGraph(
+        IReadOnlyDictionary<string, decimal> closePrices)
+    {
+        var graph = new Dictionary<string, List<(string Target, decimal Rate)>>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (symbol, price) in closePrices)
+        {
+            if (price == 0m)
+            {
+                continue;
+            }
+
+            if (!CurrencyPairParser.TryParse(symbol, out var pair))
+            {
+                continue;
+            }
+
+            AddEdge(graph, pair.BaseCurrency, pair.QuoteCurrency, price);
+            AddEdge(graph, pair.QuoteCurrency, pair.BaseCurrency, 1m / price);
+        }
+
+        return graph;
+    }
+
+    private decimal? AggregateToUsd(
+        IReadOnlyDictionary<string, decimal> pnlByCurrency,
+        IReadOnlyDictionary<string, List<(string Target, decimal Rate)>> conversionGraph)
+    {
+        decimal total = 0m;
+        var convertedAny = false;
+
+        foreach (var (currency, amount) in pnlByCurrency)
+        {
+            decimal conversionRate;
+
+            if (string.Equals(currency, "USD", StringComparison.OrdinalIgnoreCase))
+            {
+                conversionRate = 1m;
+            }
+            else if (TryGetConversionRate(currency, "USD", conversionGraph, out var rate) && rate != 0m)
+            {
+                conversionRate = rate;
+            }
+            else
+            {
+                _logger.LogWarning("Unable to convert {Currency} PnL to USD using close prices.", currency);
+                continue;
+            }
+
+            total += amount * conversionRate;
+            convertedAny = true;
+        }
+
+        return convertedAny ? total : null;
+    }
+
+    private IReadOnlyDictionary<string, decimal> ConvertPnlsToUsdByCurrency(
+        IReadOnlyDictionary<string, decimal> pnlByCurrency,
+        IReadOnlyDictionary<string, List<(string Target, decimal Rate)>> conversionGraph)
+    {
+        var converted = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var (currency, amount) in pnlByCurrency)
+        {
+            if (string.Equals(currency, "USD", StringComparison.OrdinalIgnoreCase))
+            {
+                converted[currency] = amount;
+                continue;
+            }
+
+            if (TryGetConversionRate(currency, "USD", conversionGraph, out var rate) && rate != 0m)
+            {
+                converted[currency] = amount * rate;
+            }
+            else
+            {
+                _logger.LogWarning("Unable to convert {Currency} PnL to USD using close prices.", currency);
+            }
+        }
+
+        return converted;
+    }
+
+    private static void AddEdge(
+        IDictionary<string, List<(string Target, decimal Rate)>> graph,
+        string from,
+        string to,
+        decimal rate)
+    {
+        if (rate == 0m)
+        {
+            return;
+        }
+
+        if (!graph.TryGetValue(from, out var edges))
+        {
+            edges = new List<(string Target, decimal Rate)>();
+            graph[from] = edges;
+        }
+
+        edges.Add((to, rate));
+    }
+
+    private static bool TryGetConversionRate(
+        string source,
+        string target,
+        IReadOnlyDictionary<string, List<(string Target, decimal Rate)>> graph,
+        out decimal rate)
+    {
+        if (string.Equals(source, target, StringComparison.OrdinalIgnoreCase))
+        {
+            rate = 1m;
+            return true;
+        }
+
+        if (!graph.TryGetValue(source, out var initialEdges) || initialEdges.Count == 0)
+        {
+            rate = 0m;
+            return false;
+        }
+
+        var queue = new Queue<(string Currency, decimal Accumulated)>();
+        var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { source };
+
+        foreach (var edge in initialEdges)
+        {
+            queue.Enqueue((edge.Target, edge.Rate));
+        }
+
+        while (queue.Count > 0)
+        {
+            var (currency, accumulated) = queue.Dequeue();
+            if (!visited.Add(currency))
+            {
+                continue;
+            }
+
+            if (string.Equals(currency, target, StringComparison.OrdinalIgnoreCase))
+            {
+                rate = accumulated;
+                return true;
+            }
+
+            if (!graph.TryGetValue(currency, out var edges))
+            {
+                continue;
+            }
+
+            foreach (var edge in edges)
+            {
+                queue.Enqueue((edge.Target, accumulated * edge.Rate));
+            }
+        }
+
+        rate = 0m;
+        return false;
+    }
+
+    private bool TryConvertToUsd(
+        decimal amount,
+        string currency,
+        IReadOnlyDictionary<string, List<(string Target, decimal Rate)>> conversionGraph,
+        out decimal converted)
+    {
+        if (string.Equals(currency, "USD", StringComparison.OrdinalIgnoreCase))
+        {
+            converted = amount;
+            return true;
+        }
+
+        if (conversionGraph.Count == 0)
+        {
+            converted = 0m;
+            return false;
+        }
+
+        if (TryGetConversionRate(currency, "USD", conversionGraph, out var rate) && rate != 0m)
+        {
+            converted = amount * rate;
+            return true;
+        }
+
+        _logger.LogWarning("Unable to convert {Currency} trading cost notional to USD using close prices.", currency);
+        converted = 0m;
+        return false;
+    }
+
+    private sealed class RealPnlComputationResult
+    {
+        public RealPnlComputationResult(Dictionary<string, decimal> totals, decimal totalTradingCostUsd)
+        {
+            Totals = totals;
+            TotalTradingCostUsd = totalTradingCostUsd;
+        }
+
+        public Dictionary<string, decimal> Totals { get; }
+
+        public decimal TotalTradingCostUsd { get; }
+    }
+
+    private static TimeZoneInfo NewYorkTimeZone
+        => TimeZoneInfo.FindSystemTimeZoneById(
+            OperatingSystem.IsWindows() ? "Eastern Standard Time" : "America/New_York");
+
+    private static DateOnly GetPreviousWeekday(DateOnly date)
+    {
+        var previous = date.AddDays(-1);
+
+        while (previous.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday)
+        {
+            previous = previous.AddDays(-1);
+        }
+
+        return previous;
+    }
+
+    private string FormatSql(string template)
+    {
+        return template
+            .Replace("{WakettOrder}", _orderTable)
+            .Replace("{WakettFill}", _fillTable)
+            .Replace("{IntradayMarketPriceBarView}", _priceBarView)
+            .Replace("{TimeframeMinute}", _timeframeLiteral);
+    }
+
+    private static string NormalizeSymbolForQuery(string? symbol)
+    {
+        if (string.IsNullOrWhiteSpace(symbol))
+        {
+            return string.Empty;
+        }
+
+        var normalized = symbol.Trim().ToUpperInvariant();
+        return normalized.Replace("/", string.Empty);
+    }
+
+    private static string NormalizeSymbol(string? symbol)
+    {
+        if (string.IsNullOrWhiteSpace(symbol))
+        {
+            return string.Empty;
+        }
+
+        var normalized = symbol.Trim().ToUpperInvariant();
+        normalized = normalized.Replace("/", string.Empty)
+            .Replace("-", string.Empty)
+            .Replace("_", string.Empty)
+            .Replace(" ", string.Empty);
+
+        return normalized;
+    }
+
+    private static string? TryGetReversedSymbol(string normalizedSymbol)
+    {
+        if (!CurrencyPairParser.TryParse(normalizedSymbol, out var pair))
+        {
+            return null;
+        }
+
+        var reversed = NormalizeSymbol(pair.ReversedFormattedSymbol);
+        return reversed.Length > 0 ? reversed : null;
+    }
+
+    private static IReadOnlyCollection<SymbolQuery> BuildSymbolQueries(IEnumerable<string> symbols)
+    {
+        var queries = new Dictionary<string, SymbolQuery>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var symbol in symbols)
+        {
+            if (string.IsNullOrWhiteSpace(symbol))
+            {
+                continue;
+            }
+
+            if (CurrencyPairParser.TryParse(symbol, out var pair))
+            {
+                var querySymbol = NormalizeSymbolForQuery(pair.FormattedSymbol);
+                var targetSymbol = NormalizeSymbol(pair.FormattedSymbol);
+                var invertPrices = false;
+
+                if (string.Equals(pair.BaseCurrency, "USD", StringComparison.OrdinalIgnoreCase))
+                {
+                    querySymbol = NormalizeSymbolForQuery(pair.ReversedFormattedSymbol);
+                    invertPrices = true;
+                }
+
+                queries.TryAdd(querySymbol, new SymbolQuery(querySymbol, targetSymbol, invertPrices));
+            }
+            else
+            {
+                var normalized = NormalizeSymbolForQuery(symbol);
+
+                if (normalized.Length > 0)
+                {
+                    queries.TryAdd(normalized, new SymbolQuery(normalized, NormalizeSymbol(symbol), false));
+                }
+            }
+        }
+
+        return queries.Values;
+    }
+
+    private sealed record SymbolQuery(string QuerySymbol, string TargetSymbol, bool InvertPrice);
+
+    private sealed record OrderRow(
+        long WakettOrderId,
+        string Symbol,
+        string? Side,
+        decimal? SizeValue,
+        decimal? Aum,
+        DateTimeOffset ScheduledTimestamp);
+
+    private static decimal? CalculateExecutionSlippageUsd(IReadOnlyCollection<FillRow> fills)
+    {
+        decimal total = 0m;
+        var hasValue = false;
+
+        foreach (var fill in fills)
+        {
+            var executePrice = fill.ExecutePrice;
+            var orderPrice = fill.OrderPrice;
+            var executeSize = fill.ExecuteSize;
+            var rate = fill.Rate;
+
+            if (!executePrice.HasValue || !orderPrice.HasValue || !executeSize.HasValue || !rate.HasValue)
+            {
+                continue;
+            }
+
+            var sideMultiplier = GetCashFlowSideMultiplier(fill.Side);
+
+            if (sideMultiplier == 0m)
+            {
+                continue;
+            }
+
+            total += (executePrice.Value - orderPrice.Value) * executeSize.Value * rate.Value * sideMultiplier;
+            hasValue = true;
+        }
+
+        return hasValue ? total : null;
+    }
+
+    private sealed record FillRow(
+        long WakettFillId,
+        string Symbol,
+        string? Side,
+        decimal? OrderPrice,
+        decimal? ExecuteSize,
+        decimal? ExecutePrice,
+        decimal? Rate,
+        DateTimeOffset ExecuteTimestamp);
+
+    private sealed record PriceBarRow(string Symbol, DateTime BarTimeUtc, decimal Close);
+
+    private sealed record MissedTrade(
+        string Symbol,
+        DateTime BarTimeUtc,
+        decimal TargetSize,
+        decimal FilledSize,
+        decimal SizeDifference,
+        decimal PriceDelta,
+        decimal MissedPnl,
+        string PnlCurrency);
+}
