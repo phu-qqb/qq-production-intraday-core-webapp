@@ -122,6 +122,9 @@ public class WakettPriceFetcher
         stageStopwatch.Stop();
         _logger.LogInformation("[Wakett] Cleared staging tables in {ElapsedMs} ms.", stageStopwatch.ElapsedMilliseconds);
 
+        var nowUtc = DateTimeOffset.UtcNow;
+        var historicalWindowStart = nowUtc.Subtract(HistoricalWindow);
+
         var missingBars = new List<(int MinuteOffset, DateTime BarTimeUtc)>();
         var missingDetection = Stopwatch.StartNew();
         foreach (var minuteOffset in PriceMinuteOffsets)
@@ -130,6 +133,8 @@ public class WakettPriceFetcher
             var missingForOffset = await FindMissingBarTimestampsAsync(
                 uploadSecurityIds,
                 minuteOffset,
+                historicalWindowStart.UtcDateTime,
+                nowUtc.UtcDateTime,
                 connection,
                 cancellationToken);
             missingBars.AddRange(missingForOffset.Select(bar => (minuteOffset, bar)));
@@ -145,9 +150,6 @@ public class WakettPriceFetcher
             "[Wakett] Completed missing-bar discovery across {OffsetCount} offsets in {ElapsedMs} ms.",
             PriceMinuteOffsets.Count,
             missingDetection.ElapsedMilliseconds);
-
-        var nowUtc = DateTimeOffset.UtcNow;
-        var historicalWindowStart = nowUtc.Subtract(HistoricalWindow);
 
         var fetchableMissingBars = missingBars
             .Where(entry => entry.BarTimeUtc.AddMinutes(entry.MinuteOffset) >= historicalWindowStart.UtcDateTime)
@@ -963,6 +965,92 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         }
     }
 
+    private async Task<IReadOnlyList<DateTime>> FindMissingBarTimestampsAsync(
+        IReadOnlyCollection<int> securityIds,
+        int minuteOffset,
+        DateTime windowStartUtc,
+        DateTime windowEndUtc,
+        IDbConnection? connection,
+        CancellationToken cancellationToken)
+    {
+        if (securityIds.Count == 0)
+            return Array.Empty<DateTime>();
+
+        var normalizedStartUtc = NormalizeToHourUtc(windowStartUtc);
+        var normalizedEndUtc = NormalizeToHourUtc(windowEndUtc);
+        if (normalizedEndUtc < normalizedStartUtc)
+        {
+            return Array.Empty<DateTime>();
+        }
+
+        var expectedTimestamps = BuildExpectedBarHours(normalizedStartUtc, normalizedEndUtc);
+        if (expectedTimestamps.Count == 0)
+        {
+            return Array.Empty<DateTime>();
+        }
+
+        var startHourUtc = expectedTimestamps[0];
+        var endHourUtc = expectedTimestamps[^1];
+        var startUtc = startHourUtc.AddMinutes(minuteOffset);
+        var endUtc = endHourUtc.AddMinutes(minuteOffset);
+
+        var ownsConnection = connection is null;
+        connection ??= await OpenConnectionAsync(cancellationToken);
+
+        try
+        {
+            var rows = await connection.QueryAsync<(int SecurityId, DateTime BarTimeUtc)>(
+                _priceBarWindowQuery,
+                new
+                {
+                    SecurityIds = securityIds.ToArray(),
+                    StartUtc = startUtc,
+                    EndUtc = endUtc,
+                    MinuteOffset = minuteOffset
+                });
+
+            var existing = new Dictionary<DateTime, HashSet<int>>();
+            foreach (var row in rows)
+            {
+                var normalized = DateTime.SpecifyKind(row.BarTimeUtc, DateTimeKind.Utc);
+                normalized = new DateTime(
+                    normalized.Year,
+                    normalized.Month,
+                    normalized.Day,
+                    normalized.Hour,
+                    0,
+                    0,
+                    DateTimeKind.Utc);
+
+                if (!existing.TryGetValue(normalized, out var set))
+                {
+                    set = new HashSet<int>();
+                    existing[normalized] = set;
+                }
+
+                set.Add(row.SecurityId);
+            }
+
+            var missing = new List<DateTime>();
+            foreach (var timestamp in expectedTimestamps)
+            {
+                if (!existing.TryGetValue(timestamp, out var set) || set.Count < securityIds.Count)
+                {
+                    missing.Add(timestamp);
+                }
+            }
+
+            return missing;
+        }
+        finally
+        {
+            if (ownsConnection)
+            {
+                connection.Dispose();
+            }
+        }
+    }
+
     private async Task<bool> ArePricesMissingForTimestampAsync(
         IReadOnlyCollection<int> securityIds,
         DateTime expectedBarTimestampUtc,
@@ -1031,6 +1119,30 @@ WHERE IsActive = 1 AND Symbol IS NOT NULL AND LTRIM(RTRIM(Symbol)) <> ''";
         }
 
         result.Reverse();
+        return result;
+    }
+
+    internal static IReadOnlyList<DateTime> BuildExpectedBarHours(DateTime startHourUtc, DateTime endHourUtc)
+    {
+        var normalizedStart = NormalizeToHourUtc(startHourUtc);
+        var normalizedEnd = NormalizeToHourUtc(endHourUtc);
+        if (normalizedEnd < normalizedStart)
+        {
+            return Array.Empty<DateTime>();
+        }
+
+        var result = new List<DateTime>();
+        var current = normalizedStart;
+        while (current <= normalizedEnd)
+        {
+            if (!IsWeekend(current))
+            {
+                result.Add(current);
+            }
+
+            current = current.AddHours(1);
+        }
+
         return result;
     }
 
