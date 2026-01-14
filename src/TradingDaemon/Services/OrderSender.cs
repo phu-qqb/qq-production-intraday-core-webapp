@@ -284,15 +284,15 @@ public class OrderSender
             _logger.LogWarning("Wakett order submission returned no response body.");
         }
 
-        ////await PersistOrderResponseAsync(
-        ////    connection,
-        ////    request,
-        ////    response,
-        ////    orderCodeLookup,
-        ////    orderTimestampUtc,
-        ////    submissionTimeUtc,
-        ////    receivedAtUtc,
-        ////    cancellationToken);
+        await PersistOrderResponseAsync(
+            connection,
+            request,
+            response,
+            orderCodeLookup,
+            orderTimestampUtc,
+            submissionTimeUtc,
+            receivedAtUtc,
+            cancellationToken);
 
         ////await PersistOrderResponseAsync(
         ////    connection,
