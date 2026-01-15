@@ -265,7 +265,7 @@ ORDER BY Symbol, BarTimeUtc";
             ? $"Total missed PnL: {missedTradesCostUsd.Value}"
             : "Total missed PnL could not be fully converted to USD.");
 
-        var executionSlippageUsd = CalculateExecutionSlippageUsd(fills);
+        var executionSlippageUsd = CalculateExecutionSlippageUsd(fills, barsBySymbol);
 
         if (hasConversionPrices)
         {
@@ -1172,7 +1172,9 @@ ORDER BY Symbol, BarTimeUtc";
         decimal? Aum,
         DateTimeOffset ScheduledTimestamp);
 
-    private static decimal? CalculateExecutionSlippageUsd(IReadOnlyCollection<FillRow> fills)
+    private static decimal? CalculateExecutionSlippageUsd(
+        IReadOnlyCollection<FillRow> fills,
+        IReadOnlyDictionary<string, List<PriceBarRow>> barsBySymbol)
     {
         decimal total = 0m;
         var hasValue = false;
@@ -1180,11 +1182,11 @@ ORDER BY Symbol, BarTimeUtc";
         foreach (var fill in fills)
         {
             var executePrice = fill.ExecutePrice;
-            var orderPrice = fill.OrderPrice;
+            var priceBarClose = TryGetClosestBarClose(fill, barsBySymbol);
             var executeSize = fill.ExecuteSize;
             var rate = fill.Rate;
 
-            if (!executePrice.HasValue || !orderPrice.HasValue || !executeSize.HasValue || !rate.HasValue)
+            if (!executePrice.HasValue || !priceBarClose.HasValue || !executeSize.HasValue || !rate.HasValue)
             {
                 continue;
             }
@@ -1196,11 +1198,102 @@ ORDER BY Symbol, BarTimeUtc";
                 continue;
             }
 
-            total += (executePrice.Value - orderPrice.Value) * executeSize.Value * rate.Value * sideMultiplier;
+            total += (executePrice.Value - priceBarClose.Value) * executeSize.Value * rate.Value * sideMultiplier;
             hasValue = true;
         }
 
         return hasValue ? total : null;
+    }
+
+    private static decimal? TryGetClosestBarClose(
+        FillRow fill,
+        IReadOnlyDictionary<string, List<PriceBarRow>> barsBySymbol)
+    {
+        var normalizedSymbol = NormalizeSymbol(fill.Symbol);
+
+        if (!barsBySymbol.TryGetValue(normalizedSymbol, out var bars) || bars.Count == 0)
+        {
+            return null;
+        }
+
+        var targetUtc = fill.ExecuteTimestamp.UtcDateTime;
+        return FindClosestNonZeroClose(bars, targetUtc);
+    }
+
+    private static decimal? FindClosestNonZeroClose(List<PriceBarRow> bars, DateTime targetUtc)
+    {
+        var low = 0;
+        var high = bars.Count - 1;
+        var insertIndex = bars.Count;
+
+        while (low <= high)
+        {
+            var mid = low + (high - low) / 2;
+            var compare = bars[mid].BarTimeUtc.CompareTo(targetUtc);
+
+            if (compare == 0)
+            {
+                insertIndex = mid;
+                break;
+            }
+
+            if (compare < 0)
+            {
+                low = mid + 1;
+            }
+            else
+            {
+                insertIndex = mid;
+                high = mid - 1;
+            }
+        }
+
+        var left = Math.Clamp(insertIndex - 1, 0, bars.Count - 1);
+        var right = Math.Clamp(insertIndex, 0, bars.Count - 1);
+        var bestDistance = TimeSpan.MaxValue;
+        decimal? bestClose = null;
+
+        while (left >= 0 || right < bars.Count)
+        {
+            if (left >= 0)
+            {
+                var leftBar = bars[left];
+                if (leftBar.Close != 0m)
+                {
+                    var distance = (targetUtc - leftBar.BarTimeUtc).Duration();
+                    if (distance < bestDistance)
+                    {
+                        bestDistance = distance;
+                        bestClose = leftBar.Close;
+                    }
+                }
+
+                left--;
+            }
+
+            if (right < bars.Count)
+            {
+                var rightBar = bars[right];
+                if (rightBar.Close != 0m)
+                {
+                    var distance = (rightBar.BarTimeUtc - targetUtc).Duration();
+                    if (distance < bestDistance)
+                    {
+                        bestDistance = distance;
+                        bestClose = rightBar.Close;
+                    }
+                }
+
+                right++;
+            }
+
+            if (bestClose.HasValue && (left < 0 || right >= bars.Count))
+            {
+                break;
+            }
+        }
+
+        return bestClose;
     }
 
     private sealed record FillRow(
