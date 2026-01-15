@@ -229,7 +229,7 @@ public class EmailNotificationService : IEmailNotificationService, IDisposable
 
     private static string FormatOptionalPnl(decimal? value)
         => value.HasValue
-            ? value.Value.ToString("#,##0", CultureInfo.InvariantCulture)
+            ? value.Value.ToString("#,##0.00", CultureInfo.InvariantCulture)
             : "n/a";
 
     private static string FormatOptionalNumber(decimal? value)
@@ -277,16 +277,17 @@ public class EmailNotificationService : IEmailNotificationService, IDisposable
         var realLines = new (string Label, decimal? Value)[]
         {
             ("Real PnL (net)", slippageResult.RealPnlUsd),
-            ("Commissions ($5/M)", slippageResult.CommissionsUsd),
-            ("Execution slippage", slippageResult.ExecutionSlippageUsd),
-            ("Missed trades PnL", slippageResult.MissedTradesPnlUsd)
+            ("Commissions ($5/M)", -slippageResult.CommissionsUsd),
+            ("Execution slippage", slippageResult.ExecutionSlippageUsd + slippageResult.CommissionsUsd),
+            ("Missed trades PnL", slippageResult.MissedTradesPnlUsd),
+            ("Total cost per million", -slippageResult.ExecutionSlippageUsd / slippageResult.CommissionsUsd * 5)
         };
 
         var theoreticalLines = new (string Label, decimal? Value)[]
         {
             ("Theoretical PnL (net)", slippageResult.TheoreticalNetPnlUsd),
             ("Theoretical PnL (gross)", slippageResult.TheoreticalPnlUsd),
-            ("Theoretical costs ($10/M)", slippageResult.TheoreticalTradingCostUsd)
+            ("Theoretical costs ($10/M)", -slippageResult.TheoreticalTradingCostUsd)
         };
 
         sb.Append("<h2>Execution summary</h2>");
@@ -301,7 +302,7 @@ public class EmailNotificationService : IEmailNotificationService, IDisposable
         {
             sb.AppendFormat(
                 CultureInfo.InvariantCulture,
-                "<tr><th colspan=\"2\" style=\"text-align:left;padding:8px 0 4px;font-size:14px;\">{0}</th></tr>",
+                "<tr><th colspan=\"2\" style=\"text-align:left;padding:8px 0 4px;font-size:14px;\">{0:0.00}</th></tr>",
                 WebUtility.HtmlEncode(title));
 
             foreach (var (label, value) in lines)
@@ -313,7 +314,7 @@ public class EmailNotificationService : IEmailNotificationService, IDisposable
                     WebUtility.HtmlEncode(label));
                 sb.AppendFormat(
                     CultureInfo.InvariantCulture,
-                    "<td style=\"padding:4px 0 4px 12px;text-align:right;font-family:monospace;\">{0}</td>",
+                    "<td style=\"padding:4px 0 4px 12px;text-align:right;font-family:monospace;\">{0:0.00}</td>",
                     WebUtility.HtmlEncode(FormatOptionalPnl(value)));
                 sb.Append("</tr>");
             }
